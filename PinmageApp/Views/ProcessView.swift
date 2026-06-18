@@ -5,6 +5,7 @@ struct ProcessView: View {
     @ObservedObject var manager: PinmageManager
     @ObservedObject var settings: AppSettings
     @State private var isDraggingOver = false
+    @State private var showOverwriteAlert = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -69,8 +70,10 @@ struct ProcessView: View {
                         .buttonStyle(.bordered)
                         
                         Button(action: {
-                            Task {
-                                await manager.startProcessing(settings: settings)
+                            if settings.overwriteOriginals {
+                                showOverwriteAlert = true
+                            } else {
+                                startProcessingQueue()
                             }
                         }) {
                             HStack {
@@ -154,6 +157,22 @@ struct ProcessView: View {
             }
         }
         .background(isDraggingOver ? Color.emerald.opacity(0.05) : Color.clear)
+        .alert(isPresented: $showOverwriteAlert) {
+            Alert(
+                title: Text("Overwrite Original Files?"),
+                message: Text("WARNING: Proceeding will replace the source images on your disk with the new date and location metadata. This action cannot be undone. Make sure you have backups!"),
+                primaryButton: .destructive(Text("Overwrite Files")) {
+                    startProcessingQueue()
+                },
+                secondaryButton: .cancel()
+            )
+        }
+    }
+    
+    private func startProcessingQueue() {
+        Task {
+            await manager.startProcessing(settings: settings)
+        }
     }
     
     private func selectFiles() {

@@ -108,8 +108,9 @@ struct SettingsView: View {
                                 Button("Choose Folder...") {
                                     selectFolder()
                                 }
+                                .disabled(settings.overwriteOriginals)
                                 
-                                if !settings.outputFolderPath.isEmpty {
+                                if !settings.outputFolderPath.isEmpty && !settings.overwriteOriginals {
                                     Button(action: {
                                         settings.outputFolderPath = ""
                                     }) {
@@ -123,6 +124,54 @@ struct SettingsView: View {
                             Text("Default leaves a copy with a suffix '_processed' in the source image location. If a different output folder is specified, files will be saved with their original names inside that folder.")
                                 .font(.system(size: 10))
                                 .foregroundColor(.secondary)
+                        }
+                        .disabled(settings.overwriteOriginals)
+                        .opacity(settings.overwriteOriginals ? 0.5 : 1.0)
+                        
+                        Divider().background(Color.white.opacity(0.1))
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle("Overwrite original files instead of creating copies", isOn: $settings.overwriteOriginals)
+                                .toggleStyle(.checkbox)
+                                .font(.body)
+                                .foregroundColor(.white)
+                            
+                            if settings.overwriteOriginals {
+                                HStack(alignment: .top, spacing: 6) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundColor(.red)
+                                        .font(.subheadline)
+                                    Text("WARNING: Overwriting original files replaces the source images on your disk. This action cannot be undone. Please ensure you have backups of your photos.")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundColor(.red)
+                                        .lineLimit(nil)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                .padding(.top, 4)
+                            }
+                        }
+                        
+                        if !settings.overwriteOriginals {
+                            Divider().background(Color.white.opacity(0.1))
+                            
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Filename Renaming Format")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .fontWeight(.semibold)
+                                
+                                Picker("", selection: $settings.filenamePattern) {
+                                    ForEach(FilenamePattern.allCases) { pattern in
+                                        Text(pattern.rawValue).tag(pattern)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .frame(maxWidth: 320)
+                                
+                                Text("Automatically formats output copies to simplify sorting and chronological indexing (e.g. YYYY-MM-DD_ID_Location).")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                            }
                         }
                     }
                     .padding(20)

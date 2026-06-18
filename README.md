@@ -28,11 +28,3 @@ You can compile and run Pinmage locally without using Xcode:
    ```
 
 This will automatically compile Swift sources, generate app icons, sign the app bundle, bypass Gatekeeper, install the app to `/Applications/Pinmage.app`, and package a shareable **`Pinmage.dmg`** in the project root.
-
----
-
-## 📂 Project Structure
-
-* **`PinmageApp/`**: Native SwiftUI source code, layout views, metadata writers, and Info plists.
-* **`website/`**: Single-page product landing website with automated build-time version sync.
-* **`install.sh`**: Automated Xcode-free packaging compiler script.

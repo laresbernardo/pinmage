@@ -192,25 +192,36 @@ class PinmageManager: ObservableObject {
                     self.imageItems[index].dateIsInherited = isInherited
                 }
                 
-                let outputFolderURL: URL
-                if !settings.outputFolderPath.isEmpty {
-                    outputFolderURL = URL(fileURLWithPath: settings.outputFolderPath)
-                } else {
-                    // Default is same directory as the original file
-                    outputFolderURL = item.fileURL.deletingLastPathComponent()
-                }
-                
-                // Create output folder if it doesn't exist
-                try FileManager.default.createDirectory(at: outputFolderURL, withIntermediateDirectories: true, attributes: nil)
-                
                 let outputURL: URL
-                if outputFolderURL.path == item.fileURL.deletingLastPathComponent().path {
-                    // Avoid overwriting by adding suffix
-                    let baseName = item.fileURL.deletingPathExtension().lastPathComponent
-                    let ext = item.fileURL.pathExtension
-                    outputURL = outputFolderURL.appendingPathComponent("\(baseName)_processed.\(ext)")
+                if settings.overwriteOriginals {
+                    outputURL = item.fileURL
                 } else {
-                    outputURL = outputFolderURL.appendingPathComponent(item.fileName)
+                    let outputFolderURL: URL
+                    if !settings.outputFolderPath.isEmpty {
+                        outputFolderURL = URL(fileURLWithPath: settings.outputFolderPath)
+                    } else {
+                        // Default is same directory as the original file
+                        outputFolderURL = item.fileURL.deletingLastPathComponent()
+                    }
+                    
+                    // Create output folder if it doesn't exist
+                    try FileManager.default.createDirectory(at: outputFolderURL, withIntermediateDirectories: true, attributes: nil)
+                    
+                    var resolvedName = resolveOutputFilename(
+                        fileURL: item.fileURL,
+                        date: parsedDate,
+                        place: geminiResult.place,
+                        pattern: settings.filenamePattern
+                    )
+                    
+                    // Prevent accidental overwriting of the source file if output folder matches the input folder and the name didn't change
+                    if outputFolderURL.path == item.fileURL.deletingLastPathComponent().path && resolvedName == item.fileName {
+                        let baseName = item.fileURL.deletingPathExtension().lastPathComponent
+                        let ext = item.fileURL.pathExtension
+                        resolvedName = "\(baseName)_processed.\(ext)"
+                    }
+                    
+                    outputURL = outputFolderURL.appendingPathComponent(resolvedName)
                 }
                 
                 // Step 4: Write Metadata to copy file
@@ -269,6 +280,45 @@ class PinmageManager: ObservableObject {
         if let date = formatter.date(from: cleanStr) { return date }
         
         return nil
+    }
+    
+    private func resolveOutputFilename(fileURL: URL, date: Date?, place: String?, pattern: FilenamePattern) -> String {
+        let baseName = fileURL.deletingPathExtension().lastPathComponent
+        let ext = fileURL.pathExtension
+        
+        var dateStr = ""
+        if let date = date {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd"
+            dateStr = formatter.string(from: date)
+        }
+        
+        var placeStr = ""
+        if let place = place, !place.isEmpty, place.lowercased() != "null" {
+            placeStr = place
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { !$0.isEmpty }
+                .joined(separator: "-")
+        }
+        
+        switch pattern {
+        case .original:
+            return fileURL.lastPathComponent
+        case .dateAndName:
+            if !dateStr.isEmpty {
+                return "\(dateStr)_\(baseName).\(ext)"
+            }
+            return fileURL.lastPathComponent
+        case .fullArchive:
+            if !dateStr.isEmpty && !placeStr.isEmpty {
+                return "\(dateStr)_\(baseName)_\(placeStr).\(ext)"
+            } else if !dateStr.isEmpty {
+                return "\(dateStr)_\(baseName).\(ext)"
+            } else if !placeStr.isEmpty {
+                return "\(baseName)_\(placeStr).\(ext)"
+            }
+            return fileURL.lastPathComponent
+        }
     }
 }
 
