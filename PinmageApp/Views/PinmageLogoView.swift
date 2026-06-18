@@ -115,7 +115,7 @@ struct PinmageLogoView: View {
     }
     
     private func startAnimation() {
-        withAnimation(.linear(duration: 3.0).repeatForever(false)) {
+        withAnimation(.linear(duration: 3.0).repeatForever(autoreverses: false)) {
             rotationAngle = 360.0
         }
     }

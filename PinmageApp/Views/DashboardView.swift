@@ -73,16 +73,16 @@ struct DashboardView: View {
                                     .frame(height: 200)
                                     .chartXAxis {
                                         AxisMarks(values: .automatic) { _ in
-                                            AxisGridLine().stroke(Color.white.opacity(0.05))
-                                            AxisTick().stroke(Color.white.opacity(0.1))
-                                            AxisValueLabel().foregroundColor(.secondary)
+                                            AxisGridLine().foregroundStyle(Color.white.opacity(0.05))
+                                            AxisTick().foregroundStyle(Color.white.opacity(0.1))
+                                            AxisValueLabel().foregroundStyle(.secondary)
                                         }
                                     }
                                     .chartYAxis {
                                         AxisMarks(values: .automatic) { _ in
-                                            AxisGridLine().stroke(Color.white.opacity(0.05))
-                                            AxisTick().stroke(Color.white.opacity(0.1))
-                                            AxisValueLabel().foregroundColor(.secondary)
+                                            AxisGridLine().foregroundStyle(Color.white.opacity(0.05))
+                                            AxisTick().foregroundStyle(Color.white.opacity(0.1))
+                                            AxisValueLabel().foregroundStyle(.secondary)
                                         }
                                     }
                                 }

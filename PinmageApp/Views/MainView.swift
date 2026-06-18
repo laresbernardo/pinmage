@@ -27,7 +27,10 @@ struct MainView: View {
             VStack(alignment: .leading, spacing: 20) {
                 // Logo Section
                 HStack(spacing: 12) {
-                    PinmageLogoView(isAnimating: manager.isProcessing, size: 34)
+                    Image("AppIcon")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 34, height: 34)
                         .shadow(color: Color.cyan.opacity(0.25), radius: 4)
                     
                     VStack(alignment: .leading, spacing: 2) {
@@ -91,7 +94,7 @@ struct MainView: View {
                 
                 // Sidebar Footer Brand info
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Pinmage macOS v1.0.0")
+                    Text("Pinmage macOS v\(appVersion)")
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
                     Text("Powered by Gemini AI")
@@ -123,5 +126,9 @@ struct MainView: View {
             .frame(minWidth: 600, minHeight: 500)
         }
         .preferredColorScheme(.dark)
+    }
+    
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?.?.?"
     }
 }
