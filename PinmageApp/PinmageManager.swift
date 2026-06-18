@@ -444,7 +444,6 @@ import MapKit
         
         let itemsToProcessIndices = imageItems.indices.filter { imageItems[$0].status == .analyzed }
         
-        let certaintyThreshold = settings.certaintyThreshold
         let overwriteOriginals = settings.overwriteOriginals
         let outputFolderPath = settings.outputFolderPath
         let filenamePattern = settings.filenamePattern
@@ -611,7 +610,7 @@ import MapKit
         }
     }
     
-    private static func calculateCost(inputTokens: Int, outputTokens: Int, model: String) -> Double {
+    private nonisolated static func calculateCost(inputTokens: Int, outputTokens: Int, model: String) -> Double {
         let isPro = model.contains("pro")
         let inputRate = isPro ? 1.25 : 0.075
         let outputRate = isPro ? 5.00 : 0.30
