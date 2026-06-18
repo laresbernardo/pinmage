@@ -67,7 +67,7 @@ enum FilenamePattern: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-class AppSettings: ObservableObject {
+@MainActor class AppSettings: ObservableObject {
     @Published var apiKey: String {
         didSet {
             UserDefaults.standard.set(apiKey, forKey: "pinmage_api_key")

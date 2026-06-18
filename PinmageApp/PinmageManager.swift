@@ -1,8 +1,9 @@
 import SwiftUI
 import CoreLocation
 import Combine
+import MapKit
 
-class PinmageManager: ObservableObject {
+@MainActor class PinmageManager: ObservableObject {
     @Published var imageItems: [ImageItem] = []
     @Published var isProcessing = false
     @Published var currentProgress: Double = 0.0
@@ -53,32 +54,24 @@ class PinmageManager: ObservableObject {
         var allItems = imageItems + newItems
         allItems.sort { $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending }
         
-        DispatchQueue.main.async {
-            self.imageItems = allItems
-        }
+        self.imageItems = allItems
     }
     
     func removeImage(id: UUID) {
-        DispatchQueue.main.async {
-            self.imageItems.removeAll { $0.id == id }
-        }
+        self.imageItems.removeAll { $0.id == id }
     }
     
     func clearAll() {
-        DispatchQueue.main.async {
-            self.imageItems.removeAll()
-            self.currentProgress = 0.0
-            self.currentProcessingFile = ""
-            self.totalProcessedCount = 0
-            self.successfulCount = 0
-            self.failedCount = 0
-        }
+        self.imageItems.removeAll()
+        self.currentProgress = 0.0
+        self.currentProcessingFile = ""
+        self.totalProcessedCount = 0
+        self.successfulCount = 0
+        self.failedCount = 0
     }
     
     func stopProcessing() {
-        DispatchQueue.main.async {
-            self.isProcessing = false
-        }
+        self.isProcessing = false
     }
     
     private struct AnalysisUpdate {
@@ -90,30 +83,42 @@ class PinmageManager: ObservableObject {
         let longitude: Double?
     }
     
+    func updateItemStatus(index: Int, status: ProcessStatus, fileName: String? = nil, place: String? = nil) {
+        if let fileName = fileName {
+            self.currentProcessingFile = fileName
+        }
+        if index < self.imageItems.count {
+            self.imageItems[index].status = status
+            if let place = place {
+                self.imageItems[index].detectedPlace = place
+            }
+        }
+    }
+    
+    func updateSpend(settings: AppSettings, cost: Double) {
+        settings.cumulativeSpend += cost
+    }
+    
     /// Phase 1: Calls AI to analyze dates, locations, coordinates, and certainty scores in parallel with concurrency limits.
     func startAnalysis(settings: AppSettings) async {
         guard !isProcessing else { return }
         
         // Check API key
         if settings.apiKey.isEmpty {
-            DispatchQueue.main.async {
-                for i in 0..<self.imageItems.count {
-                    if self.imageItems[i].status == .pending {
-                        self.imageItems[i].status = .failed
-                        self.imageItems[i].errorMessage = "API Key is missing. Please set it in Settings."
-                    }
+            for i in 0..<self.imageItems.count {
+                if self.imageItems[i].status == .pending {
+                    self.imageItems[i].status = .failed
+                    self.imageItems[i].errorMessage = "API Key is missing. Please set it in Settings."
                 }
             }
             return
         }
         
-        DispatchQueue.main.async {
-            self.isProcessing = true
-            self.totalProcessedCount = 0
-            self.successfulCount = 0
-            self.failedCount = 0
-            self.currentProgress = 0.0
-        }
+        self.isProcessing = true
+        self.totalProcessedCount = 0
+        self.successfulCount = 0
+        self.failedCount = 0
+        self.currentProgress = 0.0
         
         let indicesToProcess = imageItems.indices.filter {
             let item = imageItems[$0]
@@ -121,25 +126,40 @@ class PinmageManager: ObservableObject {
         }
         
         if indicesToProcess.isEmpty {
-            DispatchQueue.main.async {
-                self.isProcessing = false
-                self.currentProgress = 1.0
-                self.currentProcessingFile = "Done"
-            }
+            self.isProcessing = false
+            self.currentProgress = 1.0
+            self.currentProcessingFile = "Done"
             return
         }
+        
+        let apiKey = settings.apiKey
+        let modelName = settings.modelName
+        let customPrompt = settings.customPrompt
+        let reduceImageSize = settings.reduceImageSize
+        let maxConcurrentRequests = settings.maxConcurrentRequests
         
         // Concurrency-limited processing loop
         await withTaskGroup(of: AnalysisUpdate.self) { group in
             var activeIndex = 0
-            let limit = settings.maxConcurrentRequests
+            let limit = maxConcurrentRequests
             
             // Spawn initial batch up to concurrency limit
             while activeIndex < limit && activeIndex < indicesToProcess.count {
                 let idx = indicesToProcess[activeIndex]
                 activeIndex += 1
+                let item = imageItems[idx]
                 group.addTask {
-                    await self.analyzeSingleItem(index: idx, settings: settings)
+                    await self.analyzeSingleItem(
+                        index: idx,
+                        itemURL: item.fileURL,
+                        fileName: item.fileName,
+                        apiKey: apiKey,
+                        modelName: modelName,
+                        customPrompt: customPrompt,
+                        reduceImageSize: reduceImageSize,
+                        manager: self,
+                        settings: settings
+                    )
                 }
             }
             
@@ -148,72 +168,82 @@ class PinmageManager: ObservableObject {
             while let update = await group.next() {
                 completedCount += 1
                 
-                // Update UI state with the result on main thread
-                DispatchQueue.main.async {
-                    self.applyUpdate(update)
-                    self.currentProgress = Double(completedCount) / Double(indicesToProcess.count)
-                }
+                self.applyUpdate(update)
+                self.currentProgress = Double(completedCount) / Double(indicesToProcess.count)
                 
                 // If cancelled, stop spawning new tasks
-                let stillProcessing = await MainActor.run { self.isProcessing }
-                if !stillProcessing {
+                if !self.isProcessing {
                     break
                 }
                 
                 if activeIndex < indicesToProcess.count {
                     let idx = indicesToProcess[activeIndex]
                     activeIndex += 1
+                    let item = imageItems[idx]
                     group.addTask {
-                        await self.analyzeSingleItem(index: idx, settings: settings)
+                        await self.analyzeSingleItem(
+                            index: idx,
+                            itemURL: item.fileURL,
+                            fileName: item.fileName,
+                            apiKey: apiKey,
+                            modelName: modelName,
+                            customPrompt: customPrompt,
+                            reduceImageSize: reduceImageSize,
+                            manager: self,
+                            settings: settings
+                        )
                     }
                 }
             }
         }
         
         // Phase 1b: Sequential chronological date fallback (interpolation)
-        DispatchQueue.main.async {
-            var lastKnownDate: Date? = nil
-            
-            // Re-evaluate previous successful images first to establish the initial fallback state
-            for item in self.imageItems {
-                if (item.status == .analyzed || item.status == .completed) && !item.dateIsInherited {
-                    if let date = item.detectedDate {
-                        lastKnownDate = date
-                    }
+        var lastKnownDate: Date? = nil
+        
+        // Re-evaluate previous successful images first to establish the initial fallback state
+        for item in self.imageItems {
+            if (item.status == .analyzed || item.status == .completed) && !item.dateIsInherited {
+                if let date = item.detectedDate {
+                    lastKnownDate = date
                 }
             }
-            
-            // Pass through all images to apply the fallback
-            for index in 0..<self.imageItems.count {
-                let item = self.imageItems[index]
-                if item.status == .analyzed || item.status == .completed {
-                    if let date = item.detectedDate, !item.dateIsInherited {
-                        lastKnownDate = date
-                    } else if item.detectedDate == nil || item.dateIsInherited {
-                        if let previousDate = lastKnownDate {
-                            self.imageItems[index].detectedDate = previousDate
-                            self.imageItems[index].dateIsInherited = true
-                        }
-                    }
-                }
-            }
-            
-            self.isProcessing = false
-            self.currentProgress = 1.0
-            self.currentProcessingFile = "Done"
         }
+        
+        // Pass through all images to apply the fallback
+        for index in 0..<self.imageItems.count {
+            let item = self.imageItems[index]
+            if item.status == .analyzed || item.status == .completed {
+                if let date = item.detectedDate, !item.dateIsInherited {
+                    lastKnownDate = date
+                } else if item.detectedDate == nil || item.dateIsInherited {
+                    if let previousDate = lastKnownDate {
+                        self.imageItems[index].detectedDate = previousDate
+                        self.imageItems[index].dateIsInherited = true
+                    }
+                }
+            }
+        }
+        
+        self.isProcessing = false
+        self.currentProgress = 1.0
+        self.currentProcessingFile = "Done"
     }
     
-    private func analyzeSingleItem(index: Int, settings: AppSettings) async -> AnalysisUpdate {
-        let item = self.imageItems[index]
-        
-        DispatchQueue.main.async {
-            self.currentProcessingFile = item.fileName
-            self.imageItems[index].status = .processing
-        }
+    private nonisolated func analyzeSingleItem(
+        index: Int,
+        itemURL: URL,
+        fileName: String,
+        apiKey: String,
+        modelName: String,
+        customPrompt: String,
+        reduceImageSize: Bool,
+        manager: PinmageManager,
+        settings: AppSettings
+    ) async -> AnalysisUpdate {
+        await manager.updateItemStatus(index: index, status: .processing, fileName: fileName)
         
         // 1. Compute image hash for local cache
-        let hash = CacheManager.computeHash(for: item.fileURL) ?? ""
+        let hash = CacheManager.computeHash(for: itemURL) ?? ""
         var geminiResult: GeminiManager.GeminiResult? = nil
         var errorDescription: String? = nil
         
@@ -222,9 +252,7 @@ class PinmageManager: ObservableObject {
             geminiResult = cachedResult
         } else {
             // Cache miss - Analyze with AI
-            DispatchQueue.main.async {
-                self.imageItems[index].status = .callingAPI
-            }
+            await manager.updateItemStatus(index: index, status: .callingAPI)
             
             // Retry with exponential backoff (up to 3 attempts)
             var attempts = 0
@@ -232,28 +260,26 @@ class PinmageManager: ObservableObject {
             var delayNanoseconds: UInt64 = 2_000_000_000 // 2 seconds
             
             while attempts < maxAttempts {
-                let stillProcessing = await MainActor.run { self.isProcessing }
+                let stillProcessing = await manager.isProcessing
                 if !stillProcessing { break }
                 do {
                     let response = try await GeminiManager.analyzeImage(
-                        fileURL: item.fileURL,
-                        apiKey: settings.apiKey,
-                        modelName: settings.modelName,
-                        prompt: settings.customPrompt,
-                        reduceSize: settings.reduceImageSize
+                        fileURL: itemURL,
+                        apiKey: apiKey,
+                        modelName: modelName,
+                        prompt: customPrompt,
+                        reduceSize: reduceImageSize
                     )
                     geminiResult = response.result
                     
-                    let cost = calculateCost(inputTokens: response.inputTokens, outputTokens: response.outputTokens, model: settings.modelName)
-                    await MainActor.run {
-                        settings.cumulativeSpend += cost
-                    }
+                    let cost = Self.calculateCost(inputTokens: response.inputTokens, outputTokens: response.outputTokens, model: modelName)
+                    await manager.updateSpend(settings: settings, cost: cost)
                     break // success
                 } catch {
                     attempts += 1
                     errorDescription = error.localizedDescription
-                    print("Attempt \(attempts) failed for \(item.fileName): \(error.localizedDescription)")
-                    let processing = await MainActor.run { self.isProcessing }
+                    print("Attempt \(attempts) failed for \(fileName): \(error.localizedDescription)")
+                    let processing = await manager.isProcessing
                     if attempts < maxAttempts && processing {
                         try? await Task.sleep(nanoseconds: delayNanoseconds)
                         delayNanoseconds *= 2
@@ -278,16 +304,13 @@ class PinmageManager: ObservableObject {
             )
         }
         
-        // 3. Optional CoreLocation Geocoding Fallback
+        // 3. Optional CoreLocation/MapKit Geocoding Fallback
         var latitude: Double? = result.latitude
         var longitude: Double? = result.longitude
         
         if let place = result.place, !place.isEmpty, place.lowercased() != "null" {
             if latitude == nil || longitude == nil {
-                DispatchQueue.main.async {
-                    self.imageItems[index].status = .geocoding
-                    self.imageItems[index].detectedPlace = place
-                }
+                await manager.updateItemStatus(index: index, status: .geocoding, place: place)
                 
                 if let coords = await GeocodingManager.geocode(address: place) {
                     latitude = coords.latitude
@@ -338,14 +361,18 @@ class PinmageManager: ObservableObject {
     func startWriting(settings: AppSettings) async {
         guard !isProcessing else { return }
         
-        DispatchQueue.main.async {
-            self.isProcessing = true
-            self.totalProcessedCount = 0
-            self.successfulCount = 0
-            self.failedCount = 0
-        }
+        self.isProcessing = true
+        self.totalProcessedCount = 0
+        self.successfulCount = 0
+        self.failedCount = 0
+        self.currentProgress = 0.0
         
         let itemsToProcessIndices = imageItems.indices.filter { imageItems[$0].status == .analyzed }
+        
+        let certaintyThreshold = settings.certaintyThreshold
+        let overwriteOriginals = settings.overwriteOriginals
+        let outputFolderPath = settings.outputFolderPath
+        let filenamePattern = settings.filenamePattern
         
         for (processCount, index) in itemsToProcessIndices.enumerated() {
             // Check if processing was cancelled
@@ -353,91 +380,102 @@ class PinmageManager: ObservableObject {
             
             let item = imageItems[index]
             
-            DispatchQueue.main.async {
-                self.currentProcessingFile = item.fileName
-                self.imageItems[index].status = .writing
-                self.currentProgress = Double(processCount) / Double(itemsToProcessIndices.count)
-            }
+            self.currentProcessingFile = item.fileName
+            self.imageItems[index].status = .writing
+            self.currentProgress = Double(processCount) / Double(itemsToProcessIndices.count)
             
-            do {
-                let threshold = settings.certaintyThreshold
-                
-                // Determine if we apply date and/or location based on confidence
-                let dateValid = (item.dateCertainty ?? 0) >= threshold
-                let locationValid = (item.locationCertainty ?? 0) >= threshold
-                
-                let parsedDate = dateValid ? item.detectedDate : nil
-                let latitude = locationValid ? item.latitude : nil
-                let longitude = locationValid ? item.longitude : nil
-                let placeForFilename = locationValid ? item.detectedPlace : nil
-                
-                let outputURL: URL
-                if settings.overwriteOriginals {
-                    outputURL = item.fileURL
-                } else {
-                    let outputFolderURL: URL
-                    if !settings.outputFolderPath.isEmpty {
-                        outputFolderURL = URL(fileURLWithPath: settings.outputFolderPath)
-                    } else {
-                        // Default is same directory as the original file
-                        outputFolderURL = item.fileURL.deletingLastPathComponent()
-                    }
-                    
-                    // Create output folder if it doesn't exist
-                    try FileManager.default.createDirectory(at: outputFolderURL, withIntermediateDirectories: true, attributes: nil)
-                    
-                    var resolvedName = resolveOutputFilename(
-                        fileURL: item.fileURL,
-                        date: parsedDate,
-                        place: placeForFilename,
-                        pattern: settings.filenamePattern
-                    )
-                    
-                    // Prevent accidental overwriting of the source file if output folder matches the input folder and the name didn't change
-                    if outputFolderURL.path == item.fileURL.deletingLastPathComponent().path && resolvedName == item.fileName {
-                        let baseName = item.fileURL.deletingPathExtension().lastPathComponent
-                        let ext = item.fileURL.pathExtension
-                        resolvedName = "\(baseName)_processed.\(ext)"
-                    }
-                    
-                    outputURL = outputFolderURL.appendingPathComponent(resolvedName)
-                }
-                
-                // Write Metadata to copy file
-                let success = MetadataWriter.updateImageMetadata(
-                    sourceURL: item.fileURL,
-                    destinationURL: outputURL,
-                    date: parsedDate,
-                    latitude: latitude,
-                    longitude: longitude
-                )
-                
-                if success {
-                    DispatchQueue.main.async {
-                        self.imageItems[index].status = .completed
-                        self.imageItems[index].outputURL = outputURL
-                        self.successfulCount += 1
-                        self.totalProcessedCount += 1
-                    }
-                } else {
-                    throw NSError(domain: "PinmageManager", code: 6, userInfo: [NSLocalizedDescriptionKey: "Failed to compile/save final image metadata"])
-                }
-                
-            } catch {
+            let result = await writeSingleItem(
+                item: item,
+                certaintyThreshold: certaintyThreshold,
+                overwriteOriginals: overwriteOriginals,
+                outputFolderPath: outputFolderPath,
+                filenamePattern: filenamePattern
+            )
+            
+            switch result {
+            case .success(let outputURL):
+                self.imageItems[index].status = .completed
+                self.imageItems[index].outputURL = outputURL
+                self.successfulCount += 1
+            case .failure(let error):
                 print("Error writing file \(item.fileName): \(error)")
-                DispatchQueue.main.async {
-                    self.imageItems[index].status = .failed
-                    self.imageItems[index].errorMessage = error.localizedDescription
-                    self.failedCount += 1
-                    self.totalProcessedCount += 1
-                }
+                self.imageItems[index].status = .failed
+                self.imageItems[index].errorMessage = error.localizedDescription
+                self.failedCount += 1
             }
+            self.totalProcessedCount += 1
         }
         
-        DispatchQueue.main.async {
-            self.isProcessing = false
-            self.currentProgress = 1.0
-            self.currentProcessingFile = "Done"
+        self.isProcessing = false
+        self.currentProgress = 1.0
+        self.currentProcessingFile = "Done"
+    }
+    
+    private nonisolated func writeSingleItem(
+        item: ImageItem,
+        certaintyThreshold: Int,
+        overwriteOriginals: Bool,
+        outputFolderPath: String,
+        filenamePattern: FilenamePattern
+    ) async -> Result<URL, Error> {
+        do {
+            // Determine if we apply date and/or location based on confidence
+            let dateValid = (item.dateCertainty ?? 0) >= certaintyThreshold
+            let locationValid = (item.locationCertainty ?? 0) >= certaintyThreshold
+            
+            let parsedDate = dateValid ? item.detectedDate : nil
+            let latitude = locationValid ? item.latitude : nil
+            let longitude = locationValid ? item.longitude : nil
+            let placeForFilename = locationValid ? item.detectedPlace : nil
+            
+            let outputURL: URL
+            if overwriteOriginals {
+                outputURL = item.fileURL
+            } else {
+                let outputFolderURL: URL
+                if !outputFolderPath.isEmpty {
+                    outputFolderURL = URL(fileURLWithPath: outputFolderPath)
+                } else {
+                    // Default is same directory as the original file
+                    outputFolderURL = item.fileURL.deletingLastPathComponent()
+                }
+                
+                // Create output folder if it doesn't exist
+                try FileManager.default.createDirectory(at: outputFolderURL, withIntermediateDirectories: true, attributes: nil)
+                
+                var resolvedName = resolveOutputFilename(
+                    fileURL: item.fileURL,
+                    date: parsedDate,
+                    place: placeForFilename,
+                    pattern: filenamePattern
+                )
+                
+                // Prevent accidental overwriting of the source file
+                if outputFolderURL.path == item.fileURL.deletingLastPathComponent().path && resolvedName == item.fileName {
+                    let baseName = item.fileURL.deletingPathExtension().lastPathComponent
+                    let ext = item.fileURL.pathExtension
+                    resolvedName = "\(baseName)_processed.\(ext)"
+                }
+                
+                outputURL = outputFolderURL.appendingPathComponent(resolvedName)
+            }
+            
+            // Write Metadata to copy file
+            let success = MetadataWriter.updateImageMetadata(
+                sourceURL: item.fileURL,
+                destinationURL: outputURL,
+                date: parsedDate,
+                latitude: latitude,
+                longitude: longitude
+            )
+            
+            if success {
+                return .success(outputURL)
+            } else {
+                return .failure(NSError(domain: "PinmageManager", code: 6, userInfo: [NSLocalizedDescriptionKey: "Failed to compile/save final image metadata"]))
+            }
+        } catch {
+            return .failure(error)
         }
     }
     
@@ -461,7 +499,7 @@ class PinmageManager: ObservableObject {
         return nil
     }
     
-    private func resolveOutputFilename(fileURL: URL, date: Date?, place: String?, pattern: FilenamePattern) -> String {
+    private nonisolated func resolveOutputFilename(fileURL: URL, date: Date?, place: String?, pattern: FilenamePattern) -> String {
         let baseName = fileURL.deletingPathExtension().lastPathComponent
         let ext = fileURL.pathExtension
         
@@ -500,7 +538,7 @@ class PinmageManager: ObservableObject {
         }
     }
     
-    private func calculateCost(inputTokens: Int, outputTokens: Int, model: String) -> Double {
+    private static func calculateCost(inputTokens: Int, outputTokens: Int, model: String) -> Double {
         let isPro = model.contains("pro")
         let inputRate = isPro ? 1.25 : 0.075
         let outputRate = isPro ? 5.00 : 0.30
@@ -511,10 +549,12 @@ class PinmageManager: ObservableObject {
 
 class GeocodingManager {
     static func geocode(address: String) async -> CLLocationCoordinate2D? {
-        let geocoder = CLGeocoder()
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = address
+        let search = MKLocalSearch(request: request)
         do {
-            let placemarks = try await geocoder.geocodeAddressString(address)
-            return placemarks.first?.location?.coordinate
+            let response = try await search.start()
+            return response.mapItems.first?.placemark.coordinate
         } catch {
             print("Geocoding error for '\(address)': \(error.localizedDescription)")
             return nil

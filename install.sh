@@ -93,20 +93,11 @@ xattr -rc "$SRC_STAGING"
 find "$SRC_STAGING" -type f -exec touch {} +
 sleep 1
 
+mapfile -t SWIFT_SOURCES < <(find "$SRC_STAGING/PinmageApp" -name "*.swift")
+
 swiftc -O -sdk "$SDK_PATH" \
     -o "$APP_BUNDLE/Contents/MacOS/Pinmage" \
-    "$SRC_STAGING/PinmageApp/Models.swift" \
-    "$SRC_STAGING/PinmageApp/GlassCard.swift" \
-    "$SRC_STAGING/PinmageApp/MetadataWriter.swift" \
-    "$SRC_STAGING/PinmageApp/GeminiManager.swift" \
-    "$SRC_STAGING/PinmageApp/PinmageManager.swift" \
-    "$SRC_STAGING/PinmageApp/CacheManager.swift" \
-    "$SRC_STAGING/PinmageApp/ImageResizer.swift" \
-    "$SRC_STAGING/PinmageApp/Views/MainView.swift" \
-    "$SRC_STAGING/PinmageApp/Views/DashboardView.swift" \
-    "$SRC_STAGING/PinmageApp/Views/ProcessView.swift" \
-    "$SRC_STAGING/PinmageApp/Views/SettingsView.swift" \
-    "$SRC_STAGING/PinmageApp/PinmageApp.swift"
+    "${SWIFT_SOURCES[@]}"
 
 rm -rf "$SRC_STAGING"
 
