@@ -236,6 +236,7 @@ import MapKit
         let customPrompt = settings.customPrompt
         let reduceImageSize = settings.reduceImageSize
         let maxConcurrentRequests = settings.maxConcurrentRequests
+        let locationHint = settings.locationHint
         
         // Concurrency-limited processing loop
         await withTaskGroup(of: AnalysisUpdate.self) { group in
@@ -260,6 +261,7 @@ import MapKit
                         skipExistingCoordinates: skipCoords,
                         existingLatitude: item.existingLatitude,
                         existingLongitude: item.existingLongitude,
+                        locationHint: locationHint,
                         manager: self,
                         settings: settings
                     )
@@ -296,6 +298,7 @@ import MapKit
                             skipExistingCoordinates: skipCoords,
                             existingLatitude: item.existingLatitude,
                             existingLongitude: item.existingLongitude,
+                            locationHint: locationHint,
                             manager: self,
                             settings: settings
                         )
@@ -353,6 +356,7 @@ import MapKit
         skipExistingCoordinates: Bool,
         existingLatitude: Double?,
         existingLongitude: Double?,
+        locationHint: String,
         manager: PinmageManager,
         settings: AppSettings
     ) async -> AnalysisUpdate {
@@ -381,7 +385,10 @@ import MapKit
                 let stillProcessing = await manager.isProcessing
                 if !stillProcessing { break }
                 do {
-                    let contextualPrompt = "\(customPrompt)\n\nThe image file is named \"\(fileName)\". The filename may contain date or location hints — use it as additional context if relevant."
+                    var contextualPrompt = "\(customPrompt)\n\nThe image file is named \"\(fileName)\". The filename may contain date or location hints — use it as additional context if relevant."
+                    if !locationHint.isEmpty {
+                        contextualPrompt += "\n\nThe user provided the following context about this batch of images: \"\(locationHint)\". Use it as helpful context for identifying dates and locations with more confidence, but only where it aligns with the visual evidence in each image."
+                    }
                     let response = try await GeminiManager.analyzeImage(
                         fileURL: itemURL,
                         apiKey: apiKey,

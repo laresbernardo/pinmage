@@ -318,6 +318,7 @@ struct SettingsView: View {
                                 .font(.system(size: 10))
                                 .foregroundColor(.secondary)
                         }
+                        
                     }
                     .padding(20)
                 }

@@ -202,6 +202,30 @@ struct ProcessView: View {
                 }
             }
             
+            // Location hint
+            if !manager.isProcessing, !manager.imageItems.isEmpty {
+                HStack {
+                    Image(systemName: "map.fill")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("Optional date/location hint (e.g. \"Trip to Italy, 1991\")", text: $settings.locationHint)
+                        .textFieldStyle(.plain)
+                        .font(.caption)
+                        .foregroundColor(.white)
+                        .disableAutocorrection(false)
+                    if !settings.locationHint.isEmpty {
+                        Button(action: { settings.locationHint = "" }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 6)
+            }
+            
             // Date extrapolation controls
             if !manager.isProcessing, hasAnalyzedItems {
                 HStack {

@@ -138,6 +138,11 @@ enum FilenamePattern: String, CaseIterable, Identifiable {
             UserDefaults.standard.set(extrapolateDates, forKey: "pinmage_extrapolate_dates")
         }
     }
+    @Published var locationHint: String {
+        didSet {
+            UserDefaults.standard.set(locationHint, forKey: "pinmage_location_hint")
+        }
+    }
     
     func resetCumulativeSpend() {
         cumulativeSpend = 0.0
@@ -178,6 +183,8 @@ enum FilenamePattern: String, CaseIterable, Identifiable {
         } else {
             self.extrapolateDates = UserDefaults.standard.bool(forKey: "pinmage_extrapolate_dates")
         }
+        
+        self.locationHint = UserDefaults.standard.string(forKey: "pinmage_location_hint") ?? ""
     }
 }
 
