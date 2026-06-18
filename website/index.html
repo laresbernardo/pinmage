@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pinmage — AI-Powered Photo Date & Location Injector</title>
+    <meta name="description" content="Inject EXIF dates and GPS coordinates into scanned photo albums automatically with Gemini AI.">
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Outfit:wght@600;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- Premium Glassmorphic Navigation -->
+    <nav class="navbar">
+        <div class="nav-container">
+            <div class="logo">
+                <div class="logo-icon"></div>
+                <span class="logo-text">PINMAGE</span>
+            </div>
+            <div class="nav-links">
+                <a href="#features">Features</a>
+                <a href="#how-it-works">How It Works</a>
+                <a href="https://github.com/laresbernardo/pinmage" target="_blank" class="github-link">GitHub</a>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <header class="hero">
+        <div class="hero-container">
+            <div class="hero-content">
+                <div class="badge">Powered by Gemini AI</div>
+                <h1>Bring history back to your photo library</h1>
+                <p class="subtitle">Pinmage automatically analyzes scanned photo albums or individual photos using Gemini AI to deduce dates and places, writing them directly into native EXIF & GPS image metadata.</p>
+                
+                <div class="cta-group">
+                    <a href="https://github.com/laresbernardo/pinmage/releases/latest/download/Pinmage.dmg" class="download-btn">
+                        <svg class="download-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                        Download Pinmage for macOS
+                    </a>
+                    <div class="version-tag">
+                        Loading version info...
+                    </div>
+                </div>
+            </div>
+            
+            <div class="hero-media">
+                <div class="mockup-wrapper">
+                    <img src="hero_mockup.png" alt="Pinmage App Mockup" class="app-mockup">
+                    <div class="glow-effect"></div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Features Grid -->
+    <section id="features" class="features-section">
+        <div class="section-header">
+            <h2>Chronological Intelligence & Mapping</h2>
+            <p>Designed for scanned archives, photo albums, and old digital memories.</p>
+        </div>
+        
+        <div class="features-grid">
+            <div class="feature-card">
+                <div class="card-icon calendar-icon"></div>
+                <h3>Chronological Interpolation</h3>
+                <p>If a page or photograph has no date written, Pinmage automatically inherits the date of the previous chronological file to keep photos in perfect chronological order.</p>
+            </div>
+            
+            <div class="feature-card">
+                <div class="card-icon map-icon"></div>
+                <h3>CoreLocation Geocoding</h3>
+                <p>Pinmage leverages Apple's native geocoding engine to automatically turn place names identified by Gemini into real GPS coordinates (Latitude & Longitude).</p>
+            </div>
+            
+            <div class="feature-card">
+                <div class="card-icon lock-icon"></div>
+                <h3>Privacy-First & Secure</h3>
+                <p>No account signups. Pinmage runs completely locally on your Mac, utilizing direct sandbox read/write tunnels. Your images never leave your machine.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- How It Works Section -->
+    <section id="how-it-works" class="how-it-works-section">
+        <div class="section-header">
+            <h2>Process your photo albums in three steps</h2>
+        </div>
+        
+        <div class="steps-container">
+            <div class="step">
+                <div class="step-num">01</div>
+                <h4>Add Your Photos</h4>
+                <p>Drag and drop scanned pages, directories, or individual image files into the processing queue list.</p>
+            </div>
+            <div class="step">
+                <div class="step-num">02</div>
+                <h4>Configure API & Path</h4>
+                <p>Insert your Google Gemini API Key and select your desired destination folder (defaults to original location).</p>
+            </div>
+            <div class="step">
+                <div class="step-num">03</div>
+                <h4>Run & Save Copies</h4>
+                <p>Start processing. Pinmage reads, resolves dates and locations, and saves metadata-rich copies instantly.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <div class="footer-container">
+            <p>&copy; 2026 Pinmage. Developed with love for historical archiving.</p>
+            <p class="built-with">Built natively in SwiftUI for macOS 13.0+</p>
+        </div>
+    </footer>
+
+    <!-- Script to load version dynamically -->
+    <script>
+        fetch('./version.json')
+            .then(response => {
+                if (!response.ok) throw new Error('Not found');
+                return response.json();
+            })
+            .then(data => {
+                const versionEl = document.querySelector('.version-tag');
+                if (versionEl && data.version) {
+                    versionEl.textContent = `v${data.version} (Build ${data.build}) • macOS 13+ • DMG`;
+                }
+            })
+            .catch(() => {
+                const versionEl = document.querySelector('.version-tag');
+                if (versionEl) {
+                    versionEl.textContent = `v1.0.0 • macOS 13+ • DMG`;
+                }
+            });
+    </script>
+</body>
+</html>

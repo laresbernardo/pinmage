@@ -1,0 +1,29 @@
+# macOS System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build and Distribution Artifacts
+*.dmg
+*.app
+build/
+DerivedData/
+
+# Xcode / User Settings
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xcuserstate
+xcuserdata/
+.xcworkspace/
+*.xcworkspace/
+*.xcodeproj/
+
+# IDE Caches
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
