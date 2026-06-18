@@ -74,6 +74,63 @@ import MapKit
         self.isProcessing = false
     }
     
+    func updateCheckboxes(threshold: Int) {
+        for index in 0..<imageItems.count {
+            let item = imageItems[index]
+            if item.status == .analyzed {
+                if let certainty = item.dateCertainty {
+                    imageItems[index].saveDate = item.detectedDate != nil && certainty >= threshold
+                }
+                if let certainty = item.locationCertainty {
+                    imageItems[index].saveLocation = item.latitude != nil && certainty >= threshold
+                }
+            }
+        }
+    }
+    
+    func toggleSaveDate(id: UUID) {
+        if let index = imageItems.firstIndex(where: { $0.id == id }) {
+            imageItems[index].saveDate.toggle()
+            if imageItems[index].status == .completed {
+                imageItems[index].status = .analyzed
+            }
+        }
+    }
+    
+    func toggleSaveLocation(id: UUID) {
+        if let index = imageItems.firstIndex(where: { $0.id == id }) {
+            imageItems[index].saveLocation.toggle()
+            if imageItems[index].status == .completed {
+                imageItems[index].status = .analyzed
+            }
+        }
+    }
+    
+    func updateItemMetadata(
+        id: UUID,
+        date: Date?,
+        saveDate: Bool,
+        place: String?,
+        saveLocation: Bool,
+        latitude: Double?,
+        longitude: Double?,
+        geocodedPlace: String?
+    ) {
+        if let index = imageItems.firstIndex(where: { $0.id == id }) {
+            imageItems[index].detectedDate = date
+            imageItems[index].saveDate = saveDate && date != nil
+            imageItems[index].detectedPlace = place
+            imageItems[index].saveLocation = saveLocation && latitude != nil && longitude != nil
+            imageItems[index].latitude = latitude
+            imageItems[index].longitude = longitude
+            imageItems[index].geocodedPlace = geocodedPlace
+            
+            if imageItems[index].status == .pending || imageItems[index].status == .failed || imageItems[index].status == .completed {
+                imageItems[index].status = .analyzed
+            }
+        }
+    }
+    
     private struct AnalysisUpdate {
         let index: Int
         let success: Bool
@@ -81,6 +138,7 @@ import MapKit
         let errorDescription: String?
         let latitude: Double?
         let longitude: Double?
+        let geocodedPlace: String?
     }
     
     func updateItemStatus(index: Int, status: ProcessStatus, fileName: String? = nil, place: String? = nil) {
@@ -168,7 +226,7 @@ import MapKit
             while let update = await group.next() {
                 completedCount += 1
                 
-                self.applyUpdate(update)
+                self.applyUpdate(update, certaintyThreshold: settings.certaintyThreshold)
                 self.currentProgress = Double(completedCount) / Double(indicesToProcess.count)
                 
                 // If cancelled, stop spawning new tasks
@@ -300,21 +358,28 @@ import MapKit
                 result: nil,
                 errorDescription: errorDescription ?? "AI analysis failed",
                 latitude: nil,
-                longitude: nil
+                longitude: nil,
+                geocodedPlace: nil
             )
         }
         
         // 3. Optional CoreLocation/MapKit Geocoding Fallback
         var latitude: Double? = result.latitude
         var longitude: Double? = result.longitude
+        var geocodedPlace: String? = nil
         
         if let place = result.place, !place.isEmpty, place.lowercased() != "null" {
             if latitude == nil || longitude == nil {
                 await manager.updateItemStatus(index: index, status: .geocoding, place: place)
                 
-                if let coords = await GeocodingManager.geocode(address: place) {
-                    latitude = coords.latitude
-                    longitude = coords.longitude
+                if let geocoded = await GeocodingManager.geocode(address: place) {
+                    latitude = geocoded.coordinate.latitude
+                    longitude = geocoded.coordinate.longitude
+                    geocodedPlace = geocoded.resolvedName
+                }
+            } else {
+                if let geocoded = await GeocodingManager.geocode(address: place) {
+                    geocodedPlace = geocoded.resolvedName
                 }
             }
         }
@@ -325,11 +390,12 @@ import MapKit
             result: result,
             errorDescription: nil,
             latitude: latitude,
-            longitude: longitude
+            longitude: longitude,
+            geocodedPlace: geocodedPlace
         )
     }
     
-    private func applyUpdate(_ update: AnalysisUpdate) {
+    private func applyUpdate(_ update: AnalysisUpdate, certaintyThreshold: Int) {
         let index = update.index
         guard index < self.imageItems.count else { return }
         
@@ -339,14 +405,23 @@ import MapKit
                 parsedDate = parseDate(from: dateStr)
             }
             
+            let dateCertainty = result.dateCertainty ?? 0
+            let locationCertainty = result.locationCertainty ?? 0
+            
             self.imageItems[index].detectedDate = parsedDate
             self.imageItems[index].detectedPlace = result.place
             self.imageItems[index].detectedDateString = result.date
-            self.imageItems[index].dateCertainty = result.dateCertainty
-            self.imageItems[index].locationCertainty = result.locationCertainty
+            self.imageItems[index].dateCertainty = dateCertainty
+            self.imageItems[index].locationCertainty = locationCertainty
             self.imageItems[index].latitude = update.latitude
             self.imageItems[index].longitude = update.longitude
+            self.imageItems[index].geocodedPlace = update.geocodedPlace
             self.imageItems[index].dateIsInherited = false
+            
+            // Default checked state based on certainty threshold
+            self.imageItems[index].saveDate = parsedDate != nil && dateCertainty >= certaintyThreshold
+            self.imageItems[index].saveLocation = update.latitude != nil && locationCertainty >= certaintyThreshold
+            
             self.imageItems[index].status = .analyzed
             self.successfulCount += 1
         } else {
@@ -386,7 +461,6 @@ import MapKit
             
             let result = await writeSingleItem(
                 item: item,
-                certaintyThreshold: certaintyThreshold,
                 overwriteOriginals: overwriteOriginals,
                 outputFolderPath: outputFolderPath,
                 filenamePattern: filenamePattern
@@ -413,15 +487,14 @@ import MapKit
     
     private nonisolated func writeSingleItem(
         item: ImageItem,
-        certaintyThreshold: Int,
         overwriteOriginals: Bool,
         outputFolderPath: String,
         filenamePattern: FilenamePattern
     ) async -> Result<URL, Error> {
         do {
-            // Determine if we apply date and/or location based on confidence
-            let dateValid = (item.dateCertainty ?? 0) >= certaintyThreshold
-            let locationValid = (item.locationCertainty ?? 0) >= certaintyThreshold
+            // Determine if we apply date and/or location based on checkboxes
+            let dateValid = item.saveDate && item.detectedDate != nil
+            let locationValid = item.saveLocation && item.latitude != nil && item.longitude != nil
             
             let parsedDate = dateValid ? item.detectedDate : nil
             let latitude = locationValid ? item.latitude : nil
@@ -548,13 +621,22 @@ import MapKit
 }
 
 class GeocodingManager {
-    static func geocode(address: String) async -> CLLocationCoordinate2D? {
+    struct GeocodedLocation {
+        let coordinate: CLLocationCoordinate2D
+        let resolvedName: String?
+    }
+
+    static func geocode(address: String) async -> GeocodedLocation? {
         let request = MKLocalSearch.Request()
         request.naturalLanguageQuery = address
         let search = MKLocalSearch(request: request)
         do {
             let response = try await search.start()
-            return response.mapItems.first?.placemark.coordinate
+            guard let firstItem = response.mapItems.first else { return nil }
+            return GeocodedLocation(
+                coordinate: firstItem.placemark.coordinate,
+                resolvedName: firstItem.name ?? firstItem.placemark.title
+            )
         } catch {
             print("Geocoding error for '\(address)': \(error.localizedDescription)")
             return nil

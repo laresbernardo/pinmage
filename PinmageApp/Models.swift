@@ -54,6 +54,11 @@ struct ImageItem: Identifiable, Equatable {
     var dateIsInherited: Bool = false
     var outputURL: URL? = nil
     
+    // User acceptance & Geocoded Reference Place name
+    var saveDate: Bool = false
+    var saveLocation: Bool = false
+    var geocodedPlace: String? = nil
+    
     static func == (lhs: ImageItem, rhs: ImageItem) -> Bool {
         lhs.id == rhs.id
     }

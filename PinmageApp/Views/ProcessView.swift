@@ -143,7 +143,7 @@ struct ProcessView: View {
             } else {
                 List {
                     ForEach(manager.imageItems) { item in
-                        QueueRowView(item: item, settings: settings, onRemove: {
+                        QueueRowView(item: item, manager: manager, settings: settings, onRemove: {
                             manager.removeImage(id: item.id)
                         })
                         .padding(.vertical, 4)
@@ -175,11 +175,11 @@ struct ProcessView: View {
     }
     
     private var dateWillModifyCount: Int {
-        manager.imageItems.filter { $0.status == .analyzed && ($0.dateCertainty ?? 0) >= settings.certaintyThreshold }.count
+        manager.imageItems.filter { ($0.status == .analyzed || $0.status == .completed) && $0.saveDate }.count
     }
     
     private var locationWillModifyCount: Int {
-        manager.imageItems.filter { $0.status == .analyzed && ($0.locationCertainty ?? 0) >= settings.certaintyThreshold }.count
+        manager.imageItems.filter { ($0.status == .analyzed || $0.status == .completed) && $0.saveLocation }.count
     }
     
     private var certaintyThresholdPanel: some View {
@@ -201,7 +201,10 @@ struct ProcessView: View {
                     Slider(
                         value: Binding(
                             get: { Double(settings.certaintyThreshold) },
-                            set: { settings.certaintyThreshold = Int($0) }
+                            set: { val in
+                                settings.certaintyThreshold = Int(val)
+                                manager.updateCheckboxes(threshold: Int(val))
+                            }
                         ),
                         in: 0...100,
                         step: 5
@@ -341,9 +344,11 @@ struct ProcessView: View {
 
 struct QueueRowView: View {
     let item: ImageItem
+    @ObservedObject var manager: PinmageManager
     @ObservedObject var settings: AppSettings
     let onRemove: () -> Void
     @State private var thumbnail: NSImage? = nil
+    @State private var showingEditPopover = false
     
     var body: some View {
         HStack(spacing: 16) {
@@ -395,7 +400,22 @@ struct QueueRowView: View {
                 HStack(spacing: 16) {
                     // Date output
                     HStack(spacing: 4) {
+                        if item.status == .analyzed || item.status == .completed || item.detectedDate != nil {
+                            Button(action: {
+                                manager.toggleSaveDate(id: item.id)
+                            }) {
+                                Image(systemName: item.saveDate ? "checkmark.circle.fill" : "circle")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundColor(item.saveDate ? .emerald : .secondary.opacity(0.4))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(item.detectedDate == nil)
+                        }
+                        
                         Image(systemName: "calendar")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        
                         if let dateStr = item.detectedDateString {
                             Text(dateStr)
                                 .foregroundColor(.white.opacity(0.9))
@@ -431,7 +451,22 @@ struct QueueRowView: View {
                     
                     // Place output
                     HStack(spacing: 4) {
+                        if item.status == .analyzed || item.status == .completed || item.detectedPlace != nil {
+                            Button(action: {
+                                manager.toggleSaveLocation(id: item.id)
+                            }) {
+                                Image(systemName: item.saveLocation ? "checkmark.circle.fill" : "circle")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundColor(item.saveLocation ? .emerald : .secondary.opacity(0.4))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(item.latitude == nil || item.longitude == nil)
+                        }
+                        
                         Image(systemName: "mappin.and.ellipse")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        
                         if let place = item.detectedPlace {
                             Text(place)
                                 .foregroundColor(.white.opacity(0.9))
@@ -455,11 +490,22 @@ struct QueueRowView: View {
                     
                     // Coordinates output
                     if let lat = item.latitude, let lon = item.longitude {
-                        HStack(spacing: 4) {
+                        HStack(alignment: .top, spacing: 4) {
                             Image(systemName: "globe")
-                            Text(String(format: "%.4f, %.4f", lat, lon))
-                                .font(.system(.caption, design: .monospaced))
+                                .font(.system(size: 11))
                                 .foregroundColor(.secondary)
+                                .padding(.top, 2)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(String(format: "%.4f, %.4f", lat, lon))
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                if let geoName = item.geocodedPlace {
+                                    Text("Ref: \(geoName)")
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.cyan.opacity(0.8))
+                                        .lineLimit(1)
+                                }
+                            }
                         }
                     }
                 }
@@ -474,25 +520,43 @@ struct QueueRowView: View {
                 }
             }
             
-            // Row Action Button
-            if item.status == .pending || item.status == .failed {
-                Button(action: onRemove) {
-                    Image(systemName: "xmark.circle")
-                        .foregroundColor(.secondary)
+            // Row Action Buttons
+            HStack(spacing: 8) {
+                if !manager.isProcessing && item.status != .writing {
+                    Button(action: {
+                        showingEditPopover = true
+                    }) {
+                        Image(systemName: "pencil.circle")
+                            .font(.system(size: 16))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Edit details manually")
+                    .popover(isPresented: $showingEditPopover, arrowEdge: .trailing) {
+                        EditMetadataPopover(item: item, manager: manager)
+                    }
                 }
-                .buttonStyle(.plain)
-                .padding(.leading, 8)
-            } else if item.status == .completed, let outputURL = item.outputURL {
-                Button(action: {
-                    NSWorkspace.shared.activateFileViewerSelecting([outputURL])
-                }) {
-                    Image(systemName: "magnifyingglass.circle")
-                        .foregroundColor(.cyan)
+                
+                if item.status == .pending || item.status == .failed {
+                    Button(action: onRemove) {
+                        Image(systemName: "xmark.circle")
+                            .font(.system(size: 16))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                } else if item.status == .completed, let outputURL = item.outputURL {
+                    Button(action: {
+                        NSWorkspace.shared.activateFileViewerSelecting([outputURL])
+                    }) {
+                        Image(systemName: "magnifyingglass.circle")
+                            .font(.system(size: 16))
+                            .foregroundColor(.cyan)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Show in Finder")
                 }
-                .buttonStyle(.plain)
-                .padding(.leading, 8)
-                .help("Show in Finder")
             }
+            .padding(.leading, 4)
         }
     }
     
@@ -519,5 +583,177 @@ struct QueueRowView: View {
         formatter.dateStyle = .medium
         formatter.timeStyle = .none
         return formatter.string(from: date)
+    }
+}
+
+struct EditMetadataPopover: View {
+    let item: ImageItem
+    @ObservedObject var manager: PinmageManager
+    @Environment(\.dismiss) var dismiss
+    
+    @State private var useDate: Bool
+    @State private var date: Date
+    
+    @State private var useLocation: Bool
+    @State private var place: String
+    @State private var latitudeStr: String
+    @State private var longitudeStr: String
+    @State private var geocodedPlace: String
+    
+    @State private var isGeocoding = false
+    
+    init(item: ImageItem, manager: PinmageManager) {
+        self.item = item
+        self.manager = manager
+        
+        // Initialize state
+        _useDate = State(initialValue: item.saveDate || item.detectedDate != nil)
+        _date = State(initialValue: item.detectedDate ?? Date())
+        
+        _useLocation = State(initialValue: item.saveLocation || item.latitude != nil)
+        _place = State(initialValue: item.detectedPlace ?? "")
+        _latitudeStr = State(initialValue: item.latitude != nil ? String(format: "%.6f", item.latitude!) : "")
+        _longitudeStr = State(initialValue: item.longitude != nil ? String(format: "%.6f", item.longitude!) : "")
+        _geocodedPlace = State(initialValue: item.geocodedPlace ?? "")
+    }
+    
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Edit Metadata")
+                .font(.headline)
+                .foregroundColor(.white)
+            
+            Text(item.fileName)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+            
+            Divider().background(Color.white.opacity(0.1))
+            
+            VStack(alignment: .leading, spacing: 12) {
+                // Date Section
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle("Include Date", isOn: $useDate)
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    
+                    if useDate {
+                        DatePicker("", selection: $date, displayedComponents: .date)
+                            .datePickerStyle(.field)
+                            .labelsHidden()
+                    }
+                }
+                
+                Divider().background(Color.white.opacity(0.05))
+                
+                // Location Section
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle("Include Location", isOn: $useLocation)
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    
+                    if useLocation {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Place Name")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            
+                            HStack {
+                                TextField("e.g. Eiffel Tower, Paris", text: $place)
+                                    .textFieldStyle(.roundedBorder)
+                                
+                                Button(action: lookupCoordinates) {
+                                    if isGeocoding {
+                                        ProgressView().controlSize(.small)
+                                    } else {
+                                        Text("Look Up")
+                                    }
+                                }
+                                .disabled(place.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isGeocoding)
+                            }
+                            
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Latitude")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    TextField("Latitude", text: $latitudeStr)
+                                        .textFieldStyle(.roundedBorder)
+                                }
+                                
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Longitude")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    TextField("Longitude", text: $longitudeStr)
+                                        .textFieldStyle(.roundedBorder)
+                                }
+                            }
+                            
+                            if !geocodedPlace.isEmpty {
+                                Text("Resolved: \(geocodedPlace)")
+                                    .font(.caption2)
+                                    .foregroundColor(.cyan)
+                                    .italic()
+                            }
+                        }
+                        .padding(.leading, 16)
+                    }
+                }
+            }
+            .frame(width: 280)
+            
+            Divider().background(Color.white.opacity(0.1))
+            
+            HStack {
+                Button("Cancel") {
+                    dismiss()
+                }
+                .buttonStyle(.bordered)
+                
+                Spacer()
+                
+                Button("Apply") {
+                    saveChanges()
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.cyan)
+            }
+        }
+        .padding(16)
+        .background(Color(NSColor.windowBackgroundColor))
+    }
+    
+    private func lookupCoordinates() {
+        guard !place.isEmpty else { return }
+        isGeocoding = true
+        Task {
+            if let geocoded = await GeocodingManager.geocode(address: place) {
+                latitudeStr = String(format: "%.6f", geocoded.coordinate.latitude)
+                longitudeStr = String(format: "%.6f", geocoded.coordinate.longitude)
+                geocodedPlace = geocoded.resolvedName ?? ""
+            }
+            isGeocoding = false
+        }
+    }
+    
+    private func saveChanges() {
+        let finalDate = useDate ? date : nil
+        let finalPlace = useLocation && !place.isEmpty ? place : nil
+        let finalLat = useLocation ? Double(latitudeStr) : nil
+        let finalLon = useLocation ? Double(longitudeStr) : nil
+        let finalGeo = useLocation ? geocodedPlace : nil
+        
+        manager.updateItemMetadata(
+            id: item.id,
+            date: finalDate,
+            saveDate: useDate,
+            place: finalPlace,
+            saveLocation: useLocation,
+            latitude: finalLat,
+            longitude: finalLon,
+            geocodedPlace: finalGeo
+        )
     }
 }
