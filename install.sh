@@ -16,9 +16,8 @@ NC='\033[0m'
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLIST_FILE="$SOURCE_DIR/PinmageApp/Info.plist"
 NEW_VERSION="Unknown"
-NEW_BUILD="Unknown"
 
-# Auto-increment version/build using PlistBuddy if it exists
+# Auto-increment version using PlistBuddy if it exists
 if [ -f "$PLIST_FILE" ] && [ -x /usr/libexec/PlistBuddy ]; then
     CURRENT_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST_FILE")
     IFS='.' read -r major minor patch <<< "$CURRENT_VERSION"
@@ -26,28 +25,23 @@ if [ -f "$PLIST_FILE" ] && [ -x /usr/libexec/PlistBuddy ]; then
     NEW_VERSION="$major.$minor.$NEXT_PATCH"
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $NEW_VERSION" "$PLIST_FILE"
     
-    CURRENT_BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST_FILE")
-    NEW_BUILD=$((CURRENT_BUILD + 1))
-    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEW_BUILD" "$PLIST_FILE"
-    
     # Write updated details to website/version.json
     WEBSITE_VERSION_FILE="$SOURCE_DIR/website/version.json"
     if [ -d "$SOURCE_DIR/website" ]; then
         TODAY=$(date +"%Y-%m-%d")
         echo -e "{" > "$WEBSITE_VERSION_FILE"
         echo -e "  \"version\": \"$NEW_VERSION\"," >> "$WEBSITE_VERSION_FILE"
-        echo -e "  \"build\": \"$NEW_BUILD\"," >> "$WEBSITE_VERSION_FILE"
         echo -e "  \"date\": \"$TODAY\"" >> "$WEBSITE_VERSION_FILE"
         echo -e "}" >> "$WEBSITE_VERSION_FILE"
     fi
 else
-    echo -e "${YELLOW}Warning: PlistBuddy not found. Skipping auto-incrementing build number.${NC}"
+    echo -e "${YELLOW}Warning: PlistBuddy not found. Skipping auto-incrementing version.${NC}"
 fi
 
 echo -e "${BLUE}==================================================${NC}"
 echo -e "${BLUE}       PINMAGE MAC APP BUILD SYSTEM     ${NC}"
 if [ "$NEW_VERSION" != "Unknown" ]; then
-echo -e "${BLUE}       Installing: Version $NEW_VERSION Build $NEW_BUILD${NC}"
+echo -e "${BLUE}       Installing: Version $NEW_VERSION${NC}"
 fi
 echo -e "${BLUE}==================================================${NC}"
 

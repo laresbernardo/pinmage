@@ -105,8 +105,8 @@ struct PinmageLogoView: View {
                 startAnimation()
             }
         }
-        .onChange(of: isAnimating) { animating in
-            if animating {
+        .onChange(of: isAnimating) { _, newValue in
+            if newValue {
                 startAnimation()
             } else {
                 stopAnimation()

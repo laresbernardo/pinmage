@@ -360,7 +360,7 @@ struct SettingsView: View {
     private func selectFolder() {
         let openPanel = NSOpenPanel()
         openPanel.title = "Select Output Folder"
-        openPanel.showsResizeIndicator = true
+        // showsResizeIndicator is deprecated and no longer functional
         openPanel.showsHiddenFiles = false
         openPanel.canChooseFiles = false
         openPanel.canChooseDirectories = true

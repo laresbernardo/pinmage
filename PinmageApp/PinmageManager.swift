@@ -693,10 +693,17 @@ class GeocodingManager {
         do {
             let response = try await search.start()
             guard let firstItem = response.mapItems.first else { return nil }
-            return GeocodedLocation(
-                coordinate: firstItem.placemark.coordinate,
-                resolvedName: firstItem.name ?? firstItem.placemark.title
-            )
+            if #available(macOS 26, *) {
+                return GeocodedLocation(
+                    coordinate: firstItem.location.coordinate,
+                    resolvedName: firstItem.name ?? firstItem.address?.shortAddress
+                )
+            } else {
+                return GeocodedLocation(
+                    coordinate: firstItem.placemark.coordinate,
+                    resolvedName: firstItem.name ?? firstItem.placemark.title
+                )
+            }
         } catch {
             print("Geocoding error for '\(address)': \(error.localizedDescription)")
             return nil
@@ -704,23 +711,41 @@ class GeocodingManager {
     }
 
     static func reverseGeocode(latitude: Double, longitude: Double) async -> GeocodedLocation? {
-        let geocoder = CLGeocoder()
         let location = CLLocation(latitude: latitude, longitude: longitude)
-        do {
-            let placemarks = try await geocoder.reverseGeocodeLocation(location)
-            guard let placemark = placemarks.first else { return nil }
-            let name = placemark.locality ?? placemark.administrativeArea ?? placemark.country
-            let resolved = [placemark.name, placemark.locality, placemark.administrativeArea, placemark.country]
-                .compactMap { $0 }
-                .filter { !$0.isEmpty }
-                .joined(separator: ", ")
-            return GeocodedLocation(
-                coordinate: placemark.location?.coordinate ?? location.coordinate,
-                resolvedName: resolved.isEmpty ? nil : resolved
-            )
-        } catch {
-            print("Reverse geocoding error: \(error.localizedDescription)")
-            return nil
+        if #available(macOS 26, *) {
+            guard let request = MKReverseGeocodingRequest(location: location) else { return nil }
+            do {
+                let mapItems = try await request.mapItems
+                guard let mapItem = mapItems.first else { return nil }
+                let resolved = [mapItem.name, mapItem.address?.shortAddress]
+                    .compactMap { $0 }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: ", ")
+                return GeocodedLocation(
+                    coordinate: mapItem.location.coordinate,
+                    resolvedName: resolved.isEmpty ? nil : resolved
+                )
+            } catch {
+                print("Reverse geocoding error: \(error.localizedDescription)")
+                return nil
+            }
+        } else {
+            let geocoder = CLGeocoder()
+            do {
+                let placemarks = try await geocoder.reverseGeocodeLocation(location)
+                guard let placemark = placemarks.first else { return nil }
+                let resolved = [placemark.name, placemark.locality, placemark.administrativeArea, placemark.country]
+                    .compactMap { $0 }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: ", ")
+                return GeocodedLocation(
+                    coordinate: placemark.location?.coordinate ?? location.coordinate,
+                    resolvedName: resolved.isEmpty ? nil : resolved
+                )
+            } catch {
+                print("Reverse geocoding error: \(error.localizedDescription)")
+                return nil
+            }
         }
     }
 }

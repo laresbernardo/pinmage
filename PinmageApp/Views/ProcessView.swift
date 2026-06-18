@@ -339,7 +339,7 @@ struct ProcessView: View {
     private func selectFiles() {
         let openPanel = NSOpenPanel()
         openPanel.title = "Choose Images or Folders"
-        openPanel.showsResizeIndicator = true
+        // showsResizeIndicator is deprecated and no longer functional
         openPanel.showsHiddenFiles = false
         openPanel.canChooseFiles = true
         openPanel.canChooseDirectories = true

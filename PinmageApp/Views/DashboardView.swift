@@ -10,6 +10,10 @@ struct DashboardView: View {
         center: CLLocationCoordinate2D(latitude: 37.0902, longitude: -95.7129), // Center of US default
         span: MKCoordinateSpan(latitudeDelta: 60.0, longitudeDelta: 60.0)
     )
+    @State private var mapPosition = MapCameraPosition.region(MKCoordinateRegion(
+        center: CLLocationCoordinate2D(latitude: 37.0902, longitude: -95.7129),
+        span: MKCoordinateSpan(latitudeDelta: 60.0, longitudeDelta: 60.0)
+    ))
     
     var body: some View {
         ScrollView {
@@ -175,36 +179,72 @@ struct DashboardView: View {
                                 .frame(height: 300)
                                 .frame(maxWidth: .infinity)
                             } else {
-                                Map(coordinateRegion: $region, annotationItems: mapAnnotations) { item in
-                                    MapAnnotation(coordinate: item.coordinate) {
-                                        VStack(spacing: 4) {
-                                            Image(systemName: "mappin.circle.fill")
-                                                .font(.title)
-                                                .foregroundColor(.purple)
-                                                .shadow(color: .black.opacity(0.4), radius: 3)
-                                            
-                                            Text(item.title)
-                                                .font(.system(size: 9, weight: .bold))
-                                                .padding(.horizontal, 6)
-                                                .padding(.vertical, 2)
-                                                .background(Color.black.opacity(0.75))
-                                                .foregroundColor(.white)
-                                                .cornerRadius(4)
-                                                .overlay(
-                                                    RoundedRectangle(cornerRadius: 4)
-                                                        .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
-                                                )
+                                if #available(macOS 14, *) {
+                                    Map(position: $mapPosition, interactionModes: .all) {
+                                        ForEach(mapAnnotations) { item in
+                                            Annotation(item.title, coordinate: item.coordinate) {
+                                                VStack(spacing: 4) {
+                                                    Image(systemName: "mappin.circle.fill")
+                                                        .font(.title)
+                                                        .foregroundColor(.purple)
+                                                        .shadow(color: .black.opacity(0.4), radius: 3)
+                                                    
+                                                    Text(item.title)
+                                                        .font(.system(size: 9, weight: .bold))
+                                                        .padding(.horizontal, 6)
+                                                        .padding(.vertical, 2)
+                                                        .background(Color.black.opacity(0.75))
+                                                        .foregroundColor(.white)
+                                                        .cornerRadius(4)
+                                                        .overlay(
+                                                            RoundedRectangle(cornerRadius: 4)
+                                                                .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
+                                                        )
+                                                }
+                                            }
                                         }
                                     }
-                                }
-                                .frame(height: 300)
-                                .cornerRadius(12)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                                )
-                                .onAppear {
-                                    recenterMap()
+                                    .frame(height: 300)
+                                    .cornerRadius(12)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                                    )
+                                    .onAppear {
+                                        recenterMap()
+                                    }
+                                } else {
+                                    Map(coordinateRegion: $region, annotationItems: mapAnnotations) { item in
+                                        MapAnnotation(coordinate: item.coordinate) {
+                                            VStack(spacing: 4) {
+                                                Image(systemName: "mappin.circle.fill")
+                                                    .font(.title)
+                                                    .foregroundColor(.purple)
+                                                    .shadow(color: .black.opacity(0.4), radius: 3)
+                                                
+                                                Text(item.title)
+                                                    .font(.system(size: 9, weight: .bold))
+                                                    .padding(.horizontal, 6)
+                                                    .padding(.vertical, 2)
+                                                    .background(Color.black.opacity(0.75))
+                                                    .foregroundColor(.white)
+                                                    .cornerRadius(4)
+                                                    .overlay(
+                                                        RoundedRectangle(cornerRadius: 4)
+                                                            .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
+                                                    )
+                                            }
+                                        }
+                                    }
+                                    .frame(height: 300)
+                                    .cornerRadius(12)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                                    )
+                                    .onAppear {
+                                        recenterMap()
+                                    }
                                 }
                             }
                         }
@@ -305,8 +345,10 @@ struct DashboardView: View {
             longitudeDelta: max(abs(maxLon - minLon) * 1.5, 2.0)
         )
         
+        let newRegion = MKCoordinateRegion(center: center, span: span)
         withAnimation(.easeInOut) {
-            region = MKCoordinateRegion(center: center, span: span)
+            region = newRegion
+            mapPosition = .region(newRegion)
         }
     }
 }
