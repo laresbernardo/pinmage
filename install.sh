@@ -93,7 +93,10 @@ xattr -rc "$SRC_STAGING"
 find "$SRC_STAGING" -type f -exec touch {} +
 sleep 1
 
-mapfile -t SWIFT_SOURCES < <(find "$SRC_STAGING/PinmageApp" -name "*.swift")
+SWIFT_SOURCES=()
+while IFS= read -r file; do
+    SWIFT_SOURCES+=("$file")
+done < <(find "$SRC_STAGING/PinmageApp" -name "*.swift")
 
 swiftc -O -sdk "$SDK_PATH" \
     -o "$APP_BUNDLE/Contents/MacOS/Pinmage" \

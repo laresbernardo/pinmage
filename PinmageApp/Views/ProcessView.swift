@@ -349,6 +349,7 @@ struct QueueRowView: View {
     let onRemove: () -> Void
     @State private var thumbnail: NSImage? = nil
     @State private var showingEditPopover = false
+    @State private var showingPreviewPopover = false
     
     var body: some View {
         HStack(spacing: 16) {
@@ -368,6 +369,14 @@ struct QueueRowView: View {
                     Image(systemName: "photo")
                         .foregroundColor(.secondary)
                 }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                showingPreviewPopover = true
+            }
+            .help("Click to enlarge")
+            .popover(isPresented: $showingPreviewPopover, arrowEdge: .leading) {
+                ImagePreviewPopover(fileURL: item.fileURL)
             }
             .task {
                 loadThumbnail()
@@ -755,5 +764,43 @@ struct EditMetadataPopover: View {
             longitude: finalLon,
             geocodedPlace: finalGeo
         )
+    }
+}
+
+struct ImagePreviewPopover: View {
+    let fileURL: URL
+    @State private var image: NSImage? = nil
+    
+    var body: some View {
+        VStack {
+            if let img = image {
+                Image(nsImage: img)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 400, maxHeight: 400)
+                    .cornerRadius(8)
+            } else {
+                VStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading preview...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(width: 150, height: 150)
+            }
+        }
+        .padding(8)
+        .background(Color(NSColor.windowBackgroundColor))
+        .task {
+            // Load large image asynchronously
+            DispatchQueue.global(qos: .userInitiated).async {
+                if let loadedImage = NSImage(contentsOf: fileURL) {
+                    DispatchQueue.main.async {
+                        self.image = loadedImage
+                    }
+                }
+            }
+        }
     }
 }
