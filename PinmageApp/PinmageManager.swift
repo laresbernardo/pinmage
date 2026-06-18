@@ -304,10 +304,21 @@ import MapKit
             }
         }
         
-        // Phase 1b: Sequential chronological date fallback (interpolation)
+        // Phase 1b: Chronological date extrapolation (off by default)
+        if settings.extrapolateDates {
+            applyDateExtrapolation()
+        }
+        
+        self.isProcessing = false
+        self.currentProgress = 1.0
+        self.currentProcessingFile = "Done"
+    }
+    
+    /// Chronological date extrapolation: forward-fills dates from analyzed items to items with unknown dates.
+    /// Can be called independently after analysis to apply or re-apply date inheritance.
+    func applyDateExtrapolation() {
         var lastKnownDate: Date? = nil
         
-        // Re-evaluate previous successful images first to establish the initial fallback state
         for item in self.imageItems {
             if (item.status == .analyzed || item.status == .completed) && !item.dateIsInherited {
                 if let date = item.detectedDate {
@@ -316,7 +327,6 @@ import MapKit
             }
         }
         
-        // Pass through all images to apply the fallback
         for index in 0..<self.imageItems.count {
             let item = self.imageItems[index]
             if item.status == .analyzed || item.status == .completed {
@@ -330,10 +340,6 @@ import MapKit
                 }
             }
         }
-        
-        self.isProcessing = false
-        self.currentProgress = 1.0
-        self.currentProcessingFile = "Done"
     }
     
     private nonisolated func analyzeSingleItem(

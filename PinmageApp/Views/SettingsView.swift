@@ -294,6 +294,35 @@ struct SettingsView: View {
                 }
                 .glassCardHoverEffect()
                 
+                // Processing Behaviour
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "calendar.day.timeline.leading")
+                                .font(.title3)
+                                .foregroundColor(.cyan)
+                            Text("Processing Behaviour")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                        }
+                        
+                        Divider().background(Color.white.opacity(0.1))
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle("Extrapolate dates forward for unknown dates", isOn: $settings.extrapolateDates)
+                                .toggleStyle(.checkbox)
+                                .font(.body)
+                                .foregroundColor(.white)
+                            
+                            Text("When enabled, images without a detected date will inherit the last known date from the previous image in the sorted list. You can re-apply this at any time from the Process view.")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(20)
+                }
+                .glassCardHoverEffect()
+                
                 // AI Cost & Spend Tracker
                 GlassCard {
                     VStack(alignment: .leading, spacing: 16) {

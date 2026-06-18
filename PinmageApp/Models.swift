@@ -133,6 +133,11 @@ enum FilenamePattern: String, CaseIterable, Identifiable {
             UserDefaults.standard.set(skipExistingCoordinates, forKey: "pinmage_skip_existing_coordinates")
         }
     }
+    @Published var extrapolateDates: Bool {
+        didSet {
+            UserDefaults.standard.set(extrapolateDates, forKey: "pinmage_extrapolate_dates")
+        }
+    }
     
     func resetCumulativeSpend() {
         cumulativeSpend = 0.0
@@ -166,6 +171,12 @@ enum FilenamePattern: String, CaseIterable, Identifiable {
             self.skipExistingCoordinates = true
         } else {
             self.skipExistingCoordinates = UserDefaults.standard.bool(forKey: "pinmage_skip_existing_coordinates")
+        }
+        
+        if UserDefaults.standard.object(forKey: "pinmage_extrapolate_dates") == nil {
+            self.extrapolateDates = false
+        } else {
+            self.extrapolateDates = UserDefaults.standard.bool(forKey: "pinmage_extrapolate_dates")
         }
     }
 }

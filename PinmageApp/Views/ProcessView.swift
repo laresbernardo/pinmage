@@ -202,6 +202,34 @@ struct ProcessView: View {
                 }
             }
             
+            // Date extrapolation controls
+            if !manager.isProcessing, hasAnalyzedItems {
+                HStack {
+                    Toggle("Extrapolate dates forward (repeat last known date for unknown dates)", isOn: $settings.extrapolateDates)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .onChange(of: settings.extrapolateDates) { _, newValue in
+                            if newValue {
+                                manager.applyDateExtrapolation()
+                            }
+                        }
+                    
+                    if settings.extrapolateDates {
+                        Button("Apply Now") {
+                            manager.applyDateExtrapolation()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    
+                    Spacer()
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 6)
+            }
+            
             // Queue List or Empty State
             if manager.imageItems.isEmpty {
                 VStack(spacing: 16) {
