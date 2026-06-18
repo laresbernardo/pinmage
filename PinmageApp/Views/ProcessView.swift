@@ -6,6 +6,7 @@ struct ProcessView: View {
     @ObservedObject var settings: AppSettings
     @State private var isDraggingOver = false
     @State private var showOverwriteAlert = false
+    @State private var elapsedTime: TimeInterval = 0
     
     var body: some View {
         VStack(spacing: 0) {
@@ -18,12 +19,33 @@ struct ProcessView: View {
                         .foregroundColor(.white)
                     
                     if manager.isProcessing {
-                        HStack(spacing: 8) {
+                        HStack(spacing: 10) {
                             ProgressView()
                                 .controlSize(.small)
-                            Text("Processing: \(manager.currentProcessingFile)")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text("Processing: \(manager.currentProcessingFile)")
+                                        .font(.subheadline)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                    Text(elapsedTimeString)
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundColor(.secondary.opacity(0.6))
+                                }
+                                Text("\(manager.totalProcessedCount) / \(manager.imageItems.count) files | \(manager.successfulCount) OK, \(manager.failedCount) failed")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary.opacity(0.7))
+                                if manager.sessionSpend > 0 {
+                                    Text("Cost: \(formattedCost(manager.sessionSpend))")
+                                        .font(.caption)
+                                        .foregroundColor(.emerald.opacity(0.7))
+                                }
+                            }
+                        }
+                        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+                            if manager.isProcessing {
+                                elapsedTime += 1
+                            }
                         }
                     } else {
                         VStack(alignment: .leading, spacing: 2) {
@@ -31,12 +53,26 @@ struct ProcessView: View {
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
                             
-                            if !manager.imageItems.isEmpty {
-                                let pendingCount = manager.imageItems.filter { $0.status == .pending || $0.status == .failed }.count
-                                if pendingCount > 0 {
-                                    Text("Estimated AI Cost: \(estimatedCostString(count: pendingCount, model: settings.modelName)) (\(pendingCount) pending files)")
+                            HStack(spacing: 12) {
+                                if !manager.imageItems.isEmpty {
+                                    let pendingCount = manager.imageItems.filter { $0.status == .pending || $0.status == .failed }.count
+                                    if pendingCount > 0 {
+                                        Text("Estimated: \(estimatedCostString(count: pendingCount, model: settings.modelName)) (\(pendingCount) pending)")
+                                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                            .foregroundColor(.cyan.opacity(0.85))
+                                    }
+                                }
+                                
+                                if manager.sessionSpend > 0 {
+                                    Text("Actual: \(formattedCost(manager.sessionSpend))")
                                         .font(.system(size: 10, weight: .semibold, design: .rounded))
-                                        .foregroundColor(.cyan.opacity(0.85))
+                                        .foregroundColor(.emerald.opacity(0.85))
+                                }
+                                
+                                if settings.cumulativeSpend > 0 {
+                                    Text("Total: \(formattedCost(settings.cumulativeSpend))")
+                                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                        .foregroundColor(.secondary.opacity(0.6))
                                 }
                             }
                         }
@@ -74,7 +110,7 @@ struct ProcessView: View {
                         }) {
                             HStack {
                                 Image(systemName: "sparkles")
-                                Text("Analyze Queue")
+                                Text("Process")
                             }
                         }
                         .buttonStyle(.borderedProminent)
@@ -158,6 +194,11 @@ struct ProcessView: View {
             }
         }
         .background(isDraggingOver ? Color.cyan.opacity(0.05) : Color.clear)
+        .onChange(of: manager.isProcessing) { _, newValue in
+            if newValue {
+                elapsedTime = 0
+            }
+        }
         .alert(isPresented: $showOverwriteAlert) {
             Alert(
                 title: Text("Overwrite Original Files?"),
@@ -315,6 +356,27 @@ struct ProcessView: View {
         return true
     }
     
+    private var elapsedTimeString: String {
+        let minutes = Int(elapsedTime) / 60
+        let seconds = Int(elapsedTime) % 60
+        if minutes > 0 {
+            return "\(minutes)m \(seconds)s"
+        }
+        return "\(seconds)s"
+    }
+
+    private func formattedCost(_ value: Double) -> String {
+        if value < 0.01 {
+            return "less than $0.01"
+        }
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencyCode = "USD"
+        formatter.minimumFractionDigits = 2
+        formatter.maximumFractionDigits = 4
+        return formatter.string(from: NSNumber(value: value)) ?? String(format: "$%.4f", value)
+    }
+
     private func estimatedCostString(count: Int, model: String) -> String {
         guard count > 0 else { return "$0.00" }
         
@@ -526,6 +588,7 @@ struct QueueRowView: View {
                         .font(.caption)
                         .foregroundColor(.red)
                         .padding(.top, 2)
+                        .textSelection(.enabled)
                 }
             }
             

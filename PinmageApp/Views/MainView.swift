@@ -19,7 +19,14 @@ enum ActiveTab: String, CaseIterable, Identifiable {
 struct MainView: View {
     @StateObject var manager = PinmageManager()
     @StateObject var settings = AppSettings()
-    @State private var activeTab: ActiveTab = .dashboard
+    @State private var activeTab: ActiveTab = .processQueue
+    
+    private var visibleTabs: [ActiveTab] {
+        if manager.imageItems.isEmpty {
+            return [.processQueue, .settings]
+        }
+        return ActiveTab.allCases
+    }
     
     var body: some View {
         NavigationSplitView {
@@ -27,10 +34,7 @@ struct MainView: View {
             VStack(alignment: .leading, spacing: 20) {
                 // Logo Section
                 HStack(spacing: 12) {
-                    Image("AppIcon")
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 34, height: 34)
+                    PinmageLogoView(isAnimating: false, size: 34)
                         .shadow(color: Color.cyan.opacity(0.25), radius: 4)
                     
                     VStack(alignment: .leading, spacing: 2) {
@@ -52,7 +56,7 @@ struct MainView: View {
                 
                 // Sidebar Navigation Links
                 VStack(spacing: 6) {
-                    ForEach(ActiveTab.allCases) { tab in
+                    ForEach(visibleTabs) { tab in
                         Button(action: {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
                                 activeTab = tab
@@ -89,6 +93,11 @@ struct MainView: View {
                     }
                 }
                 .padding(.horizontal, 12)
+                .onChange(of: manager.imageItems.isEmpty) { _, isEmpty in
+                    if isEmpty, activeTab == .dashboard {
+                        activeTab = .processQueue
+                    }
+                }
                 
                 Spacer()
                 

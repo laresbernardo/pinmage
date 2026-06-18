@@ -12,6 +12,7 @@ import MapKit
     @Published var totalProcessedCount = 0
     @Published var successfulCount = 0
     @Published var failedCount = 0
+    @Published var sessionSpend: Double = 0.0
     
     private var cancellables = Set<AnyCancellable>()
     
@@ -155,6 +156,7 @@ import MapKit
     
     func updateSpend(settings: AppSettings, cost: Double) {
         settings.cumulativeSpend += cost
+        self.sessionSpend += cost
     }
     
     /// Phase 1: Calls AI to analyze dates, locations, coordinates, and certainty scores in parallel with concurrency limits.
@@ -176,6 +178,7 @@ import MapKit
         self.totalProcessedCount = 0
         self.successfulCount = 0
         self.failedCount = 0
+        self.sessionSpend = 0.0
         self.currentProgress = 0.0
         
         let indicesToProcess = imageItems.indices.filter {
@@ -312,10 +315,10 @@ import MapKit
             // Cache miss - Analyze with AI
             await manager.updateItemStatus(index: index, status: .callingAPI)
             
-            // Retry with exponential backoff (up to 3 attempts)
+            // Retry with exponential backoff
             var attempts = 0
-            let maxAttempts = 3
-            var delayNanoseconds: UInt64 = 2_000_000_000 // 2 seconds
+            let maxAttempts = 5
+            var delayNanoseconds: UInt64 = 3_000_000_000 // 3 seconds
             
             while attempts < maxAttempts {
                 let stillProcessing = await manager.isProcessing
@@ -335,12 +338,21 @@ import MapKit
                     break // success
                 } catch {
                     attempts += 1
+                    let nsError = error as NSError
+                    let is503 = nsError.domain == "GeminiManager" && nsError.code == 503
+                    if is503 {
+                        delayNanoseconds = min(delayNanoseconds * 2, 60_000_000_000) // cap at 60s
+                    } else {
+                        delayNanoseconds *= 2
+                    }
                     errorDescription = error.localizedDescription
                     print("Attempt \(attempts) failed for \(fileName): \(error.localizedDescription)")
                     let processing = await manager.isProcessing
                     if attempts < maxAttempts && processing {
+                        if is503 && attempts >= 3 {
+                            await manager.updateItemStatus(index: index, status: .callingAPI, fileName: "\(fileName) (retry \(attempts+1)/\(maxAttempts))")
+                        }
                         try? await Task.sleep(nanoseconds: delayNanoseconds)
-                        delayNanoseconds *= 2
                     }
                 }
             }
