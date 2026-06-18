@@ -67,7 +67,8 @@ struct SettingsView: View {
                                 .fontWeight(.semibold)
                             
                             Picker("", selection: $settings.modelName) {
-                                Text("Gemini 2.5 Flash (Recommended)").tag("gemini-2.5-flash")
+                                Text("Gemini 3.5 Flash (Recommended)").tag("gemini-3.5-flash")
+                                Text("Gemini 2.5 Flash").tag("gemini-2.5-flash")
                                 Text("Gemini 1.5 Flash").tag("gemini-1.5-flash")
                                 Text("Gemini 1.5 Pro").tag("gemini-1.5-pro")
                             }

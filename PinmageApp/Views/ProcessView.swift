@@ -25,9 +25,20 @@ struct ProcessView: View {
                                 .foregroundColor(.secondary)
                         }
                     } else {
-                        Text("\(manager.imageItems.count) files in queue | \(manager.successfulCount) completed, \(manager.failedCount) failed")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(manager.imageItems.count) files in queue | \(manager.successfulCount) completed, \(manager.failedCount) failed")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            
+                            if !manager.imageItems.isEmpty {
+                                let pendingCount = manager.imageItems.filter { $0.status == .pending || $0.status == .failed }.count
+                                if pendingCount > 0 {
+                                    Text("Estimated AI Cost: \(estimatedCostString(count: pendingCount, model: settings.modelName)) (\(pendingCount) pending files)")
+                                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                        .foregroundColor(.emerald.opacity(0.85))
+                                }
+                            }
+                        }
                     }
                 }
                 
@@ -180,6 +191,32 @@ struct ProcessView: View {
             }
         }
         return true
+    }
+    
+    private func estimatedCostString(count: Int, model: String) -> String {
+        guard count > 0 else { return "$0.00" }
+        
+        let isPro = model.contains("pro")
+        let inputRate = isPro ? 1.25 : 0.075
+        let outputRate = isPro ? 5.00 : 0.30
+        
+        // Standard image token size in Gemini is 258. Plus text prompt (~150 tokens) -> 408 input tokens per image.
+        let inputTokens = Double(count) * 410.0
+        // JSON response size is ~80 tokens.
+        let outputTokens = Double(count) * 80.0
+        
+        let cost = (inputTokens * inputRate / 1_000_000.0) + (outputTokens * outputRate / 1_000_000.0)
+        
+        if cost < 0.01 {
+            return "less than $0.01"
+        } else {
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .currency
+            formatter.currencyCode = "USD"
+            formatter.minimumFractionDigits = 2
+            formatter.maximumFractionDigits = 4
+            return formatter.string(from: NSNumber(value: cost)) ?? String(format: "$%.4f", cost)
+        }
     }
 }
 

@@ -19,7 +19,7 @@ NEW_VERSION="Unknown"
 NEW_BUILD="Unknown"
 
 # Auto-increment version/build using PlistBuddy if it exists
-if [ -f "$PLIST_FILE" ]; then
+if [ -f "$PLIST_FILE" ] && [ -x /usr/libexec/PlistBuddy ]; then
     CURRENT_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST_FILE")
     IFS='.' read -r major minor patch <<< "$CURRENT_VERSION"
     NEXT_PATCH=$((patch + 1))
@@ -40,6 +40,8 @@ if [ -f "$PLIST_FILE" ]; then
         echo -e "  \"date\": \"$TODAY\"" >> "$WEBSITE_VERSION_FILE"
         echo -e "}" >> "$WEBSITE_VERSION_FILE"
     fi
+else
+    echo -e "${YELLOW}Warning: PlistBuddy not found. Skipping auto-incrementing build number.${NC}"
 fi
 
 echo -e "${BLUE}==================================================${NC}"

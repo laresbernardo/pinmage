@@ -78,7 +78,7 @@ class AppSettings: ObservableObject {
     
     init() {
         self.apiKey = UserDefaults.standard.string(forKey: "pinmage_api_key") ?? ""
-        self.modelName = UserDefaults.standard.string(forKey: "pinmage_model_name") ?? "gemini-2.5-flash"
+        self.modelName = UserDefaults.standard.string(forKey: "pinmage_model_name") ?? "gemini-3.5-flash"
         self.outputFolderPath = UserDefaults.standard.string(forKey: "pinmage_output_folder") ?? ""
         self.customPrompt = UserDefaults.standard.string(forKey: "pinmage_custom_prompt") ?? "Analyze this image. If it is a scanned page containing multiple photos or a single photo, try to read any written text (captions, notes, dates) or visual cues to extract:\n1. The approximate or exact date when the photo(s) were taken.\n2. The location/place name (city, country, landmark) where the photo was taken.\n\nBe as accurate as possible. Return null for date or place if completely unknown."
     }
