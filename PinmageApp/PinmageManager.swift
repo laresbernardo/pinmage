@@ -48,6 +48,26 @@ import MapKit
         
         var newItems = uniqueNewUrls.map { ImageItem(fileURL: $0) }
         
+        // Check for existing GPS coordinates in each new image
+        for i in newItems.indices {
+            if let coords = MetadataWriter.readExistingCoordinates(from: newItems[i].fileURL) {
+                newItems[i].existingLatitude = coords.latitude
+                newItems[i].existingLongitude = coords.longitude
+            }
+        }
+        
+        // Reverse geocode existing coordinates for immediate place name display
+        Task {
+            for i in newItems.indices {
+                guard let lat = newItems[i].existingLatitude, let lon = newItems[i].existingLongitude else { continue }
+                if let geocoded = await GeocodingManager.reverseGeocode(latitude: lat, longitude: lon) {
+                    if let index = self.imageItems.firstIndex(where: { $0.id == newItems[i].id }) {
+                        self.imageItems[index].geocodedPlace = geocoded.resolvedName
+                    }
+                }
+            }
+        }
+        
         // Sort items alphabetically by filename (essential for chronological matching of scanned album pages)
         newItems.sort { $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending }
         
@@ -209,6 +229,7 @@ import MapKit
                 let idx = indicesToProcess[activeIndex]
                 activeIndex += 1
                 let item = imageItems[idx]
+                let skipCoords = settings.skipExistingCoordinates
                 group.addTask {
                     await self.analyzeSingleItem(
                         index: idx,
@@ -218,6 +239,9 @@ import MapKit
                         modelName: modelName,
                         customPrompt: customPrompt,
                         reduceImageSize: reduceImageSize,
+                        skipExistingCoordinates: skipCoords,
+                        existingLatitude: item.existingLatitude,
+                        existingLongitude: item.existingLongitude,
                         manager: self,
                         settings: settings
                     )
@@ -241,6 +265,7 @@ import MapKit
                     let idx = indicesToProcess[activeIndex]
                     activeIndex += 1
                     let item = imageItems[idx]
+                    let skipCoords = settings.skipExistingCoordinates
                     group.addTask {
                         await self.analyzeSingleItem(
                             index: idx,
@@ -250,6 +275,9 @@ import MapKit
                             modelName: modelName,
                             customPrompt: customPrompt,
                             reduceImageSize: reduceImageSize,
+                            skipExistingCoordinates: skipCoords,
+                            existingLatitude: item.existingLatitude,
+                            existingLongitude: item.existingLongitude,
                             manager: self,
                             settings: settings
                         )
@@ -298,10 +326,15 @@ import MapKit
         modelName: String,
         customPrompt: String,
         reduceImageSize: Bool,
+        skipExistingCoordinates: Bool,
+        existingLatitude: Double?,
+        existingLongitude: Double?,
         manager: PinmageManager,
         settings: AppSettings
     ) async -> AnalysisUpdate {
         await manager.updateItemStatus(index: index, status: .processing, fileName: fileName)
+        
+        let hasExistingCoords = skipExistingCoordinates && existingLatitude != nil && existingLongitude != nil
         
         // 1. Compute image hash for local cache
         let hash = CacheManager.computeHash(for: itemURL) ?? ""
@@ -380,7 +413,14 @@ import MapKit
         var longitude: Double? = result.longitude
         var geocodedPlace: String? = nil
         
-        if let place = result.place, !place.isEmpty, place.lowercased() != "null" {
+        // If image already has GPS coordinates and skip is on, use existing instead of AI result
+        if hasExistingCoords {
+            latitude = existingLatitude
+            longitude = existingLongitude
+            if let geocoded = await GeocodingManager.reverseGeocode(latitude: existingLatitude!, longitude: existingLongitude!) {
+                geocodedPlace = geocoded.resolvedName
+            }
+        } else if let place = result.place, !place.isEmpty, place.lowercased() != "null" {
             if latitude == nil || longitude == nil {
                 await manager.updateItemStatus(index: index, status: .geocoding, place: place)
                 
@@ -432,7 +472,16 @@ import MapKit
             
             // Default checked state based on certainty threshold
             self.imageItems[index].saveDate = parsedDate != nil && dateCertainty >= certaintyThreshold
-            self.imageItems[index].saveLocation = update.latitude != nil && locationCertainty >= certaintyThreshold
+            
+            let item = self.imageItems[index]
+            let usingExistingCoords = update.latitude != nil && item.existingLatitude != nil &&
+                abs(update.latitude! - item.existingLatitude!) < 0.0001 &&
+                abs(update.longitude! - item.existingLongitude!) < 0.0001
+            if usingExistingCoords {
+                self.imageItems[index].saveLocation = true
+            } else {
+                self.imageItems[index].saveLocation = update.latitude != nil && locationCertainty >= certaintyThreshold
+            }
             
             self.imageItems[index].status = .analyzed
             self.successfulCount += 1
@@ -650,6 +699,27 @@ class GeocodingManager {
             )
         } catch {
             print("Geocoding error for '\(address)': \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    static func reverseGeocode(latitude: Double, longitude: Double) async -> GeocodedLocation? {
+        let geocoder = CLGeocoder()
+        let location = CLLocation(latitude: latitude, longitude: longitude)
+        do {
+            let placemarks = try await geocoder.reverseGeocodeLocation(location)
+            guard let placemark = placemarks.first else { return nil }
+            let name = placemark.locality ?? placemark.administrativeArea ?? placemark.country
+            let resolved = [placemark.name, placemark.locality, placemark.administrativeArea, placemark.country]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: ", ")
+            return GeocodedLocation(
+                coordinate: placemark.location?.coordinate ?? location.coordinate,
+                resolvedName: resolved.isEmpty ? nil : resolved
+            )
+        } catch {
+            print("Reverse geocoding error: \(error.localizedDescription)")
             return nil
         }
     }

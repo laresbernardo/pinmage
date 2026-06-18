@@ -19,16 +19,22 @@ struct MetadataWriter {
             return false
         }
         
-        // Create destination writer
-        guard let imageDestination = CGImageDestinationCreateWithURL(destinationURL as CFURL, uti, 1, nil) else {
+        // Create destination writer with lossless compression to avoid quality loss
+        let destinationOptions: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: 1.0
+        ]
+        guard let imageDestination = CGImageDestinationCreateWithURL(destinationURL as CFURL, uti, 1, destinationOptions as CFDictionary) else {
             print("Failed to create image destination at: \(destinationURL)")
             return false
         }
         
-        // Copy original metadata properties
+        // Copy original metadata properties (stripping any non-metadata keys)
         var metadataDict = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any] ?? [:]
+        metadataDict.removeValue(forKey: kCGImageDestinationLossyCompressionQuality)
         
-        // Update EXIF
+        // Update EXIF:
+        //   DateTimeOriginal — the date/time the photo was taken (original creation date)
+        //   DateTimeDigitized — the date/time the image was digitized (relevant for scans)
         if let date = date {
             var exifDict = metadataDict[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
             let formatter = DateFormatter()
@@ -38,7 +44,7 @@ struct MetadataWriter {
             exifDict[kCGImagePropertyExifDateTimeDigitized] = dateString
             metadataDict[kCGImagePropertyExifDictionary] = exifDict
             
-            // Also write to TIFF dictionary just in case
+            // Also write to TIFF dictionary as a fallback
             var tiffDict = metadataDict[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
             tiffDict[kCGImagePropertyTIFFDateTime] = dateString
             metadataDict[kCGImagePropertyTIFFDictionary] = tiffDict
@@ -55,6 +61,7 @@ struct MetadataWriter {
         }
         
         // Add image with the updated metadata properties dictionary
+        // Using the same UTI as the source preserves the original format
         CGImageDestinationAddImageFromSource(imageDestination, imageSource, 0, metadataDict as CFDictionary)
         
         // Finalize (writes target output file to disk)
@@ -64,5 +71,27 @@ struct MetadataWriter {
         }
         
         return true
+    }
+    
+    static func readExistingCoordinates(from url: URL) -> (latitude: Double, longitude: Double)? {
+        guard let sourceData = try? Data(contentsOf: url),
+              let imageSource = CGImageSourceCreateWithData(sourceData as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
+              let gpsDict = properties[kCGImagePropertyGPSDictionary] as? [CFString: Any] else {
+            return nil
+        }
+        
+        guard let latNum = gpsDict[kCGImagePropertyGPSLatitude] as? Double,
+              let lonNum = gpsDict[kCGImagePropertyGPSLongitude] as? Double else {
+            return nil
+        }
+        
+        let latRef = gpsDict[kCGImagePropertyGPSLatitudeRef] as? String ?? "N"
+        let lonRef = gpsDict[kCGImagePropertyGPSLongitudeRef] as? String ?? "E"
+        
+        let latitude = latRef == "S" ? -latNum : latNum
+        let longitude = lonRef == "W" ? -lonNum : lonNum
+        
+        return (latitude, longitude)
     }
 }

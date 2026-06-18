@@ -154,6 +154,23 @@ struct ProcessView: View {
                 certaintyThresholdPanel
             }
             
+            // Existing GPS toggle
+            if !manager.isProcessing, !manager.imageItems.isEmpty {
+                let gpsCount = manager.imageItems.filter { $0.hasExistingCoordinates }.count
+                if gpsCount > 0 {
+                    HStack {
+                        Toggle("Keep existing GPS for \(gpsCount) image(s) — disable to allow AI overwrite", isOn: $settings.skipExistingCoordinates)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 6)
+                }
+            }
+            
             // Queue List or Empty State
             if manager.imageItems.isEmpty {
                 VStack(spacing: 16) {
@@ -522,7 +539,8 @@ struct QueueRowView: View {
                     
                     // Place output
                     HStack(spacing: 4) {
-                        if item.status == .analyzed || item.status == .completed || item.detectedPlace != nil {
+                        let hasCoords = (item.latitude != nil && item.longitude != nil) || item.hasExistingCoordinates
+                        if item.status == .analyzed || item.status == .completed || item.detectedPlace != nil || hasCoords {
                             Button(action: {
                                 manager.toggleSaveLocation(id: item.id)
                             }) {
@@ -531,7 +549,7 @@ struct QueueRowView: View {
                                     .foregroundColor(item.saveLocation ? .emerald : .secondary.opacity(0.4))
                             }
                             .buttonStyle(.plain)
-                            .disabled(item.latitude == nil || item.longitude == nil)
+                            .disabled(item.latitude == nil && !item.hasExistingCoordinates)
                         }
                         
                         Image(systemName: "mappin.and.ellipse")
@@ -542,6 +560,14 @@ struct QueueRowView: View {
                             Text(place)
                                 .foregroundColor(.white.opacity(0.9))
                                 .lineLimit(1)
+                        } else if let geo = item.geocodedPlace {
+                            Text(geo)
+                                .foregroundColor(.cyan.opacity(0.85))
+                                .lineLimit(1)
+                        } else if item.hasExistingCoordinates {
+                            Text("Looking up place...")
+                                .foregroundColor(.secondary)
+                                .font(.caption)
                         } else {
                             Text("Pending...")
                                 .foregroundColor(.secondary)
@@ -560,7 +586,9 @@ struct QueueRowView: View {
                     }
                     
                     // Coordinates output
-                    if let lat = item.latitude, let lon = item.longitude {
+                    let coordLat = item.latitude ?? item.existingLatitude
+                    let coordLon = item.longitude ?? item.existingLongitude
+                    if let lat = coordLat, let lon = coordLon {
                         HStack(alignment: .top, spacing: 4) {
                             Image(systemName: "globe")
                                 .font(.system(size: 11))
@@ -571,13 +599,18 @@ struct QueueRowView: View {
                                     .font(.system(size: 10, design: .monospaced))
                                     .foregroundColor(.secondary)
                                 if let geoName = item.geocodedPlace {
-                                    Text("Ref: \(geoName)")
+                                    Text("\(geoName)")
                                         .font(.system(size: 9))
                                         .foregroundColor(.cyan.opacity(0.8))
                                         .lineLimit(1)
+                                } else if item.hasExistingCoordinates {
+                                    Text("Looking up place...")
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.secondary)
                                 }
                             }
                         }
+                        .padding(.top, 2)
                     }
                 }
                 .font(.subheadline)

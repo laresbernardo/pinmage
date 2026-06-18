@@ -54,6 +54,11 @@ struct ImageItem: Identifiable, Equatable {
     var dateIsInherited: Bool = false
     var outputURL: URL? = nil
     
+    // Existing GPS from file metadata
+    var existingLatitude: Double? = nil
+    var existingLongitude: Double? = nil
+    var hasExistingCoordinates: Bool { existingLatitude != nil && existingLongitude != nil }
+    
     // User acceptance & Geocoded Reference Place name
     var saveDate: Bool = false
     var saveLocation: Bool = false
@@ -123,6 +128,11 @@ enum FilenamePattern: String, CaseIterable, Identifiable {
             UserDefaults.standard.set(cumulativeSpend, forKey: "pinmage_cumulative_spend")
         }
     }
+    @Published var skipExistingCoordinates: Bool {
+        didSet {
+            UserDefaults.standard.set(skipExistingCoordinates, forKey: "pinmage_skip_existing_coordinates")
+        }
+    }
     
     func resetCumulativeSpend() {
         cumulativeSpend = 0.0
@@ -151,6 +161,12 @@ enum FilenamePattern: String, CaseIterable, Identifiable {
         self.maxConcurrentRequests = storedConcurrent == 0 ? 3 : storedConcurrent
         
         self.cumulativeSpend = UserDefaults.standard.double(forKey: "pinmage_cumulative_spend")
+        
+        if UserDefaults.standard.object(forKey: "pinmage_skip_existing_coordinates") == nil {
+            self.skipExistingCoordinates = true
+        } else {
+            self.skipExistingCoordinates = UserDefaults.standard.bool(forKey: "pinmage_skip_existing_coordinates")
+        }
     }
 }
 
