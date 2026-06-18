@@ -27,20 +27,8 @@ struct MainView: View {
             VStack(alignment: .leading, spacing: 20) {
                 // Logo Section
                 HStack(spacing: 12) {
-                    ZStack {
-                        Circle()
-                            .fill(LinearGradient(
-                                colors: [.emerald, .cyan],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ))
-                            .frame(width: 34, height: 34)
-                            .shadow(color: Color.emerald.opacity(0.35), radius: 4)
-                        
-                        Image(systemName: "photo.fill.on.rectangle.fill")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundColor(.white)
-                    }
+                    PinmageLogoView(isAnimating: manager.isProcessing, size: 34)
+                        .shadow(color: Color.cyan.opacity(0.25), radius: 4)
                     
                     VStack(alignment: .leading, spacing: 2) {
                         Text("PINMAGE")
@@ -82,9 +70,9 @@ struct MainView: View {
                                 
                                 if activeTab == tab {
                                     Circle()
-                                        .fill(Color.emerald)
+                                        .fill(Color.cyan)
                                         .frame(width: 5, height: 5)
-                                        .shadow(color: .emerald, radius: 3)
+                                        .shadow(color: .cyan, radius: 3)
                                 }
                             }
                             .padding(.horizontal, 12)

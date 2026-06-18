@@ -26,7 +26,7 @@ struct SettingsView: View {
                         HStack(spacing: 8) {
                             Image(systemName: "sparkles")
                                 .font(.title3)
-                                .foregroundColor(.emerald)
+                                .foregroundColor(.cyan)
                             Text("Gemini API Setup")
                                 .font(.headline)
                                 .foregroundColor(.white)
@@ -87,7 +87,7 @@ struct SettingsView: View {
                         HStack(spacing: 8) {
                             Image(systemName: "folder.fill")
                                 .font(.title3)
-                                .foregroundColor(.emerald)
+                                .foregroundColor(.cyan)
                             Text("Destination Settings")
                                 .font(.headline)
                                 .foregroundColor(.white)
@@ -185,7 +185,7 @@ struct SettingsView: View {
                         HStack(spacing: 8) {
                             Image(systemName: "slider.horizontal.3")
                                 .font(.title3)
-                                .foregroundColor(.emerald)
+                                .foregroundColor(.cyan)
                             Text("AI System Prompt")
                                 .font(.headline)
                                 .foregroundColor(.white)
@@ -229,7 +229,7 @@ struct SettingsView: View {
                         HStack(spacing: 8) {
                             Image(systemName: "gauge.medium")
                                 .font(.title3)
-                                .foregroundColor(.emerald)
+                                .foregroundColor(.cyan)
                             Text("Performance & Economy")
                                 .font(.headline)
                                 .foregroundColor(.white)
@@ -256,7 +256,7 @@ struct SettingsView: View {
                                     .foregroundColor(.white)
                                 Text("\(settings.maxConcurrentRequests)")
                                     .fontWeight(.bold)
-                                    .foregroundColor(.emerald)
+                                    .foregroundColor(.cyan)
                             }
                             
                             Slider(value: Binding(
@@ -300,7 +300,7 @@ struct SettingsView: View {
                         HStack(spacing: 8) {
                             Image(systemName: "banknote.fill")
                                 .font(.title3)
-                                .foregroundColor(.emerald)
+                                .foregroundColor(.cyan)
                             Text("AI Cost & Spend Tracker")
                                 .font(.headline)
                                 .foregroundColor(.white)
@@ -316,7 +316,7 @@ struct SettingsView: View {
                                     .fontWeight(.semibold)
                                 Text(formattedSpend(settings.cumulativeSpend))
                                     .font(.system(size: 28, weight: .bold, design: .rounded))
-                                    .foregroundColor(.emerald)
+                                    .foregroundColor(.cyan)
                             }
                             
                             Spacer()

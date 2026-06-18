@@ -1,4 +1,4 @@
-# Pinmage — AI-Powered Photo Date & Location Injector
+# <img src="PinmageApp/AppIcon.png" width="42" align="center" style="border-radius: 8px;" /> Pinmage — AI-Powered Photo Date & Location Injector
 
 Pinmage is a native **macOS SwiftUI** utility that automatically restores historical metadata to your photo library. It uses Gemini AI (Gemini 3.5 Flash / Pro) to extract dates and locations from scanned pages or photos, then embeds them natively.
 

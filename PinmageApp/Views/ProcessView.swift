@@ -36,7 +36,7 @@ struct ProcessView: View {
                                 if pendingCount > 0 {
                                     Text("Estimated AI Cost: \(estimatedCostString(count: pendingCount, model: settings.modelName)) (\(pendingCount) pending files)")
                                         .font(.system(size: 10, weight: .semibold, design: .rounded))
-                                        .foregroundColor(.emerald.opacity(0.85))
+                                        .foregroundColor(.cyan.opacity(0.85))
                                 }
                             }
                         }
@@ -103,7 +103,7 @@ struct ProcessView: View {
                             .fill(Color.white.opacity(0.1))
                             .frame(height: 4)
                         Rectangle()
-                            .fill(LinearGradient(colors: [.emerald, .cyan], startPoint: .leading, endPoint: .trailing))
+                            .fill(LinearGradient(colors: [.indigo, .cyan], startPoint: .leading, endPoint: .trailing))
                             .frame(width: geo.size.width * CGFloat(manager.currentProgress), height: 4)
                             .animation(.spring(), value: manager.currentProgress)
                     }
@@ -136,7 +136,7 @@ struct ProcessView: View {
                     .buttonStyle(.bordered)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(isDraggingOver ? Color.emerald.opacity(0.05) : Color.clear)
+                .background(isDraggingOver ? Color.cyan.opacity(0.05) : Color.clear)
                 .onDrop(of: ["public.file-url"], isTargeted: $isDraggingOver) { providers in
                     handleDrop(providers: providers)
                 }
@@ -157,7 +157,7 @@ struct ProcessView: View {
                 }
             }
         }
-        .background(isDraggingOver ? Color.emerald.opacity(0.05) : Color.clear)
+        .background(isDraggingOver ? Color.cyan.opacity(0.05) : Color.clear)
         .alert(isPresented: $showOverwriteAlert) {
             Alert(
                 title: Text("Overwrite Original Files?"),
@@ -195,7 +195,7 @@ struct ProcessView: View {
                         Text("\(settings.certaintyThreshold)%")
                             .font(.subheadline)
                             .fontWeight(.bold)
-                            .foregroundColor(.emerald)
+                            .foregroundColor(.cyan)
                     }
                     
                     Slider(
@@ -206,7 +206,7 @@ struct ProcessView: View {
                         in: 0...100,
                         step: 5
                     )
-                    .tint(.emerald)
+                    .tint(.cyan)
                 }
                 .frame(maxWidth: 320)
                 
@@ -254,7 +254,7 @@ struct ProcessView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.emerald)
+                .tint(.cyan)
                 .disabled(dateWillModifyCount == 0 && locationWillModifyCount == 0)
             }
             .padding(16)
@@ -410,10 +410,10 @@ struct QueueRowView: View {
                         if item.dateIsInherited {
                             Text("(Inherited)")
                                 .font(.system(size: 9))
-                                .foregroundColor(.emerald)
+                                .foregroundColor(.cyan)
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 1)
-                                .background(Color.emerald.opacity(0.15))
+                                .background(Color.cyan.opacity(0.15))
                                 .cornerRadius(3)
                         }
                         
@@ -421,10 +421,10 @@ struct QueueRowView: View {
                             let isAbove = certainty >= settings.certaintyThreshold
                             Text("\(certainty)%")
                                 .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(isAbove ? .emerald : .orange)
+                                .foregroundColor(isAbove ? .cyan : .orange)
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 1)
-                                .background((isAbove ? Color.emerald : Color.orange).opacity(0.15))
+                                .background((isAbove ? Color.cyan : Color.orange).opacity(0.15))
                                 .cornerRadius(3)
                         }
                     }
@@ -445,10 +445,10 @@ struct QueueRowView: View {
                             let isAbove = certainty >= settings.certaintyThreshold
                             Text("\(certainty)%")
                                 .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(isAbove ? .emerald : .orange)
+                                .foregroundColor(isAbove ? .cyan : .orange)
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 1)
-                                .background((isAbove ? Color.emerald : Color.orange).opacity(0.15))
+                                .background((isAbove ? Color.cyan : Color.orange).opacity(0.15))
                                 .cornerRadius(3)
                         }
                     }
@@ -487,7 +487,7 @@ struct QueueRowView: View {
                     NSWorkspace.shared.activateFileViewerSelecting([outputURL])
                 }) {
                     Image(systemName: "magnifyingglass.circle")
-                        .foregroundColor(.emerald)
+                        .foregroundColor(.cyan)
                 }
                 .buttonStyle(.plain)
                 .padding(.leading, 8)

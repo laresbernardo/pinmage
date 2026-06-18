@@ -2,13 +2,13 @@
 :root {
     --bg-primary: #0a0e12;
     --bg-secondary: #11171d;
-    --accent-emerald: #10b981;
+    --accent-indigo: #6366f1;
     --accent-cyan: #06b6d4;
     --text-primary: #ffffff;
     --text-secondary: #9ca3af;
     --glass-bg: rgba(255, 255, 255, 0.03);
     --glass-border: rgba(255, 255, 255, 0.06);
-    --glass-glow: rgba(16, 185, 129, 0.15);
+    --glass-glow: rgba(99, 102, 241, 0.15);
 }
 
 * {
@@ -73,8 +73,8 @@ html {
     width: 28px;
     height: 28px;
     border-radius: 50%;
-    background: linear-gradient(135deg, var(--accent-emerald), var(--accent-cyan));
-    box-shadow: 0 0 10px rgba(16, 185, 129, 0.4);
+    background: linear-gradient(135deg, var(--accent-indigo), var(--accent-cyan));
+    box-shadow: 0 0 10px rgba(99, 102, 241, 0.4);
 }
 
 .logo-text {
@@ -148,11 +148,11 @@ html {
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 1px;
-    color: var(--accent-emerald);
-    background: rgba(16, 185, 129, 0.1);
+    color: var(--accent-indigo);
+    background: rgba(99, 102, 241, 0.1);
     padding: 6px 12px;
     border-radius: 20px;
-    border: 1px solid rgba(16, 185, 129, 0.2);
+    border: 1px solid rgba(99, 102, 241, 0.2);
     margin-bottom: 20px;
 }
 
@@ -188,18 +188,18 @@ html {
     gap: 12px;
     padding: 16px 32px;
     border-radius: 12px;
-    background: linear-gradient(135deg, var(--accent-emerald), var(--accent-cyan));
+    background: linear-gradient(135deg, var(--accent-indigo), var(--accent-cyan));
     color: #05070a;
     font-size: 1.05rem;
     font-weight: 700;
     text-decoration: none;
-    box-shadow: 0 8px 30px rgba(16, 185, 129, 0.25);
+    box-shadow: 0 8px 30px rgba(99, 102, 241, 0.25);
     transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .download-btn:hover {
     transform: translateY(-2px);
-    box-shadow: 0 12px 40px rgba(16, 185, 129, 0.4);
+    box-shadow: 0 12px 40px rgba(99, 102, 241, 0.4);
 }
 
 .download-btn:active {
@@ -253,7 +253,7 @@ html {
     left: 10%;
     width: 80%;
     height: 80%;
-    background: radial-gradient(circle, var(--glass-glow) 0%, rgba(16, 185, 129, 0) 70%);
+    background: radial-gradient(circle, var(--glass-glow) 0%, rgba(99, 102, 241, 0) 70%);
     filter: blur(50px);
     z-index: 1;
     pointer-events: none;
@@ -299,18 +299,18 @@ html {
 
 .feature-card:hover {
     transform: translateY(-6px);
-    border-color: rgba(16, 185, 129, 0.3);
-    box-shadow: 0 10px 30px rgba(16, 185, 129, 0.05);
+    border-color: rgba(99, 102, 241, 0.3);
+    box-shadow: 0 10px 30px rgba(99, 102, 241, 0.05);
 }
 
 .card-icon {
     width: 48px;
     height: 48px;
     border-radius: 12px;
-    background: rgba(16, 185, 129, 0.08);
+    background: rgba(99, 102, 241, 0.08);
     margin-bottom: 24px;
     position: relative;
-    border: 1px solid rgba(16, 185, 129, 0.15);
+    border: 1px solid rgba(99, 102, 241, 0.15);
 }
 
 .card-icon::after {
@@ -375,10 +375,10 @@ html {
     font-family: 'Outfit', sans-serif;
     font-size: 2.5rem;
     font-weight: 900;
-    color: rgba(16, 185, 129, 0.15);
+    color: rgba(99, 102, 241, 0.15);
     line-height: 1;
     margin-bottom: 16px;
-    border-bottom: 2px solid rgba(16, 185, 129, 0.2);
+    border-bottom: 2px solid rgba(99, 102, 241, 0.2);
     width: 100%;
     padding-bottom: 8px;
 }

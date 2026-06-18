@@ -66,7 +66,7 @@ struct DashboardView: View {
                                                 x: .value("Year", data.year),
                                                 y: .value("Count", data.count)
                                             )
-                                            .foregroundStyle(LinearGradient(colors: [.emerald, .cyan], startPoint: .bottom, endPoint: .top))
+                                            .foregroundStyle(LinearGradient(colors: [.indigo, .cyan], startPoint: .bottom, endPoint: .top))
                                             .cornerRadius(4)
                                         }
                                     }
@@ -117,7 +117,7 @@ struct DashboardView: View {
                                         ForEach(locationData.prefix(5)) { loc in
                                             HStack {
                                                 Image(systemName: "mappin.circle.fill")
-                                                    .foregroundColor(.emerald)
+                                                    .foregroundColor(.cyan)
                                                 Text(loc.place)
                                                     .foregroundColor(.white)
                                                     .lineLimit(1)
