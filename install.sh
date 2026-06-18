@@ -100,6 +100,8 @@ swiftc -O -sdk "$SDK_PATH" \
     "$SRC_STAGING/PinmageApp/MetadataWriter.swift" \
     "$SRC_STAGING/PinmageApp/GeminiManager.swift" \
     "$SRC_STAGING/PinmageApp/PinmageManager.swift" \
+    "$SRC_STAGING/PinmageApp/CacheManager.swift" \
+    "$SRC_STAGING/PinmageApp/ImageResizer.swift" \
     "$SRC_STAGING/PinmageApp/Views/MainView.swift" \
     "$SRC_STAGING/PinmageApp/Views/DashboardView.swift" \
     "$SRC_STAGING/PinmageApp/Views/ProcessView.swift" \

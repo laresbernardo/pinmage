@@ -3,6 +3,7 @@ import AppKit
 
 struct SettingsView: View {
     @ObservedObject var settings: AppSettings
+    @State private var showResetConfirm = false
     
     var body: some View {
         ScrollView {
@@ -219,11 +220,140 @@ struct SettingsView: View {
                             }
                         }
                     }
+                }
+                .glassCardHoverEffect()
+                
+                // Performance & Economy Settings
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "gauge.medium")
+                                .font(.title3)
+                                .foregroundColor(.emerald)
+                            Text("Performance & Economy")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                        }
+                        
+                        Divider().background(Color.white.opacity(0.1))
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle("Smart downscale of images (max 1600px width/height)", isOn: $settings.reduceImageSize)
+                                .toggleStyle(.checkbox)
+                                .font(.body)
+                                .foregroundColor(.white)
+                            
+                            Text("Reduces upload bandwidth by up to 98% to maximize speed and prevent memory issues. Resized to high-quality JPEG.")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        Divider().background(Color.white.opacity(0.1))
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Max Concurrent AI Requests:")
+                                    .foregroundColor(.white)
+                                Text("\(settings.maxConcurrentRequests)")
+                                    .fontWeight(.bold)
+                                    .foregroundColor(.emerald)
+                            }
+                            
+                            Slider(value: Binding(
+                                get: { Double(settings.maxConcurrentRequests) },
+                                set: { settings.maxConcurrentRequests = Int($0) }
+                            ), in: 1...5, step: 1)
+                            
+                            Text("Controls the parallel request limits. Higher values analyze albums quicker but might trigger Gemini API rate limits (HTTP 429).")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        Divider().background(Color.white.opacity(0.1))
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Local Metadata Cache Database")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .fontWeight(.semibold)
+                            
+                            HStack {
+                                Text("Avoids paying for repetitive API calls of unmodified images by caching results.")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Button("Clear Cache Database") {
+                                    CacheManager.shared.clearCache()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        }
+                    }
+                    .padding(20)
+                }
+                .glassCardHoverEffect()
+                
+                // AI Cost & Spend Tracker
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "banknote.fill")
+                                .font(.title3)
+                                .foregroundColor(.emerald)
+                            Text("AI Cost & Spend Tracker")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                        }
+                        
+                        Divider().background(Color.white.opacity(0.1))
+                        
+                        HStack(alignment: .center, spacing: 24) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Cumulative API Spend")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .fontWeight(.semibold)
+                                Text(formattedSpend(settings.cumulativeSpend))
+                                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                                    .foregroundColor(.emerald)
+                            }
+                            
+                            Spacer()
+                            
+                            Button(action: {
+                                showResetConfirm = true
+                            }) {
+                                HStack {
+                                    Image(systemName: "trash")
+                                    Text("Reset Spend...")
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.red)
+                        }
+                        
+                        Text("Tracks real API cost calculated from Gemini's usageMetadata response. This is saved locally and can be reset at any time.")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
                     .padding(20)
                 }
                 .glassCardHoverEffect()
             }
             .padding(24)
+        }
+        .confirmationDialog(
+            "Reset Cumulative Spend?",
+            isPresented: $showResetConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Reset Spend", role: .destructive) {
+                settings.resetCumulativeSpend()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Are you sure you want to reset the cumulative API spend history to $0.00? This action cannot be undone.")
         }
     }
     
@@ -241,5 +371,14 @@ struct SettingsView: View {
                 settings.outputFolderPath = url.path
             }
         }
+    }
+    
+    private func formattedSpend(_ value: Double) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencyCode = "USD"
+        formatter.minimumFractionDigits = 2
+        formatter.maximumFractionDigits = 5
+        return formatter.string(from: NSNumber(value: value)) ?? String(format: "$%.5f", value)
     }
 }

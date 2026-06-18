@@ -70,20 +70,16 @@ struct ProcessView: View {
                         .buttonStyle(.bordered)
                         
                         Button(action: {
-                            if settings.overwriteOriginals {
-                                showOverwriteAlert = true
-                            } else {
-                                startProcessingQueue()
-                            }
+                            startAnalysisQueue()
                         }) {
                             HStack {
-                                Image(systemName: "play.fill")
-                                Text("Start Processing")
+                                Image(systemName: "sparkles")
+                                Text("Analyze Queue")
                             }
                         }
                         .buttonStyle(.borderedProminent)
-                        .tint(.emerald)
-                        .disabled(manager.imageItems.isEmpty)
+                        .tint(.blue)
+                        .disabled(manager.imageItems.isEmpty || manager.imageItems.allSatisfy { $0.status == .analyzed || $0.status == .completed })
                         
                         Button(action: {
                             manager.clearAll()
@@ -117,6 +113,11 @@ struct ProcessView: View {
                 Divider().background(Color.white.opacity(0.1))
             }
             
+            // Certainty Threshold Panel
+            if !manager.isProcessing, hasAnalyzedItems {
+                certaintyThresholdPanel
+            }
+            
             // Queue List or Empty State
             if manager.imageItems.isEmpty {
                 VStack(spacing: 16) {
@@ -142,7 +143,7 @@ struct ProcessView: View {
             } else {
                 List {
                     ForEach(manager.imageItems) { item in
-                        QueueRowView(item: item, onRemove: {
+                        QueueRowView(item: item, settings: settings, onRemove: {
                             manager.removeImage(id: item.id)
                         })
                         .padding(.vertical, 4)
@@ -162,16 +163,115 @@ struct ProcessView: View {
                 title: Text("Overwrite Original Files?"),
                 message: Text("WARNING: Proceeding will replace the source images on your disk with the new date and location metadata. This action cannot be undone. Make sure you have backups!"),
                 primaryButton: .destructive(Text("Overwrite Files")) {
-                    startProcessingQueue()
+                    startWritingQueue()
                 },
                 secondaryButton: .cancel()
             )
         }
     }
     
-    private func startProcessingQueue() {
+    private var hasAnalyzedItems: Bool {
+        manager.imageItems.contains { $0.status == .analyzed }
+    }
+    
+    private var dateWillModifyCount: Int {
+        manager.imageItems.filter { $0.status == .analyzed && ($0.dateCertainty ?? 0) >= settings.certaintyThreshold }.count
+    }
+    
+    private var locationWillModifyCount: Int {
+        manager.imageItems.filter { $0.status == .analyzed && ($0.locationCertainty ?? 0) >= settings.certaintyThreshold }.count
+    }
+    
+    private var certaintyThresholdPanel: some View {
+        GlassCard {
+            HStack(spacing: 24) {
+                // Slider
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Certainty Threshold:")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.white)
+                        Text("\(settings.certaintyThreshold)%")
+                            .font(.subheadline)
+                            .fontWeight(.bold)
+                            .foregroundColor(.emerald)
+                    }
+                    
+                    Slider(
+                        value: Binding(
+                            get: { Double(settings.certaintyThreshold) },
+                            set: { settings.certaintyThreshold = Int($0) }
+                        ),
+                        in: 0...100,
+                        step: 5
+                    )
+                    .tint(.emerald)
+                }
+                .frame(maxWidth: 320)
+                
+                Divider()
+                    .background(Color.white.opacity(0.1))
+                    .frame(height: 40)
+                
+                // Previews
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Certainty Filter Preview:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fontWeight(.semibold)
+                    
+                    HStack(spacing: 16) {
+                        Label(
+                            "\(dateWillModifyCount) dates to save",
+                            systemImage: "calendar"
+                        )
+                        .font(.subheadline)
+                        .foregroundColor(.white)
+                        
+                        Label(
+                            "\(locationWillModifyCount) locations to save",
+                            systemImage: "mappin.and.ellipse"
+                        )
+                        .font(.subheadline)
+                        .foregroundColor(.white)
+                    }
+                }
+                
+                Spacer()
+                
+                // Write/Save Button
+                Button(action: {
+                    if settings.overwriteOriginals {
+                        showOverwriteAlert = true
+                    } else {
+                        startWritingQueue()
+                    }
+                }) {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                        Text("Save Metadata to Files")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.emerald)
+                .disabled(dateWillModifyCount == 0 && locationWillModifyCount == 0)
+            }
+            .padding(16)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 12)
+    }
+    
+    private func startAnalysisQueue() {
         Task {
-            await manager.startProcessing(settings: settings)
+            await manager.startAnalysis(settings: settings)
+        }
+    }
+    
+    private func startWritingQueue() {
+        Task {
+            await manager.startWriting(settings: settings)
         }
     }
     
@@ -241,6 +341,7 @@ struct ProcessView: View {
 
 struct QueueRowView: View {
     let item: ImageItem
+    @ObservedObject var settings: AppSettings
     let onRemove: () -> Void
     @State private var thumbnail: NSImage? = nil
     
@@ -315,6 +416,17 @@ struct QueueRowView: View {
                                 .background(Color.emerald.opacity(0.15))
                                 .cornerRadius(3)
                         }
+                        
+                        if let certainty = item.dateCertainty {
+                            let isAbove = certainty >= settings.certaintyThreshold
+                            Text("\(certainty)%")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(isAbove ? .emerald : .orange)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background((isAbove ? Color.emerald : Color.orange).opacity(0.15))
+                                .cornerRadius(3)
+                        }
                     }
                     
                     // Place output
@@ -327,6 +439,17 @@ struct QueueRowView: View {
                         } else {
                             Text("Pending...")
                                 .foregroundColor(.secondary)
+                        }
+                        
+                        if let certainty = item.locationCertainty {
+                            let isAbove = certainty >= settings.certaintyThreshold
+                            Text("\(certainty)%")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(isAbove ? .emerald : .orange)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background((isAbove ? Color.emerald : Color.orange).opacity(0.15))
+                                .cornerRadius(3)
                         }
                     }
                     

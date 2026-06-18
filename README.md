@@ -1,15 +1,20 @@
 # Pinmage — AI-Powered Photo Date & Location Injector
 
-Pinmage is a native **macOS SwiftUI** utility that automatically restores historical metadata to your photo library. It uses Gemini AI (Gemini 3.5 Flash) to extract dates and locations from scanned pages or photos, then embeds them natively.
+Pinmage is a native **macOS SwiftUI** utility that automatically restores historical metadata to your photo library. It uses Gemini AI (Gemini 3.5 Flash / Pro) to extract dates and locations from scanned pages or photos, then embeds them natively.
 
 ---
 
-## 🛠️ How It Works
+## 🛠️ Key Features & How It Works
 
-1. **AI Date & Location Extraction**: Scans images to read captions, notes, or landmarks, returning structured date and location info.
-2. **Chronological Interpolation**: Sorts files alphabetically. If a scanned photo doesn't have an identifiable date, it inherits the date of the previous image.
-3. **CoreLocation Geocoding**: Resolves text place-names (e.g. "Paris, France") into precise GPS coordinates.
-4. **EXIF & GPS Injection**: Natively embeds metadata (`DateTimeOriginal` and GPS tags) into copied images without any external libraries.
+1. **AI Date & Location Extraction**: Scans images using Gemini Multimodal AI to identify written dates, captions, notes, or landmarks, returning structured date and location metadata alongside AI confidence scores.
+2. **Customizable Certainty Thresholds**: Filters AI output using a customizable threshold slider (defaulting to 80%). The app dynamically shows how many images will be updated and writes dates and GPS tags conditionally based on their individual confidence scores.
+3. **Real-Time API Cost Tracking**: Parses Gemini token usage metadata to compute real-time cumulative API spend in USD, stored persistently with support for resetting after confirmation.
+4. **Chronological Interpolation**: Automatically sorts queue images alphabetically (essential for chronological matching of scanned album pages). If an image doesn't have an AI-identifiable date, it inherits the date of the previous photo.
+5. **CoreLocation Geocoding**: Resolves text place-names (e.g., "Paris, France" or "Eiffel Tower") into precise latitude and longitude GPS coordinates.
+6. **Local Caching**: Computes unique image hashes to cache analysis results, preventing redundant network requests and saving on API costs.
+7. **Concurrency Controls**: Allows configuring parallel requests limits to balance extraction speed and avoid Gemini API rate limits (HTTP 429).
+8. **Smart Downscaling**: Option to downscale large uploaded files to a maximum dimension of 1600px, reducing upload bandwidth usage by up to 98%.
+9. **EXIF & GPS Injection**: Natively embeds metadata (`DateTimeOriginal` and GPS tags) into output copies (or overwrites originals) without requiring heavy external dependencies.
 
 ---
 

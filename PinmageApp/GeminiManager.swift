@@ -3,7 +3,9 @@ import Foundation
 class GeminiManager {
     struct GeminiResult: Codable {
         let date: String?
+        let dateCertainty: Int?
         let place: String?
+        let locationCertainty: Int?
         let latitude: Double?
         let longitude: Double?
     }
@@ -38,6 +40,12 @@ class GeminiManager {
         let generationConfig: GenerationConfig
     }
     
+    struct AnalysisResponse {
+        let result: GeminiResult
+        let inputTokens: Int
+        let outputTokens: Int
+    }
+    
     // API response structure
     private struct ResponseBody: Codable {
         struct Candidate: Codable {
@@ -49,28 +57,51 @@ class GeminiManager {
             }
             let content: Content
         }
+        struct UsageMetadata: Codable {
+            let promptTokenCount: Int
+            let candidatesTokenCount: Int
+            let totalTokenCount: Int
+        }
         let candidates: [Candidate]
+        let usageMetadata: UsageMetadata?
     }
     
-    static func analyzeImage(fileURL: URL, apiKey: String, modelName: String, prompt: String) async throws -> GeminiResult {
+    static func analyzeImage(fileURL: URL, apiKey: String, modelName: String, prompt: String, reduceSize: Bool = true) async throws -> AnalysisResponse {
         // 1. Read file data and base64 encode
-        guard let fileData = try? Data(contentsOf: fileURL) else {
-            throw NSError(domain: "GeminiManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to read image data from \(fileURL.lastPathComponent)"])
+        let fileData: Data
+        var mimeType = getMimeType(for: fileURL)
+        
+        if reduceSize {
+            if let resizedData = ImageResizer.resizeImage(at: fileURL, maxDimension: 1600) {
+                fileData = resizedData
+                mimeType = "image/jpeg" // resized returns JPEG
+            } else {
+                guard let origData = try? Data(contentsOf: fileURL) else {
+                    throw NSError(domain: "GeminiManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to read image data from \(fileURL.lastPathComponent)"])
+                }
+                fileData = origData
+            }
+        } else {
+            guard let origData = try? Data(contentsOf: fileURL) else {
+                throw NSError(domain: "GeminiManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to read image data from \(fileURL.lastPathComponent)"])
+            }
+            fileData = origData
         }
         
         let base64Image = fileData.base64EncodedString()
-        let mimeType = getMimeType(for: fileURL)
         
         // 2. Prepare schema
         let schema = RequestBody.GenerationConfig.Schema(
             type: "OBJECT",
             properties: [
                 "date": RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "Date in YYYY-MM-DD format (or partial YYYY-MM or YYYY if precise date is unknown), or null if totally unknown"),
+                "dateCertainty": RequestBody.GenerationConfig.Schema.Property(type: "INTEGER", description: "Confidence/certainty of the date, from 0 to 100. 0 if date is null."),
                 "place": RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "Location name, landmark, city, country, or null if totally unknown"),
+                "locationCertainty": RequestBody.GenerationConfig.Schema.Property(type: "INTEGER", description: "Confidence/certainty of the location/place, from 0 to 100. 0 if place is null."),
                 "latitude": RequestBody.GenerationConfig.Schema.Property(type: "NUMBER", description: "Deduced latitude (double), or null if unknown"),
                 "longitude": RequestBody.GenerationConfig.Schema.Property(type: "NUMBER", description: "Deduced longitude (double), or null if unknown")
             ],
-            required: ["date", "place", "latitude", "longitude"]
+            required: ["date", "dateCertainty", "place", "locationCertainty", "latitude", "longitude"]
         )
         
         // 3. Assemble request body
@@ -121,7 +152,10 @@ class GeminiManager {
         }
         
         let result = try decoder.decode(GeminiResult.self, from: resultData)
-        return result
+        let inputTokens = apiResponse.usageMetadata?.promptTokenCount ?? (reduceSize ? 258 : 410)
+        let outputTokens = apiResponse.usageMetadata?.candidatesTokenCount ?? 80
+        
+        return AnalysisResponse(result: result, inputTokens: inputTokens, outputTokens: outputTokens)
     }
     
     private static func getMimeType(for url: URL) -> String {
