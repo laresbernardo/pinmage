@@ -1,0 +1,2 @@
+- Add Built by BERVOS with bervos.org link and it's transparent background logo.
+- Add a one time only payment method of $4.99 with no subscription using stripe.

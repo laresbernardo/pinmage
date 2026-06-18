@@ -1,6 +1,7 @@
 import SwiftUI
 import Charts
 import MapKit
+import AppKit
 
 struct DashboardView: View {
     @ObservedObject var manager: PinmageManager
@@ -122,9 +123,14 @@ struct DashboardView: View {
                                             HStack {
                                                 Image(systemName: "mappin.circle.fill")
                                                     .foregroundColor(.cyan)
-                                                Text(loc.place)
-                                                    .foregroundColor(.white)
-                                                    .lineLimit(1)
+                                                let query = loc.place.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? loc.place
+                                                Button(loc.place) {
+                                                    NSWorkspace.shared.open(URL(string: "https://www.google.com/maps/search/?api=1&query=\(query)")!)
+                                                }
+                                                .buttonStyle(.plain)
+                                                .foregroundColor(.white)
+                                                .lineLimit(1)
+                                                .help("Open in Google Maps")
                                                 Spacer()
                                                 Text("\(loc.count) photos")
                                                     .font(.caption)

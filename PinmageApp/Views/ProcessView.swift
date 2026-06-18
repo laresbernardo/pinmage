@@ -557,13 +557,23 @@ struct QueueRowView: View {
                             .foregroundColor(.secondary)
                         
                         if let place = item.detectedPlace {
-                            Text(place)
-                                .foregroundColor(.white.opacity(0.9))
-                                .lineLimit(1)
+                            let query = place.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? place
+                            Button(place) {
+                                NSWorkspace.shared.open(URL(string: "https://www.google.com/maps/search/?api=1&query=\(query)")!)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(.white.opacity(0.9))
+                            .lineLimit(1)
+                            .help("Open in Google Maps")
                         } else if let geo = item.geocodedPlace {
-                            Text(geo)
-                                .foregroundColor(.cyan.opacity(0.85))
-                                .lineLimit(1)
+                            let query = geo.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? geo
+                            Button(geo) {
+                                NSWorkspace.shared.open(URL(string: "https://www.google.com/maps/search/?api=1&query=\(query)")!)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(.cyan.opacity(0.85))
+                            .lineLimit(1)
+                            .help("Open in Google Maps")
                         } else if item.hasExistingCoordinates {
                             Text("Looking up place...")
                                 .foregroundColor(.secondary)
@@ -589,26 +599,17 @@ struct QueueRowView: View {
                     let coordLat = item.latitude ?? item.existingLatitude
                     let coordLon = item.longitude ?? item.existingLongitude
                     if let lat = coordLat, let lon = coordLon {
-                        HStack(alignment: .top, spacing: 4) {
+                        HStack(spacing: 4) {
                             Image(systemName: "globe")
                                 .font(.system(size: 11))
                                 .foregroundColor(.secondary)
-                                .padding(.top, 2)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(String(format: "%.4f, %.4f", lat, lon))
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(.secondary)
-                                if let geoName = item.geocodedPlace {
-                                    Text("\(geoName)")
-                                        .font(.system(size: 9))
-                                        .foregroundColor(.cyan.opacity(0.8))
-                                        .lineLimit(1)
-                                } else if item.hasExistingCoordinates {
-                                    Text("Looking up place...")
-                                        .font(.system(size: 9))
-                                        .foregroundColor(.secondary)
-                                }
+                            Button(String(format: "%.4f, %.4f", lat, lon)) {
+                                NSWorkspace.shared.open(URL(string: "https://www.google.com/maps?q=\(lat),\(lon)")!)
                             }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .help("Open in Google Maps")
                         }
                         .padding(.top, 2)
                     }
