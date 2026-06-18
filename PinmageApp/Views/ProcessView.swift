@@ -7,6 +7,8 @@ struct ProcessView: View {
     @State private var isDraggingOver = false
     @State private var showOverwriteAlert = false
     @State private var elapsedTime: TimeInterval = 0
+    @State private var selectedIds: Set<UUID> = []
+    @State private var showingBatchEdit = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -149,6 +151,35 @@ struct ProcessView: View {
                 Divider().background(Color.white.opacity(0.1))
             }
             
+            // Selection toolbar
+            if !manager.isProcessing, !manager.imageItems.isEmpty {
+                HStack {
+                    Toggle(isOn: Binding(
+                        get: { selectedIds.count == manager.imageItems.count },
+                        set: { if $0 { selectedIds = Set(manager.imageItems.map(\.id)) } else { selectedIds = [] } }
+                    )) {
+                        Text("Select All")
+                    }
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+                    
+                    if !selectedIds.isEmpty {
+                        Button("Batch Edit (\(selectedIds.count))") {
+                            showingBatchEdit = true
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .popover(isPresented: $showingBatchEdit, arrowEdge: .bottom) {
+                            BatchEditPopover(ids: selectedIds, manager: manager)
+                        }
+                    }
+                    
+                    Spacer()
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 4)
+            }
+            
             // Certainty Threshold Panel
             if !manager.isProcessing, hasAnalyzedItems {
                 certaintyThresholdPanel
@@ -196,7 +227,7 @@ struct ProcessView: View {
             } else {
                 List {
                     ForEach(manager.imageItems) { item in
-                        QueueRowView(item: item, manager: manager, settings: settings, onRemove: {
+                        QueueRowView(item: item, manager: manager, settings: settings, selectedIds: $selectedIds, onRemove: {
                             manager.removeImage(id: item.id)
                         })
                         .padding(.vertical, 4)
@@ -425,13 +456,25 @@ struct QueueRowView: View {
     let item: ImageItem
     @ObservedObject var manager: PinmageManager
     @ObservedObject var settings: AppSettings
+    @Binding var selectedIds: Set<UUID>
     let onRemove: () -> Void
     @State private var thumbnail: NSImage? = nil
     @State private var showingEditPopover = false
     @State private var showingPreviewPopover = false
     
     var body: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 12) {
+            // Selection checkbox
+            Toggle(isOn: Binding(
+                get: { selectedIds.contains(item.id) },
+                set: { if $0 { selectedIds.insert(item.id) } else { selectedIds.remove(item.id) } }
+            )) {
+                EmptyView()
+            }
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+            .help("Select for batch edit")
+            
             // Image Thumbnail
             ZStack {
                 RoundedRectangle(cornerRadius: 6)
@@ -565,7 +608,7 @@ struct QueueRowView: View {
                             .foregroundColor(.white.opacity(0.9))
                             .lineLimit(1)
                             .help("Open in Google Maps")
-                        } else if let geo = item.geocodedPlace {
+                        } else if settings.skipExistingCoordinates, let geo = item.geocodedPlace {
                             let query = geo.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? geo
                             Button(geo) {
                                 NSWorkspace.shared.open(URL(string: "https://www.google.com/maps/search/?api=1&query=\(query)")!)
@@ -574,10 +617,9 @@ struct QueueRowView: View {
                             .foregroundColor(.cyan.opacity(0.85))
                             .lineLimit(1)
                             .help("Open in Google Maps")
-                        } else if item.hasExistingCoordinates {
-                            Text("Looking up place...")
+                        } else if item.hasExistingCoordinates || item.geocodedPlace != nil {
+                            Text("Pending...")
                                 .foregroundColor(.secondary)
-                                .font(.caption)
                         } else {
                             Text("Pending...")
                                 .foregroundColor(.secondary)
@@ -860,6 +902,87 @@ struct EditMetadataPopover: View {
             latitude: finalLat,
             longitude: finalLon,
             geocodedPlace: finalGeo
+        )
+    }
+}
+
+struct BatchEditPopover: View {
+    let ids: Set<UUID>
+    @ObservedObject var manager: PinmageManager
+    @Environment(\.dismiss) var dismiss
+
+    @State private var setDate: Bool = false
+    @State private var date: Date = Date()
+    @State private var setLocation: Bool = false
+    @State private var latitudeStr: String = ""
+    @State private var longitudeStr: String = ""
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Batch Edit (\(ids.count) items)")
+                .font(.headline)
+                .foregroundColor(.white)
+
+            Divider().background(Color.white.opacity(0.1))
+
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Set Date", isOn: $setDate)
+                    .font(.subheadline).fontWeight(.semibold)
+                if setDate {
+                    DatePicker("", selection: $date, displayedComponents: .date)
+                        .datePickerStyle(.field)
+                        .labelsHidden()
+                }
+
+                Divider().background(Color.white.opacity(0.05))
+
+                Toggle("Set Coordinates", isOn: $setLocation)
+                    .font(.subheadline).fontWeight(.semibold)
+                if setLocation {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Latitude").font(.caption).foregroundColor(.secondary)
+                            TextField("Latitude", text: $latitudeStr)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Longitude").font(.caption).foregroundColor(.secondary)
+                            TextField("Longitude", text: $longitudeStr)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+                }
+            }
+            .frame(width: 260)
+
+            Divider().background(Color.white.opacity(0.1))
+
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(.bordered)
+                Spacer()
+                Button("Apply") {
+                    applyBatch()
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.cyan)
+            }
+        }
+        .padding(16)
+        .background(Color(NSColor.windowBackgroundColor))
+    }
+
+    private func applyBatch() {
+        let lat = setLocation ? Double(latitudeStr) : nil
+        let lon = setLocation ? Double(longitudeStr) : nil
+        manager.batchUpdateMetadata(
+            ids: ids,
+            date: setDate ? date : nil,
+            saveDate: setDate,
+            latitude: lat,
+            longitude: lon,
+            saveLocation: setLocation
         )
     }
 }

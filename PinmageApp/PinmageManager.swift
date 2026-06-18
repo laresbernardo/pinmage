@@ -152,6 +152,24 @@ import MapKit
         }
     }
     
+    func batchUpdateMetadata(ids: Set<UUID>, date: Date?, saveDate: Bool, latitude: Double?, longitude: Double?, saveLocation: Bool) {
+        for index in imageItems.indices {
+            guard ids.contains(imageItems[index].id) else { continue }
+            if saveDate {
+                imageItems[index].detectedDate = date
+                imageItems[index].saveDate = date != nil
+            }
+            if saveLocation {
+                imageItems[index].latitude = latitude
+                imageItems[index].longitude = longitude
+                imageItems[index].saveLocation = latitude != nil && longitude != nil
+            }
+            if imageItems[index].status == .pending || imageItems[index].status == .failed || imageItems[index].status == .completed {
+                imageItems[index].status = .analyzed
+            }
+        }
+    }
+    
     private struct AnalysisUpdate {
         let index: Int
         let success: Bool
@@ -357,11 +375,12 @@ import MapKit
                 let stillProcessing = await manager.isProcessing
                 if !stillProcessing { break }
                 do {
+                    let contextualPrompt = "\(customPrompt)\n\nThe image file is named \"\(fileName)\". The filename may contain date or location hints — use it as additional context if relevant."
                     let response = try await GeminiManager.analyzeImage(
                         fileURL: itemURL,
                         apiKey: apiKey,
                         modelName: modelName,
-                        prompt: customPrompt,
+                        prompt: contextualPrompt,
                         reduceSize: reduceImageSize
                     )
                     geminiResult = response.result
