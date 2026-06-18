@@ -71,8 +71,8 @@ struct ImageItem: Identifiable, Equatable {
 
 enum FilenamePattern: String, CaseIterable, Identifiable {
     case original = "Keep Original Name"
-    case dateAndName = "Prepend Date (YYYY-MM-DD_Name)"
-    case fullArchive = "Archive Format (YYYY-MM-DD_Name_Location)"
+    case dateAndName = "Prepend Date (YYYYMMDD_Name)"
+    case fullArchive = "Archive Format (YYYYMMDD_Name_Location)"
     
     var id: String { rawValue }
 }

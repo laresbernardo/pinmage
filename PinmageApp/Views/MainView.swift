@@ -34,8 +34,13 @@ struct MainView: View {
             VStack(alignment: .leading, spacing: 20) {
                 // Logo Section
                 HStack(spacing: 12) {
-                    PinmageLogoView(isAnimating: false, size: 34)
-                        .shadow(color: Color.cyan.opacity(0.25), radius: 4)
+                    if let appIcon = NSImage(named: "AppIcon") {
+                        Image(nsImage: appIcon)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 34, height: 34)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
                     
                     VStack(alignment: .leading, spacing: 2) {
                         Text("PINMAGE")
@@ -106,9 +111,16 @@ struct MainView: View {
                     Text("Pinmage macOS v\(appVersion)")
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
-                    Text("Powered by Gemini AI")
-                        .font(.system(size: 8))
-                        .foregroundColor(.secondary.opacity(0.8))
+                    Link(destination: URL(string: "https://bervos.org")!) {
+                        HStack(spacing: 4) {
+                            BervosLogoShape()
+                                .fill(Color.secondary)
+                                .frame(width: 10, height: 10)
+                            Text("Built by BERVOS")
+                                .font(.system(size: 8))
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 20)

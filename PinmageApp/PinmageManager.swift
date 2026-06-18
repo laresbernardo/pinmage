@@ -671,7 +671,7 @@ import MapKit
         var dateStr = ""
         if let date = date {
             let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy-MM-dd"
+            formatter.dateFormat = "yyyyMMdd"
             dateStr = formatter.string(from: date)
         }
         

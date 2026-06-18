@@ -169,7 +169,7 @@ struct SettingsView: View {
                                 .pickerStyle(.menu)
                                 .frame(maxWidth: 320)
                                 
-                                Text("Automatically formats output copies to simplify sorting and chronological indexing (e.g. YYYY-MM-DD_ID_Location).")
+                                Text("Automatically formats output copies to simplify sorting and chronological indexing (e.g. YYYYMMDD_ID_Location).")
                                     .font(.system(size: 10))
                                     .foregroundColor(.secondary)
                             }
@@ -179,49 +179,6 @@ struct SettingsView: View {
                 }
                 .glassCardHoverEffect()
                 
-                // Advanced Prompt Settings
-                GlassCard {
-                    VStack(alignment: .leading, spacing: 16) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "slider.horizontal.3")
-                                .font(.title3)
-                                .foregroundColor(.cyan)
-                            Text("AI System Prompt")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                        }
-                        
-                        Divider().background(Color.white.opacity(0.1))
-                        
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Instructions for Date & Place Extraction")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .fontWeight(.semibold)
-                            
-                            TextEditor(text: $settings.customPrompt)
-                                .font(.system(.body, design: .monospaced))
-                                .frame(height: 120)
-                                .cornerRadius(6)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                                )
-                                .padding(.bottom, 4)
-                            
-                            HStack {
-                                Spacer()
-                                Button("Reset Default Prompt") {
-                                    settings.customPrompt = "Analyze this image. If it is a scanned page containing multiple photos or a single photo, try to read any written text (captions, notes, dates) or visual cues to extract:\n1. The approximate or exact date when the photo(s) were taken.\n2. The location/place name (city, country, landmark) where the photo was taken.\n\nBe as accurate as possible. Return null for date or place if completely unknown."
-                                }
-                                .buttonStyle(.borderless)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            }
-                        }
-                    }
-                }
-                .glassCardHoverEffect()
                 
                 // Performance & Economy Settings
                 GlassCard {
