@@ -275,6 +275,7 @@ import MapKit
         let reduceImageSize = settings.reduceImageSize
         let maxConcurrentRequests = settings.maxConcurrentRequests
         let locationHint = settings.locationHint
+        let processingMode = settings.processingMode
         
         // Concurrency-limited processing loop
         await withTaskGroup(of: AnalysisUpdate.self) { group in
@@ -302,6 +303,7 @@ import MapKit
                         existingLongitude: item.existingLongitude,
                         locationHint: locationHint,
                         imageHint: item.hint,
+                        processingMode: processingMode,
                         manager: self,
                         settings: settings
                     )
@@ -313,7 +315,7 @@ import MapKit
             while let update = await group.next() {
                 completedCount += 1
                 
-                self.applyUpdate(update, certaintyThreshold: settings.certaintyThreshold)
+                self.applyUpdate(update, processingMode: settings.processingMode, certaintyThreshold: settings.certaintyThreshold)
                 self.currentProgress = Double(completedCount) / Double(indicesToProcess.count)
                 
                 // If cancelled, stop spawning new tasks
@@ -341,6 +343,7 @@ import MapKit
                             existingLongitude: item.existingLongitude,
                             locationHint: locationHint,
                             imageHint: item.hint,
+                            processingMode: processingMode,
                             manager: self,
                             settings: settings
                         )
@@ -404,6 +407,7 @@ import MapKit
         existingLongitude: Double?,
         locationHint: String,
         imageHint: String,
+        processingMode: ProcessingMode,
         manager: PinmageManager,
         settings: AppSettings
     ) async -> AnalysisUpdate {
@@ -419,8 +423,15 @@ import MapKit
         
         // 2. Query Cache
         if !hash.isEmpty, let cachedResult = CacheManager.shared.get(hash: hash) {
-            geminiResult = cachedResult
-        } else {
+            let hasRequiredDate = (processingMode == .both || processingMode == .dateOnly) ? (cachedResult.dateAnalyzed ?? true) : true
+            let hasRequiredLocation = (processingMode == .both || processingMode == .locationOnly) ? (cachedResult.locationAnalyzed ?? true) : true
+            
+            if hasRequiredDate && hasRequiredLocation {
+                geminiResult = cachedResult
+            }
+        }
+        
+        if geminiResult == nil {
             // Cache miss - Analyze with AI
             await manager.updateItemStatus(index: index, status: .callingAPI)
             
@@ -448,6 +459,7 @@ import MapKit
                             fileURL: itemURL,
                             modelName: modelName,
                             prompt: contextualPrompt,
+                            processingMode: processingMode,
                             reduceSize: reduceImageSize
                         )
                         response = ollamaResponse
@@ -457,6 +469,7 @@ import MapKit
                             apiKey: apiKey,
                             modelName: modelName,
                             prompt: contextualPrompt,
+                            processingMode: processingMode,
                             reduceSize: reduceImageSize
                         )
                         response = OllamaManager.AnalysisResponse(
@@ -493,7 +506,10 @@ import MapKit
             
             // Save to local cache on success
             if let result = geminiResult, !hash.isEmpty {
-                CacheManager.shared.set(hash: hash, result: result)
+                var cachedResult = result
+                cachedResult.dateAnalyzed = (processingMode == .both || processingMode == .dateOnly)
+                cachedResult.locationAnalyzed = (processingMode == .both || processingMode == .locationOnly)
+                CacheManager.shared.set(hash: hash, result: cachedResult)
             }
         }
         
@@ -516,18 +532,20 @@ import MapKit
         var geocodedPlace: String? = nil
         
         // If image already has GPS coordinates and skip is on, use existing instead of AI result
-        if hasExistingCoords {
-            latitude = existingLatitude
-            longitude = existingLongitude
-            if let geocoded = await GeocodingManager.reverseGeocode(latitude: existingLatitude!, longitude: existingLongitude!) {
-                geocodedPlace = geocoded.resolvedName
-            }
-        } else if let place = result.place, !place.isEmpty, place.lowercased() != "null" {
-            await manager.updateItemStatus(index: index, status: .geocoding, place: place)
-            if let geocoded = await GeocodingManager.geocode(address: place) {
-                latitude = geocoded.coordinate.latitude
-                longitude = geocoded.coordinate.longitude
-                geocodedPlace = geocoded.resolvedName
+        if processingMode == .both || processingMode == .locationOnly {
+            if hasExistingCoords {
+                latitude = existingLatitude
+                longitude = existingLongitude
+                if let geocoded = await GeocodingManager.reverseGeocode(latitude: existingLatitude!, longitude: existingLongitude!) {
+                    geocodedPlace = geocoded.resolvedName
+                }
+            } else if let place = result.place, !place.isEmpty, place.lowercased() != "null" {
+                await manager.updateItemStatus(index: index, status: .geocoding, place: place)
+                if let geocoded = await GeocodingManager.geocode(address: place) {
+                    latitude = geocoded.coordinate.latitude
+                    longitude = geocoded.coordinate.longitude
+                    geocodedPlace = geocoded.resolvedName
+                }
             }
         }
         
@@ -543,7 +561,7 @@ import MapKit
         )
     }
     
-    private func applyUpdate(_ update: AnalysisUpdate, certaintyThreshold: Int) {
+    private func applyUpdate(_ update: AnalysisUpdate, processingMode: ProcessingMode, certaintyThreshold: Int) {
         let index = update.index
         guard index < self.imageItems.count else { return }
         
@@ -570,29 +588,44 @@ import MapKit
             
             let locationCertainty = min(max(result.locationCertainty ?? 0, 0), 100)
             
-            self.imageItems[index].detectedDate = parsedDate
-            self.imageItems[index].detectedPlace = result.place
-            self.imageItems[index].detectedDateString = finalDateStr
-            self.imageItems[index].dateCertainty = dateCertainty
-            self.imageItems[index].locationCertainty = locationCertainty
-            self.imageItems[index].latitude = update.latitude
-            self.imageItems[index].longitude = update.longitude
-            self.imageItems[index].geocodedPlace = update.geocodedPlace
-            self.imageItems[index].dateIsInherited = false
-            
-            // Default checked state based on certainty threshold
-            self.imageItems[index].saveDate = parsedDate != nil && dateCertainty >= certaintyThreshold
-            
-            let item = self.imageItems[index]
-            let usingExistingCoords = update.latitude != nil && item.existingLatitude != nil &&
-                abs(update.latitude! - item.existingLatitude!) < 0.0001 &&
-                abs(update.longitude! - item.existingLongitude!) < 0.0001
-            if usingExistingCoords {
-                self.imageItems[index].saveLocation = true
+            if processingMode == .both || processingMode == .dateOnly {
+                self.imageItems[index].detectedDate = parsedDate
+                self.imageItems[index].detectedDateString = finalDateStr
+                self.imageItems[index].dateCertainty = dateCertainty
+                self.imageItems[index].saveDate = parsedDate != nil && dateCertainty >= certaintyThreshold
             } else {
-                self.imageItems[index].saveLocation = update.latitude != nil && locationCertainty >= certaintyThreshold
+                self.imageItems[index].detectedDate = nil
+                self.imageItems[index].detectedDateString = nil
+                self.imageItems[index].dateCertainty = nil
+                self.imageItems[index].saveDate = false
             }
             
+            if processingMode == .both || processingMode == .locationOnly {
+                self.imageItems[index].detectedPlace = result.place
+                self.imageItems[index].locationCertainty = locationCertainty
+                self.imageItems[index].latitude = update.latitude
+                self.imageItems[index].longitude = update.longitude
+                self.imageItems[index].geocodedPlace = update.geocodedPlace
+                
+                let item = self.imageItems[index]
+                let usingExistingCoords = update.latitude != nil && item.existingLatitude != nil &&
+                    abs(update.latitude! - item.existingLatitude!) < 0.0001 &&
+                    abs(update.longitude! - item.existingLongitude!) < 0.0001
+                if usingExistingCoords {
+                    self.imageItems[index].saveLocation = true
+                } else {
+                    self.imageItems[index].saveLocation = update.latitude != nil && locationCertainty >= certaintyThreshold
+                }
+            } else {
+                self.imageItems[index].detectedPlace = nil
+                self.imageItems[index].locationCertainty = nil
+                self.imageItems[index].latitude = nil
+                self.imageItems[index].longitude = nil
+                self.imageItems[index].geocodedPlace = nil
+                self.imageItems[index].saveLocation = false
+            }
+            
+            self.imageItems[index].dateIsInherited = false
             self.imageItems[index].processingDuration = update.processingDuration
             self.imageItems[index].status = .analyzed
             self.successfulCount += 1
@@ -635,7 +668,8 @@ import MapKit
                 item: item,
                 overwriteOriginals: overwriteOriginals,
                 outputFolderPath: outputFolderPath,
-                filenamePattern: filenamePattern
+                filenamePattern: filenamePattern,
+                processingMode: settings.processingMode
             )
             
             switch result {
@@ -661,12 +695,13 @@ import MapKit
         item: ImageItem,
         overwriteOriginals: Bool,
         outputFolderPath: String,
-        filenamePattern: FilenamePattern
+        filenamePattern: FilenamePattern,
+        processingMode: ProcessingMode
     ) async -> Result<URL, Error> {
         do {
             // Determine if we apply date and/or location based on checkboxes
-            let dateValid = item.saveDate && item.detectedDate != nil
-            let locationValid = item.saveLocation && item.latitude != nil && item.longitude != nil
+            let dateValid = (processingMode == .both || processingMode == .dateOnly) && item.saveDate && item.detectedDate != nil
+            let locationValid = (processingMode == .both || processingMode == .locationOnly) && item.saveLocation && item.latitude != nil && item.longitude != nil
             
             let parsedDate = dateValid ? item.detectedDate : nil
             let latitude = locationValid ? item.latitude : nil

@@ -70,7 +70,7 @@ class OllamaManager {
         return decoded.models
     }
 
-    static func analyzeImage(fileURL: URL, modelName: String, prompt: String, reduceSize: Bool = true) async throws -> AnalysisResponse {
+    static func analyzeImage(fileURL: URL, modelName: String, prompt: String, processingMode: ProcessingMode, reduceSize: Bool = true) async throws -> AnalysisResponse {
         let fileData: Data
         if reduceSize {
             if let resizedData = ImageResizer.resizeImage(at: fileURL, maxDimension: 1600) {
@@ -90,20 +90,37 @@ class OllamaManager {
 
         let base64Image = fileData.base64EncodedString()
 
+        var schemaProperties: [String: OllamaProperty] = [:]
+        var requiredFields: [String] = []
+        
+        if processingMode == .both || processingMode == .dateOnly {
+            schemaProperties["date"] = OllamaProperty(type: "string", description: "Date in YYYY-MM-DD format (or partial YYYY-MM or YYYY if precise date is unknown), or null if totally unknown")
+            schemaProperties["dateCertainty"] = OllamaProperty(type: "integer", description: "Confidence/certainty of the date. CRITICAL: MUST be an integer between 0 and 100 ONLY. 0 if date is null. Values like 95, 80, 50 are valid. Values outside 0-100 are INVALID.")
+            requiredFields.append(contentsOf: ["date", "dateCertainty"])
+        }
+        
+        if processingMode == .both || processingMode == .locationOnly {
+            schemaProperties["place"] = OllamaProperty(type: "string", description: "Location name, landmark, city, country, or null if totally unknown")
+            schemaProperties["locationCertainty"] = OllamaProperty(type: "integer", description: "Confidence/certainty of the location/place. CRITICAL: MUST be an integer between 0 and 100 ONLY. 0 if place is null. Values like 95, 80, 50 are valid. Values outside 0-100 are INVALID.")
+            requiredFields.append(contentsOf: ["place", "locationCertainty"])
+        }
+        
         let schema = OllamaFormat(
             type: "object",
-            properties: [
-                "date": OllamaProperty(type: "string", description: "Date in YYYY-MM-DD format (or partial YYYY-MM or YYYY if precise date is unknown), or null if totally unknown"),
-                "dateCertainty": OllamaProperty(type: "integer", description: "Confidence/certainty of the date. CRITICAL: MUST be an integer between 0 and 100 ONLY. 0 if date is null. Values like 95, 80, 50 are valid. Values outside 0-100 are INVALID."),
-                "place": OllamaProperty(type: "string", description: "Location name, landmark, city, country, or null if totally unknown"),
-                "locationCertainty": OllamaProperty(type: "integer", description: "Confidence/certainty of the location/place. CRITICAL: MUST be an integer between 0 and 100 ONLY. 0 if place is null. Values like 95, 80, 50 are valid. Values outside 0-100 are INVALID.")
-            ],
-            required: ["date", "dateCertainty", "place", "locationCertainty"]
+            properties: schemaProperties,
+            required: requiredFields
         )
-
+        
+        var finalPrompt = prompt
+        if processingMode == .dateOnly {
+            finalPrompt += "\n\nIMPORTANT: You only need to determine the date when the photo was taken. Do not attempt to analyze or extract location/place details."
+        } else if processingMode == .locationOnly {
+            finalPrompt += "\n\nIMPORTANT: You only need to determine the location/place where the photo was taken. Do not attempt to analyze or extract the date."
+        }
+        
         let requestBody = OllamaGenerateRequest(
             model: modelName,
-            prompt: prompt,
+            prompt: finalPrompt,
             images: [base64Image],
             stream: false,
             format: schema

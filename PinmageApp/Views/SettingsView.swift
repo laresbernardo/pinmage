@@ -70,6 +70,8 @@ struct SettingsView: View {
                 .onChange(of: settings.provider) { _, newProvider in
                     if newProvider == .ollama {
                         Task { await refreshOllamaModels() }
+                    } else if newProvider == .gemini {
+                        settings.modelName = "gemini-3.1-flash-lite"
                     }
                 }
                 .onAppear {

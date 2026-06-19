@@ -8,6 +8,9 @@ class GeminiManager {
         var locationCertainty: Int?
         var latitude: Double?
         var longitude: Double?
+        
+        var dateAnalyzed: Bool? = false
+        var locationAnalyzed: Bool? = false
     }
     
     // API request structure
@@ -66,7 +69,7 @@ class GeminiManager {
         let usageMetadata: UsageMetadata?
     }
     
-    static func analyzeImage(fileURL: URL, apiKey: String, modelName: String, prompt: String, reduceSize: Bool = true) async throws -> AnalysisResponse {
+    static func analyzeImage(fileURL: URL, apiKey: String, modelName: String, prompt: String, processingMode: ProcessingMode, reduceSize: Bool = true) async throws -> AnalysisResponse {
         // 1. Read file data and base64 encode
         let fileData: Data
         var mimeType = getMimeType(for: fileURL)
@@ -90,22 +93,39 @@ class GeminiManager {
         
         let base64Image = fileData.base64EncodedString()
         
-        // 2. Prepare schema
+        // 2. Prepare schema based on processing mode
+        var schemaProperties: [String: RequestBody.GenerationConfig.Schema.Property] = [:]
+        var requiredFields: [String] = []
+        
+        if processingMode == .both || processingMode == .dateOnly {
+            schemaProperties["date"] = RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "Date in YYYY-MM-DD format (or partial YYYY-MM or YYYY if precise date is unknown), or null if totally unknown")
+            schemaProperties["dateCertainty"] = RequestBody.GenerationConfig.Schema.Property(type: "INTEGER", description: "Confidence/certainty of the date. CRITICAL: MUST be an integer between 0 and 100 ONLY. 0 if date is null. Values like 95, 80, 50 are valid. Values outside 0-100 are INVALID.")
+            requiredFields.append(contentsOf: ["date", "dateCertainty"])
+        }
+        
+        if processingMode == .both || processingMode == .locationOnly {
+            schemaProperties["place"] = RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "Location name, landmark, city, country, or null if totally unknown")
+            schemaProperties["locationCertainty"] = RequestBody.GenerationConfig.Schema.Property(type: "INTEGER", description: "Confidence/certainty of the location/place. CRITICAL: MUST be an integer between 0 and 100 ONLY. 0 if place is null. Values like 95, 80, 50 are valid. Values outside 0-100 are INVALID.")
+            requiredFields.append(contentsOf: ["place", "locationCertainty"])
+        }
+        
         let schema = RequestBody.GenerationConfig.Schema(
             type: "OBJECT",
-            properties: [
-                "date": RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "Date in YYYY-MM-DD format (or partial YYYY-MM or YYYY if precise date is unknown), or null if totally unknown"),
-                "dateCertainty": RequestBody.GenerationConfig.Schema.Property(type: "INTEGER", description: "Confidence/certainty of the date. CRITICAL: MUST be an integer between 0 and 100 ONLY. 0 if date is null. Values like 95, 80, 50 are valid. Values outside 0-100 are INVALID."),
-                "place": RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "Location name, landmark, city, country, or null if totally unknown"),
-                "locationCertainty": RequestBody.GenerationConfig.Schema.Property(type: "INTEGER", description: "Confidence/certainty of the location/place. CRITICAL: MUST be an integer between 0 and 100 ONLY. 0 if place is null. Values like 95, 80, 50 are valid. Values outside 0-100 are INVALID.")
-            ],
-            required: ["date", "dateCertainty", "place", "locationCertainty"]
+            properties: schemaProperties,
+            required: requiredFields
         )
+        
+        var finalPrompt = prompt
+        if processingMode == .dateOnly {
+            finalPrompt += "\n\nIMPORTANT: You only need to determine the date when the photo was taken. Do not attempt to analyze or extract location/place details."
+        } else if processingMode == .locationOnly {
+            finalPrompt += "\n\nIMPORTANT: You only need to determine the location/place where the photo was taken. Do not attempt to analyze or extract the date."
+        }
         
         // 3. Assemble request body
         let inlineData = RequestBody.Content.Part.InlineData(mimeType: mimeType, data: base64Image)
         let imagePart = RequestBody.Content.Part(text: nil, inlineData: inlineData)
-        let textPart = RequestBody.Content.Part(text: prompt, inlineData: nil)
+        let textPart = RequestBody.Content.Part(text: finalPrompt, inlineData: nil)
         
         let content = RequestBody.Content(parts: [textPart, imagePart])
         let config = RequestBody.GenerationConfig(responseMimeType: "application/json", responseSchema: schema)

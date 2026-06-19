@@ -84,6 +84,14 @@ enum AIProvider: String, CaseIterable, Codable {
     case ollama = "Ollama (Local)"
 }
 
+enum ProcessingMode: String, CaseIterable, Identifiable, Codable {
+    case both = "Both"
+    case dateOnly = "Date Only"
+    case locationOnly = "Location Only"
+    
+    var id: String { rawValue }
+}
+
 enum FilenamePattern: String, CaseIterable, Identifiable {
     case original = "Keep Original Name"
     case dateAndName = "Prepend Date (YYYYMMDD_Name)"
@@ -163,6 +171,11 @@ enum FilenamePattern: String, CaseIterable, Identifiable {
             UserDefaults.standard.set(locationHint, forKey: "pinmage_location_hint")
         }
     }
+    @Published var processingMode: ProcessingMode {
+        didSet {
+            UserDefaults.standard.set(processingMode.rawValue, forKey: "pinmage_processing_mode")
+        }
+    }
     
     func resetCumulativeSpend() {
         cumulativeSpend = 0.0
@@ -207,6 +220,9 @@ enum FilenamePattern: String, CaseIterable, Identifiable {
         }
         
         self.locationHint = UserDefaults.standard.string(forKey: "pinmage_location_hint") ?? ""
+        
+        let storedMode = UserDefaults.standard.string(forKey: "pinmage_processing_mode") ?? ""
+        self.processingMode = ProcessingMode(rawValue: storedMode) ?? .both
     }
 }
 

@@ -176,6 +176,26 @@ struct ProcessView: View {
                         
                         Divider().background(Color.white.opacity(0.08))
                         
+                        // Processing Mode Selection
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Metadata to Extract")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .fontWeight(.semibold)
+                            
+                            Picker("", selection: $settings.processingMode) {
+                                ForEach(ProcessingMode.allCases) { mode in
+                                    Text(mode.rawValue).tag(mode)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .controlSize(.small)
+                            .frame(maxWidth: 320)
+                        }
+                        .padding(.bottom, 4)
+                        
+                        Divider().background(Color.white.opacity(0.08))
+                        
                         // Option 1: Existing GPS Toggle
                         let gpsCount = manager.imageItems.filter { $0.hasExistingCoordinates }.count
                         if gpsCount > 0 {
@@ -269,7 +289,7 @@ struct ProcessView: View {
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         .popover(isPresented: $showingBatchEdit, arrowEdge: .bottom) {
-                            BatchEditPopover(ids: selectedIds, manager: manager)
+                            BatchEditPopover(ids: selectedIds, manager: manager, settings: settings)
                         }
                     }
                     
@@ -409,19 +429,23 @@ struct ProcessView: View {
                         .fontWeight(.semibold)
                     
                     VStack(alignment: .leading, spacing: 4) {
-                        Label(
-                            "\(dateWillModifyCount) dates to save",
-                            systemImage: "calendar"
-                        )
-                        .font(.caption)
-                        .foregroundColor(.white)
+                        if settings.processingMode == .both || settings.processingMode == .dateOnly {
+                            Label(
+                                "\(dateWillModifyCount) dates to save",
+                                systemImage: "calendar"
+                            )
+                            .font(.caption)
+                            .foregroundColor(.white)
+                        }
                         
-                        Label(
-                            "\(locationWillModifyCount) locations to save",
-                            systemImage: "mappin.and.ellipse"
-                        )
-                        .font(.caption)
-                        .foregroundColor(.white)
+                        if settings.processingMode == .both || settings.processingMode == .locationOnly {
+                            Label(
+                                "\(locationWillModifyCount) locations to save",
+                                systemImage: "mappin.and.ellipse"
+                            )
+                            .font(.caption)
+                            .foregroundColor(.white)
+                        }
                     }
                 }
                 
@@ -442,7 +466,11 @@ struct ProcessView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.cyan)
-                .disabled(dateWillModifyCount == 0 && locationWillModifyCount == 0)
+                .disabled(
+                    (settings.processingMode == .dateOnly && dateWillModifyCount == 0) ||
+                    (settings.processingMode == .locationOnly && locationWillModifyCount == 0) ||
+                    (settings.processingMode == .both && dateWillModifyCount == 0 && locationWillModifyCount == 0)
+                )
                 .fixedSize(horizontal: true, vertical: false)
             }
             .padding(16)
@@ -650,142 +678,146 @@ struct QueueRowView: View {
                 // Stack Date & Place vertically to prevent squishing
                 VStack(alignment: .leading, spacing: 4) {
                     // Date output
-                    HStack(spacing: 6) {
-                        let isPending = item.status == .pending || item.status == .processing || item.status == .callingAPI
-                        let hasVal = (item.detectedDateString != nil && item.detectedDateString!.lowercased() != "null" && !item.detectedDateString!.isEmpty) || item.detectedDate != nil
-                        
-                        if item.status == .analyzed || item.status == .completed {
+                    if settings.processingMode == .both || settings.processingMode == .dateOnly {
+                        HStack(spacing: 6) {
+                            let isPending = item.status == .pending || item.status == .processing || item.status == .callingAPI
+                            let hasVal = (item.detectedDateString != nil && item.detectedDateString!.lowercased() != "null" && !item.detectedDateString!.isEmpty) || item.detectedDate != nil
+                            
+                            if item.status == .analyzed || item.status == .completed {
+                                Button(action: {
+                                    manager.toggleSaveDate(id: item.id)
+                                }) {
+                                    Image(systemName: item.saveDate ? "checkmark.circle.fill" : "circle")
+                                        .font(.system(size: 11, weight: .bold))
+                                        .foregroundColor(item.saveDate ? .emerald : .secondary.opacity(0.4))
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(item.detectedDate == nil)
+                            }
+                            
                             Button(action: {
-                                manager.toggleSaveDate(id: item.id)
+                                if item.status != .processing && item.status != .callingAPI && item.status != .geocoding && item.status != .writing {
+                                    showingEditPopover = true
+                                }
                             }) {
-                                Image(systemName: item.saveDate ? "checkmark.circle.fill" : "circle")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundColor(item.saveDate ? .emerald : .secondary.opacity(0.4))
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(item.detectedDate == nil)
-                        }
-                        
-                        Button(action: {
-                            if item.status != .processing && item.status != .callingAPI && item.status != .geocoding && item.status != .writing {
-                                showingEditPopover = true
-                            }
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "calendar")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.secondary)
-                                    .frame(width: 12, alignment: .center)
-                                
-                                if isPending {
-                                    Text("Pending...")
+                                HStack(spacing: 6) {
+                                    Image(systemName: "calendar")
+                                        .font(.system(size: 11))
                                         .foregroundColor(.secondary)
-                                } else if let dateStr = item.detectedDateString, dateStr.lowercased() != "null", !dateStr.isEmpty {
-                                    Text(dateStr)
-                                        .foregroundColor(.white.opacity(0.9))
-                                } else if let date = item.detectedDate {
-                                    Text(formattedDate(date))
-                                        .foregroundColor(.white.opacity(0.9))
-                                } else {
-                                    Text("—")
-                                        .foregroundColor(.secondary)
+                                        .frame(width: 12, alignment: .center)
+                                    
+                                    if isPending {
+                                        Text("Pending...")
+                                            .foregroundColor(.secondary)
+                                    } else if let dateStr = item.detectedDateString, dateStr.lowercased() != "null", !dateStr.isEmpty {
+                                        Text(dateStr)
+                                            .foregroundColor(.white.opacity(0.9))
+                                    } else if let date = item.detectedDate {
+                                        Text(formattedDate(date))
+                                            .foregroundColor(.white.opacity(0.9))
+                                    } else {
+                                        Text("—")
+                                            .foregroundColor(.secondary)
+                                    }
                                 }
                             }
-                        }
-                        .buttonStyle(.plain)
-                        .help("Click to edit date manually")
-                        .disabled(item.status == .processing || item.status == .callingAPI || item.status == .geocoding || item.status == .writing)
-                        
-                        if item.dateIsInherited {
-                            Text("(Inherited)")
-                                .font(.system(size: 9))
-                                .foregroundColor(.cyan)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(Color.cyan.opacity(0.15))
-                                .cornerRadius(3)
-                        }
-                        
-                        if let certainty = item.dateCertainty, hasVal {
-                            let isAbove = certainty >= settings.certaintyThreshold
-                            Text("\(certainty)%")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(isAbove ? .cyan : .orange)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background((isAbove ? Color.cyan : Color.orange).opacity(0.15))
-                                .cornerRadius(3)
+                            .buttonStyle(.plain)
+                            .help("Click to edit date manually")
+                            .disabled(item.status == .processing || item.status == .callingAPI || item.status == .geocoding || item.status == .writing)
+                            
+                            if item.dateIsInherited {
+                                Text("(Inherited)")
+                                    .font(.system(size: 9))
+                                    .foregroundColor(.cyan)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(Color.cyan.opacity(0.15))
+                                    .cornerRadius(3)
+                            }
+                            
+                            if let certainty = item.dateCertainty, hasVal {
+                                let isAbove = certainty >= settings.certaintyThreshold
+                                Text("\(certainty)%")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(isAbove ? .cyan : .orange)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background((isAbove ? Color.cyan : Color.orange).opacity(0.15))
+                                    .cornerRadius(3)
+                            }
                         }
                     }
                     
                     // Place output
-                    HStack(spacing: 6) {
-                        let isPending = item.status == .pending || item.status == .processing || item.status == .callingAPI || item.status == .geocoding
-                        let hasPlaceVal = (item.detectedPlace != nil && item.detectedPlace!.lowercased() != "null" && !item.detectedPlace!.isEmpty) ||
-                                          (settings.skipExistingCoordinates && item.geocodedPlace != nil && item.geocodedPlace!.lowercased() != "null" && !item.geocodedPlace!.isEmpty)
-                        
-                        if item.status == .analyzed || item.status == .completed {
-                            Button(action: {
-                                manager.toggleSaveLocation(id: item.id)
-                            }) {
-                                Image(systemName: item.saveLocation ? "checkmark.circle.fill" : "circle")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundColor(item.saveLocation ? .emerald : .secondary.opacity(0.4))
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(item.latitude == nil && !item.hasExistingCoordinates)
-                        }
-                        
-                        Image(systemName: "mappin.and.ellipse")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                            .frame(width: 12, alignment: .center)
-                        
-                        if isPending {
-                            Text("Pending...")
-                                .foregroundColor(.secondary)
-                        } else if let place = item.detectedPlace, place.lowercased() != "null", !place.isEmpty {
-                            Button(place) {
-                                onEditLocation()
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundColor(.white.opacity(0.9))
-                            .lineLimit(1)
-                            .help("Pin location on map")
-                            .contextMenu {
-                                Button("Copy Place Name") {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(place, forType: .string)
+                    if settings.processingMode == .both || settings.processingMode == .locationOnly {
+                        HStack(spacing: 6) {
+                            let isPending = item.status == .pending || item.status == .processing || item.status == .callingAPI || item.status == .geocoding
+                            let hasPlaceVal = (item.detectedPlace != nil && item.detectedPlace!.lowercased() != "null" && !item.detectedPlace!.isEmpty) ||
+                                              (settings.skipExistingCoordinates && item.geocodedPlace != nil && item.geocodedPlace!.lowercased() != "null" && !item.geocodedPlace!.isEmpty)
+                            
+                            if item.status == .analyzed || item.status == .completed {
+                                Button(action: {
+                                    manager.toggleSaveLocation(id: item.id)
+                                }) {
+                                    Image(systemName: item.saveLocation ? "checkmark.circle.fill" : "circle")
+                                        .font(.system(size: 11, weight: .bold))
+                                        .foregroundColor(item.saveLocation ? .emerald : .secondary.opacity(0.4))
                                 }
+                                .buttonStyle(.plain)
+                                .disabled(item.latitude == nil && !item.hasExistingCoordinates)
                             }
-                        } else if settings.skipExistingCoordinates, let geo = item.geocodedPlace, geo.lowercased() != "null", !geo.isEmpty {
-                            Button(geo) {
-                                onEditLocation()
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundColor(.cyan.opacity(0.85))
-                            .lineLimit(1)
-                            .help("Pin location on map")
-                            .contextMenu {
-                                Button("Copy Place Name") {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(geo, forType: .string)
-                                }
-                            }
-                        } else {
-                            Text("—")
+                            
+                            Image(systemName: "mappin.and.ellipse")
+                                .font(.system(size: 11))
                                 .foregroundColor(.secondary)
-                        }
-                        
-                        if let certainty = item.locationCertainty, hasPlaceVal {
-                            let isAbove = certainty >= settings.certaintyThreshold
-                            Text("\(certainty)%")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(isAbove ? .cyan : .orange)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background((isAbove ? Color.cyan : Color.orange).opacity(0.15))
-                                .cornerRadius(3)
+                                .frame(width: 12, alignment: .center)
+                            
+                            if isPending {
+                                Text("Pending...")
+                                    .foregroundColor(.secondary)
+                            } else if let place = item.detectedPlace, place.lowercased() != "null", !place.isEmpty {
+                                Button(place) {
+                                    onEditLocation()
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundColor(.white.opacity(0.9))
+                                .lineLimit(1)
+                                .help("Pin location on map")
+                                .contextMenu {
+                                    Button("Copy Place Name") {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(place, forType: .string)
+                                    }
+                                }
+                            } else if settings.skipExistingCoordinates, let geo = item.geocodedPlace, geo.lowercased() != "null", !geo.isEmpty {
+                                Button(geo) {
+                                    onEditLocation()
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundColor(.cyan.opacity(0.85))
+                                .lineLimit(1)
+                                .help("Pin location on map")
+                                .contextMenu {
+                                    Button("Copy Place Name") {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(geo, forType: .string)
+                                    }
+                                }
+                            } else {
+                                Text("—")
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            if let certainty = item.locationCertainty, hasPlaceVal {
+                                let isAbove = certainty >= settings.certaintyThreshold
+                                Text("\(certainty)%")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(isAbove ? .cyan : .orange)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background((isAbove ? Color.cyan : Color.orange).opacity(0.15))
+                                    .cornerRadius(3)
+                            }
                         }
                     }
                 }
@@ -822,23 +854,25 @@ struct QueueRowView: View {
             // Right Column: Coordinates and Action buttons
             VStack(alignment: .trailing, spacing: 6) {
                 // Coordinates section
-                let hasExisting = item.existingLatitude != nil && item.existingLongitude != nil
-                let hasSuggested = item.latitude != nil && item.longitude != nil
-                let coordsDiffer: Bool = {
-                    guard let eLat = item.existingLatitude, let eLon = item.existingLongitude,
-                           let sLat = item.latitude, let sLon = item.longitude else { return true }
-                    return abs(eLat - sLat) > 0.0001 || abs(eLon - sLon) > 0.0001
-                }()
-                
-                if hasExisting && hasSuggested && coordsDiffer {
-                    VStack(alignment: .trailing, spacing: 2) {
-                        coordinateRow(label: "Original:", lat: item.existingLatitude!, lon: item.existingLongitude!, color: .secondary)
-                        coordinateRow(label: "Suggested:", lat: item.latitude!, lon: item.longitude!, color: .cyan)
+                if settings.processingMode == .both || settings.processingMode == .locationOnly {
+                    let hasExisting = item.existingLatitude != nil && item.existingLongitude != nil
+                    let hasSuggested = item.latitude != nil && item.longitude != nil
+                    let coordsDiffer: Bool = {
+                        guard let eLat = item.existingLatitude, let eLon = item.existingLongitude,
+                               let sLat = item.latitude, let sLon = item.longitude else { return true }
+                        return abs(eLat - sLat) > 0.0001 || abs(eLon - sLon) > 0.0001
+                    }()
+                    
+                    if hasExisting && hasSuggested && coordsDiffer {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            coordinateRow(label: "Original:", lat: item.existingLatitude!, lon: item.existingLongitude!, color: .secondary)
+                            coordinateRow(label: "Suggested:", lat: item.latitude!, lon: item.longitude!, color: .cyan)
+                        }
+                    } else if let lat = item.latitude ?? item.existingLatitude,
+                               let lon = item.longitude ?? item.existingLongitude {
+                        let label = hasExisting && !hasSuggested ? "Original:" : "Coords:"
+                        coordinateRow(label: label, lat: lat, lon: lon, color: .secondary)
                     }
-                } else if let lat = item.latitude ?? item.existingLatitude,
-                           let lon = item.longitude ?? item.existingLongitude {
-                    let label = hasExisting && !hasSuggested ? "Original:" : "Coords:"
-                    coordinateRow(label: label, lat: lat, lon: lon, color: .secondary)
                 }
                 
                 // Align Action Buttons at the bottom-right of the row
@@ -868,18 +902,20 @@ struct QueueRowView: View {
                         .buttonStyle(.plain)
                         .help("Edit details manually")
                         .popover(isPresented: $showingEditPopover, arrowEdge: .trailing) {
-                            EditMetadataPopover(item: item, manager: manager, onOpenMap: onEditLocation)
+                            EditMetadataPopover(item: item, manager: manager, settings: settings, onOpenMap: onEditLocation)
                         }
                         
-                        Button(action: {
-                            onEditLocation()
-                        }) {
-                            Image(systemName: "map.circle")
-                                .font(.system(size: 16))
-                                .foregroundColor(.secondary)
+                        if settings.processingMode == .both || settings.processingMode == .locationOnly {
+                            Button(action: {
+                                onEditLocation()
+                            }) {
+                                Image(systemName: "map.circle")
+                                    .font(.system(size: 16))
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Pin location on map")
                         }
-                        .buttonStyle(.plain)
-                        .help("Pin location on map")
                         
                         // Cache indicator and clear button
                         if isCached {
@@ -979,6 +1015,7 @@ struct QueueRowView: View {
 struct EditMetadataPopover: View {
     let item: ImageItem
     @ObservedObject var manager: PinmageManager
+    @ObservedObject var settings: AppSettings
     let onOpenMap: () -> Void
     @Environment(\.dismiss) var dismiss
     
@@ -995,9 +1032,10 @@ struct EditMetadataPopover: View {
     
     @State private var hintText: String
     
-    init(item: ImageItem, manager: PinmageManager, onOpenMap: @escaping () -> Void) {
+    init(item: ImageItem, manager: PinmageManager, settings: AppSettings, onOpenMap: @escaping () -> Void) {
         self.item = item
         self.manager = manager
+        self.settings = settings
         self.onOpenMap = onOpenMap
         
         // Initialize state
@@ -1027,96 +1065,100 @@ struct EditMetadataPopover: View {
             
             VStack(alignment: .leading, spacing: 12) {
                 // Date Section
-                VStack(alignment: .leading, spacing: 6) {
-                    Toggle("Include Date", isOn: $useDate)
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                    
-                    if useDate {
-                        DatePicker("", selection: $date, displayedComponents: .date)
-                            .datePickerStyle(.field)
-                            .labelsHidden()
+                if settings.processingMode == .both || settings.processingMode == .dateOnly {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("Include Date", isOn: $useDate)
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                        
+                        if useDate {
+                            DatePicker("", selection: $date, displayedComponents: .date)
+                                .datePickerStyle(.field)
+                                .labelsHidden()
+                        }
                     }
+                    
+                    Divider().background(Color.white.opacity(0.05))
                 }
-                
-                Divider().background(Color.white.opacity(0.05))
                 
                 // Location Section
-                VStack(alignment: .leading, spacing: 6) {
-                    Toggle("Include Location", isOn: $useLocation)
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                    
-                    if useLocation {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Place Name")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            
-                            HStack {
-                                TextField("e.g. Eiffel Tower, Paris", text: $place)
-                                    .textFieldStyle(.roundedBorder)
+                if settings.processingMode == .both || settings.processingMode == .locationOnly {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Toggle("Include Location", isOn: $useLocation)
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                        
+                        if useLocation {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Place Name")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
                                 
-                                Button(action: lookupCoordinates) {
-                                    if isGeocoding {
-                                        ProgressView().controlSize(.small)
-                                    } else {
-                                        Text("Look Up")
+                                HStack {
+                                    TextField("e.g. Eiffel Tower, Paris", text: $place)
+                                        .textFieldStyle(.roundedBorder)
+                                    
+                                    Button(action: lookupCoordinates) {
+                                        if isGeocoding {
+                                            ProgressView().controlSize(.small)
+                                        } else {
+                                            Text("Look Up")
+                                        }
+                                    }
+                                    .disabled(place.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isGeocoding)
+                                }
+                                
+                                HStack(spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("Latitude")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                        TextField("Latitude", text: $latitudeStr)
+                                            .textFieldStyle(.roundedBorder)
+                                            .onChange(of: latitudeStr) { _, newValue in
+                                                handleCoordinatePaste(newValue)
+                                            }
+                                    }
+                                    
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("Longitude")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                        TextField("Longitude", text: $longitudeStr)
+                                            .textFieldStyle(.roundedBorder)
+                                            .onChange(of: longitudeStr) { _, newValue in
+                                                handleCoordinatePaste(newValue)
+                                            }
                                     }
                                 }
-                                .disabled(place.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isGeocoding)
-                            }
-                            
-                            HStack(spacing: 12) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Latitude")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    TextField("Latitude", text: $latitudeStr)
-                                        .textFieldStyle(.roundedBorder)
-                                        .onChange(of: latitudeStr) { _, newValue in
-                                            handleCoordinatePaste(newValue)
-                                        }
+                                
+                                if !geocodedPlace.isEmpty {
+                                    Text("Resolved: \(geocodedPlace)")
+                                        .font(.caption2)
+                                        .foregroundColor(.cyan)
+                                        .italic()
                                 }
                                 
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Longitude")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    TextField("Longitude", text: $longitudeStr)
-                                        .textFieldStyle(.roundedBorder)
-                                        .onChange(of: longitudeStr) { _, newValue in
-                                            handleCoordinatePaste(newValue)
-                                        }
+                                Button(action: {
+                                    dismiss()
+                                    onOpenMap()
+                                }) {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "map")
+                                        Text("Open Map Pin Editor")
+                                    }
                                 }
+                                .buttonStyle(.plain)
+                                .foregroundColor(.cyan)
+                                .font(.caption)
+                                .padding(.top, 4)
                             }
-                            
-                            if !geocodedPlace.isEmpty {
-                                Text("Resolved: \(geocodedPlace)")
-                                    .font(.caption2)
-                                    .foregroundColor(.cyan)
-                                    .italic()
-                            }
-                            
-                            Button(action: {
-                                dismiss()
-                                onOpenMap()
-                            }) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "map")
-                                    Text("Open Map Pin Editor")
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundColor(.cyan)
-                            .font(.caption)
-                            .padding(.top, 4)
+                            .padding(.leading, 16)
                         }
-                        .padding(.leading, 16)
                     }
+                    
+                    Divider().background(Color.white.opacity(0.05))
                 }
-                
-                Divider().background(Color.white.opacity(0.05))
                 
                 // Hint Section
                 VStack(alignment: .leading, spacing: 6) {
@@ -1192,13 +1234,13 @@ struct EditMetadataPopover: View {
         
         manager.updateItemMetadata(
             id: item.id,
-            date: finalDate,
-            saveDate: useDate,
-            place: finalPlace,
-            saveLocation: useLocation,
-            latitude: finalLat,
-            longitude: finalLon,
-            geocodedPlace: finalGeo
+            date: settings.processingMode == .locationOnly ? nil : finalDate,
+            saveDate: settings.processingMode == .locationOnly ? false : useDate,
+            place: settings.processingMode == .dateOnly ? nil : finalPlace,
+            saveLocation: settings.processingMode == .dateOnly ? false : useLocation,
+            latitude: settings.processingMode == .dateOnly ? nil : finalLat,
+            longitude: settings.processingMode == .dateOnly ? nil : finalLon,
+            geocodedPlace: settings.processingMode == .dateOnly ? nil : finalGeo
         )
         manager.updateItemHint(id: item.id, hint: hintText)
     }
@@ -1207,6 +1249,7 @@ struct EditMetadataPopover: View {
 struct BatchEditPopover: View {
     let ids: Set<UUID>
     @ObservedObject var manager: PinmageManager
+    @ObservedObject var settings: AppSettings
     @Environment(\.dismiss) var dismiss
 
     @State private var setDate: Bool = false
@@ -1224,35 +1267,39 @@ struct BatchEditPopover: View {
             Divider().background(Color.white.opacity(0.1))
 
             VStack(alignment: .leading, spacing: 12) {
-                Toggle("Set Date", isOn: $setDate)
-                    .font(.subheadline).fontWeight(.semibold)
-                if setDate {
-                    DatePicker("", selection: $date, displayedComponents: .date)
-                        .datePickerStyle(.field)
-                        .labelsHidden()
+                if settings.processingMode == .both || settings.processingMode == .dateOnly {
+                    Toggle("Set Date", isOn: $setDate)
+                        .font(.subheadline).fontWeight(.semibold)
+                    if setDate {
+                        DatePicker("", selection: $date, displayedComponents: .date)
+                            .datePickerStyle(.field)
+                            .labelsHidden()
+                    }
+                    
+                    Divider().background(Color.white.opacity(0.05))
                 }
 
-                Divider().background(Color.white.opacity(0.05))
-
-                Toggle("Set Coordinates", isOn: $setLocation)
-                    .font(.subheadline).fontWeight(.semibold)
-                if setLocation {
-                    HStack(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Latitude").font(.caption).foregroundColor(.secondary)
-                            TextField("Latitude", text: $latitudeStr)
-                                .textFieldStyle(.roundedBorder)
-                                .onChange(of: latitudeStr) { _, newValue in
-                                    handleCoordinatePaste(newValue)
-                                }
-                        }
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Longitude").font(.caption).foregroundColor(.secondary)
-                            TextField("Longitude", text: $longitudeStr)
-                                .textFieldStyle(.roundedBorder)
-                                .onChange(of: longitudeStr) { _, newValue in
-                                    handleCoordinatePaste(newValue)
-                                }
+                if settings.processingMode == .both || settings.processingMode == .locationOnly {
+                    Toggle("Set Coordinates", isOn: $setLocation)
+                        .font(.subheadline).fontWeight(.semibold)
+                    if setLocation {
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Latitude").font(.caption).foregroundColor(.secondary)
+                                TextField("Latitude", text: $latitudeStr)
+                                    .textFieldStyle(.roundedBorder)
+                                    .onChange(of: latitudeStr) { _, newValue in
+                                        handleCoordinatePaste(newValue)
+                                    }
+                            }
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Longitude").font(.caption).foregroundColor(.secondary)
+                                TextField("Longitude", text: $longitudeStr)
+                                    .textFieldStyle(.roundedBorder)
+                                    .onChange(of: longitudeStr) { _, newValue in
+                                        handleCoordinatePaste(newValue)
+                                    }
+                            }
                         }
                     }
                 }
@@ -1282,11 +1329,11 @@ struct BatchEditPopover: View {
         let lon = setLocation ? Double(longitudeStr) : nil
         manager.batchUpdateMetadata(
             ids: ids,
-            date: setDate ? date : nil,
-            saveDate: setDate,
-            latitude: lat,
-            longitude: lon,
-            saveLocation: setLocation
+            date: settings.processingMode == .locationOnly ? nil : (setDate ? date : nil),
+            saveDate: settings.processingMode == .locationOnly ? false : setDate,
+            latitude: settings.processingMode == .dateOnly ? nil : lat,
+            longitude: settings.processingMode == .dateOnly ? nil : lon,
+            saveLocation: settings.processingMode == .dateOnly ? false : setLocation
         )
     }
 
