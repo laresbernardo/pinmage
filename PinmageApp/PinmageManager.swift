@@ -415,6 +415,7 @@ import MapKit
                     if !imageHint.isEmpty {
                         contextualPrompt += "\n\nThe user provided a hint specific to this image: \"\(imageHint)\". Use this as a strong signal for identifying the date and location."
                     }
+                    contextualPrompt += "\n\nIMPORTANT: When identifying the place/location, use a well-known canonical name (e.g., \"Eiffel Tower, Paris, France\" rather than \"that tower in Paris\" or vague descriptions). This ensures the location can be accurately geocoded to coordinates."
                     let response: OllamaManager.AnalysisResponse
                     if provider == .ollama {
                         let ollamaResponse = try await OllamaManager.analyzeImage(
@@ -482,9 +483,9 @@ import MapKit
             )
         }
         
-        // 3. Optional CoreLocation/MapKit Geocoding Fallback
-        var latitude: Double? = result.latitude
-        var longitude: Double? = result.longitude
+        // 3. Geocode place name to coordinates (AI is only used for place name extraction, not coordinates)
+        var latitude: Double? = nil
+        var longitude: Double? = nil
         var geocodedPlace: String? = nil
         
         // If image already has GPS coordinates and skip is on, use existing instead of AI result
@@ -495,18 +496,11 @@ import MapKit
                 geocodedPlace = geocoded.resolvedName
             }
         } else if let place = result.place, !place.isEmpty, place.lowercased() != "null" {
-            if latitude == nil || longitude == nil {
-                await manager.updateItemStatus(index: index, status: .geocoding, place: place)
-                
-                if let geocoded = await GeocodingManager.geocode(address: place) {
-                    latitude = geocoded.coordinate.latitude
-                    longitude = geocoded.coordinate.longitude
-                    geocodedPlace = geocoded.resolvedName
-                }
-            } else {
-                if let geocoded = await GeocodingManager.geocode(address: place) {
-                    geocodedPlace = geocoded.resolvedName
-                }
+            await manager.updateItemStatus(index: index, status: .geocoding, place: place)
+            if let geocoded = await GeocodingManager.geocode(address: place) {
+                latitude = geocoded.coordinate.latitude
+                longitude = geocoded.coordinate.longitude
+                geocodedPlace = geocoded.resolvedName
             }
         }
         
@@ -758,71 +752,179 @@ import MapKit
 }
 
 class GeocodingManager {
+    private static var forwardCache: [String: GeocodedLocation] = [:]
+    private static var reverseCache: [String: GeocodedLocation] = [:]
+    private static let rateLimiter = GeocodingRateLimiter()
+
     struct GeocodedLocation {
         let coordinate: CLLocationCoordinate2D
         let resolvedName: String?
     }
 
+    static func clearCache() {
+        forwardCache.removeAll()
+        reverseCache.removeAll()
+    }
+
+    private static func normalizeKey(_ text: String) -> String {
+        let cleaned = text
+            .lowercased()
+            .components(separatedBy: CharacterSet.punctuationCharacters).joined()
+            .components(separatedBy: CharacterSet.symbols).joined()
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        let fillerWords: Set<String> = ["the", "a", "an", "of", "in", "at", "on", "for", "to", "and", "or", "is", "it", "its", "with", "by", "from", "as", "be", "was"]
+        return cleaned
+            .components(separatedBy: " ")
+            .filter { !$0.isEmpty && !fillerWords.contains($0) }
+            .joined(separator: " ")
+    }
+
+    private static func isValidCoordinate(_ latitude: Double, _ longitude: Double) -> Bool {
+        guard latitude != 0 || longitude != 0 else { return false }
+        guard latitude.isFinite, longitude.isFinite else { return false }
+        guard latitude >= -90 && latitude <= 90 else { return false }
+        guard longitude >= -180 && longitude <= 180 else { return false }
+        return true
+    }
+
     static func geocode(address: String) async -> GeocodedLocation? {
-        let request = MKLocalSearch.Request()
-        request.naturalLanguageQuery = address
-        let search = MKLocalSearch(request: request)
-        do {
-            let response = try await search.start()
-            guard let firstItem = response.mapItems.first else { return nil }
-            if #available(macOS 26, *) {
-                return GeocodedLocation(
-                    coordinate: firstItem.location.coordinate,
-                    resolvedName: firstItem.name ?? firstItem.address?.shortAddress
-                )
-            } else {
-                return GeocodedLocation(
-                    coordinate: firstItem.placemark.coordinate,
-                    resolvedName: firstItem.name ?? firstItem.placemark.title
-                )
-            }
-        } catch {
-            print("Geocoding error for '\(address)': \(error.localizedDescription)")
-            return nil
+        let key = normalizeKey(address)
+        if key.isEmpty { return nil }
+        if let cached = forwardCache[key] {
+            return cached
         }
+
+        for attempt in 1...3 {
+            await rateLimiter.throttle()
+
+            do {
+                let result: GeocodedLocation
+                if #available(macOS 26, *) {
+                    guard let request = MKGeocodingRequest(addressString: address) else { return nil }
+                    let mapItems = try await request.mapItems
+                    guard let mapItem = mapItems.first else { return nil }
+                    let resolved = [mapItem.name, mapItem.address?.shortAddress]
+                        .compactMap { $0 }
+                        .filter { !$0.isEmpty }
+                        .joined(separator: ", ")
+                    result = GeocodedLocation(
+                        coordinate: mapItem.location.coordinate,
+                        resolvedName: resolved.isEmpty ? nil : resolved
+                    )
+                } else {
+                    let geocoder = CLGeocoder()
+                    let placemarks = try await geocoder.geocodeAddressString(address)
+                    guard let placemark = placemarks.first else { return nil }
+                    let resolved = [placemark.name, placemark.locality, placemark.administrativeArea, placemark.country]
+                        .compactMap { $0 }
+                        .filter { !$0.isEmpty }
+                        .joined(separator: ", ")
+                    result = GeocodedLocation(
+                        coordinate: placemark.location?.coordinate ?? CLLocationCoordinate2D(),
+                        resolvedName: resolved.isEmpty ? nil : resolved
+                    )
+                }
+
+                guard isValidCoordinate(result.coordinate.latitude, result.coordinate.longitude) else {
+                    print("Geocoding discarded invalid coordinates for '\(address)': (\(result.coordinate.latitude), \(result.coordinate.longitude))")
+                    return nil
+                }
+
+                forwardCache[key] = result
+                await rateLimiter.recordSuccess()
+                return result
+            } catch {
+                print("Geocoding error for '\(address)' (attempt \(attempt)): \(error.localizedDescription)")
+                await rateLimiter.recordError()
+                if attempt < 3 {
+                    try? await Task.sleep(nanoseconds: await rateLimiter.backoffDelay)
+                }
+            }
+        }
+        return nil
     }
 
     static func reverseGeocode(latitude: Double, longitude: Double) async -> GeocodedLocation? {
-        let location = CLLocation(latitude: latitude, longitude: longitude)
-        if #available(macOS 26, *) {
-            guard let request = MKReverseGeocodingRequest(location: location) else { return nil }
+        guard isValidCoordinate(latitude, longitude) else { return nil }
+
+        let key = String(format: "%.4f,%.4f", latitude, longitude)
+        if let cached = reverseCache[key] {
+            return cached
+        }
+
+        for attempt in 1...3 {
+            await rateLimiter.throttle()
+
             do {
-                let mapItems = try await request.mapItems
-                guard let mapItem = mapItems.first else { return nil }
-                let resolved = [mapItem.name, mapItem.address?.shortAddress]
-                    .compactMap { $0 }
-                    .filter { !$0.isEmpty }
-                    .joined(separator: ", ")
-                return GeocodedLocation(
-                    coordinate: mapItem.location.coordinate,
-                    resolvedName: resolved.isEmpty ? nil : resolved
-                )
+                let result: GeocodedLocation
+                let location = CLLocation(latitude: latitude, longitude: longitude)
+                if #available(macOS 26, *) {
+                    guard let request = MKReverseGeocodingRequest(location: location) else { return nil }
+                    let mapItems = try await request.mapItems
+                    guard let mapItem = mapItems.first else { return nil }
+                    let resolved = [mapItem.name, mapItem.address?.shortAddress]
+                        .compactMap { $0 }
+                        .filter { !$0.isEmpty }
+                        .joined(separator: ", ")
+                    result = GeocodedLocation(
+                        coordinate: mapItem.location.coordinate,
+                        resolvedName: resolved.isEmpty ? nil : resolved
+                    )
+                } else {
+                    let geocoder = CLGeocoder()
+                    let placemarks = try await geocoder.reverseGeocodeLocation(location)
+                    guard let placemark = placemarks.first else { return nil }
+                    let resolved = [placemark.name, placemark.locality, placemark.administrativeArea, placemark.country]
+                        .compactMap { $0 }
+                        .filter { !$0.isEmpty }
+                        .joined(separator: ", ")
+                    result = GeocodedLocation(
+                        coordinate: placemark.location?.coordinate ?? location.coordinate,
+                        resolvedName: resolved.isEmpty ? nil : resolved
+                    )
+                }
+
+                reverseCache[key] = result
+                await rateLimiter.recordSuccess()
+                return result
             } catch {
-                print("Reverse geocoding error: \(error.localizedDescription)")
-                return nil
-            }
-        } else {
-            let geocoder = CLGeocoder()
-            do {
-                let placemarks = try await geocoder.reverseGeocodeLocation(location)
-                guard let placemark = placemarks.first else { return nil }
-                let resolved = [placemark.name, placemark.locality, placemark.administrativeArea, placemark.country]
-                    .compactMap { $0 }
-                    .filter { !$0.isEmpty }
-                    .joined(separator: ", ")
-                return GeocodedLocation(
-                    coordinate: placemark.location?.coordinate ?? location.coordinate,
-                    resolvedName: resolved.isEmpty ? nil : resolved
-                )
-            } catch {
-                print("Reverse geocoding error: \(error.localizedDescription)")
-                return nil
+                print("Reverse geocoding error (\(attempt)): \(error.localizedDescription)")
+                await rateLimiter.recordError()
+                if attempt < 3 {
+                    try? await Task.sleep(nanoseconds: await rateLimiter.backoffDelay)
+                }
             }
         }
+        return nil
+    }
+}
+
+private actor GeocodingRateLimiter {
+    private var lastRequest: Date = .distantPast
+    private var errorCount = 0
+    let minimumInterval: TimeInterval = 0.3
+
+    func throttle() async {
+        let elapsed = Date().timeIntervalSince(lastRequest)
+        if elapsed < minimumInterval {
+            try? await Task.sleep(nanoseconds: UInt64((minimumInterval - elapsed) * 1_000_000_000))
+        }
+        lastRequest = Date()
+    }
+
+    var backoffDelay: UInt64 {
+        guard errorCount > 0 else { return 0 }
+        let seconds = min(pow(2.0, Double(errorCount)), 30.0)
+        return UInt64(seconds * 1_000_000_000)
+    }
+
+    func recordSuccess() {
+        errorCount = 0
+    }
+
+    func recordError() {
+        errorCount += 1
     }
 }

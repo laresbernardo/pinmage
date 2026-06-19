@@ -96,11 +96,9 @@ class OllamaManager {
                 "date": OllamaProperty(type: "string", description: "Date in YYYY-MM-DD format (or partial YYYY-MM or YYYY if precise date is unknown), or null if totally unknown"),
                 "dateCertainty": OllamaProperty(type: "integer", description: "Confidence/certainty of the date, from 0 to 100. 0 if date is null."),
                 "place": OllamaProperty(type: "string", description: "Location name, landmark, city, country, or null if totally unknown"),
-                "locationCertainty": OllamaProperty(type: "integer", description: "Confidence/certainty of the location/place, from 0 to 100. 0 if place is null."),
-                "latitude": OllamaProperty(type: "number", description: "Deduced latitude (double), or null if unknown"),
-                "longitude": OllamaProperty(type: "number", description: "Deduced longitude (double), or null if unknown")
+                "locationCertainty": OllamaProperty(type: "integer", description: "Confidence/certainty of the location/place, from 0 to 100. 0 if place is null.")
             ],
-            required: ["date", "dateCertainty", "place", "locationCertainty", "latitude", "longitude"]
+            required: ["date", "dateCertainty", "place", "locationCertainty"]
         )
 
         let requestBody = OllamaGenerateRequest(

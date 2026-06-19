@@ -97,11 +97,9 @@ class GeminiManager {
                 "date": RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "Date in YYYY-MM-DD format (or partial YYYY-MM or YYYY if precise date is unknown), or null if totally unknown"),
                 "dateCertainty": RequestBody.GenerationConfig.Schema.Property(type: "INTEGER", description: "Confidence/certainty of the date, from 0 to 100. 0 if date is null."),
                 "place": RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "Location name, landmark, city, country, or null if totally unknown"),
-                "locationCertainty": RequestBody.GenerationConfig.Schema.Property(type: "INTEGER", description: "Confidence/certainty of the location/place, from 0 to 100. 0 if place is null."),
-                "latitude": RequestBody.GenerationConfig.Schema.Property(type: "NUMBER", description: "Deduced latitude (double), or null if unknown"),
-                "longitude": RequestBody.GenerationConfig.Schema.Property(type: "NUMBER", description: "Deduced longitude (double), or null if unknown")
+                "locationCertainty": RequestBody.GenerationConfig.Schema.Property(type: "INTEGER", description: "Confidence/certainty of the location/place, from 0 to 100. 0 if place is null.")
             ],
-            required: ["date", "dateCertainty", "place", "locationCertainty", "latitude", "longitude"]
+            required: ["date", "dateCertainty", "place", "locationCertainty"]
         )
         
         // 3. Assemble request body
