@@ -26,10 +26,50 @@ class CacheManager {
         }
     }
     
+    func hasCache(hash: String) -> Bool {
+        queue.sync { cache[hash] != nil }
+    }
+    
+    func invalidateCache(hash: String) {
+        guard !hash.isEmpty else { return }
+        queue.async(flags: .barrier) {
+            self.cache.removeValue(forKey: hash)
+            self.saveCache()
+        }
+    }
+    
+    var cacheCount: Int {
+        queue.sync { cache.count }
+    }
+    
     func clearCache() {
         queue.async(flags: .barrier) {
             self.cache.removeAll()
             try? FileManager.default.removeItem(at: self.cacheURL)
+        }
+    }
+    
+    func clearDateCache() {
+        queue.async(flags: .barrier) {
+            for (hash, var entry) in self.cache {
+                entry.date = nil
+                entry.dateCertainty = nil
+                self.cache[hash] = entry
+            }
+            self.saveCache()
+        }
+    }
+    
+    func clearLocationCache() {
+        queue.async(flags: .barrier) {
+            for (hash, var entry) in self.cache {
+                entry.place = nil
+                entry.locationCertainty = nil
+                entry.latitude = nil
+                entry.longitude = nil
+                self.cache[hash] = entry
+            }
+            self.saveCache()
         }
     }
     

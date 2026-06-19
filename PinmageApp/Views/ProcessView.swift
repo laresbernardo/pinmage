@@ -513,6 +513,7 @@ struct QueueRowView: View {
     @State private var thumbnail: NSImage? = nil
     @State private var showingEditPopover = false
     @State private var showingPreviewPopover = false
+    @State private var isCached: Bool = false
     
     var body: some View {
         HStack(spacing: 12) {
@@ -711,6 +712,22 @@ struct QueueRowView: View {
                 .font(.subheadline)
                 .foregroundColor(.secondary)
                 
+                // Per-image hint
+                HStack(spacing: 4) {
+                    Image(systemName: "lightbulb")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary.opacity(0.6))
+                    TextField("Optional hint for the AI...", text: Binding(
+                        get: { item.hint },
+                        set: { manager.updateItemHint(id: item.id, hint: $0) }
+                    ))
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .disabled(manager.isProcessing)
+                }
+                .padding(.top, 4)
+                
                 if let error = item.errorMessage {
                     Text(error)
                         .font(.caption)
@@ -722,7 +739,7 @@ struct QueueRowView: View {
             
             // Row Action Buttons
             HStack(spacing: 8) {
-                if !manager.isProcessing && item.status != .writing {
+                if item.status != .processing && item.status != .callingAPI && item.status != .geocoding && item.status != .writing {
                     Button(action: {
                         showingEditPopover = true
                     }) {
@@ -734,6 +751,20 @@ struct QueueRowView: View {
                     .help("Edit details manually")
                     .popover(isPresented: $showingEditPopover, arrowEdge: .trailing) {
                         EditMetadataPopover(item: item, manager: manager)
+                    }
+                    
+                    // Cache indicator and clear button
+                    if isCached {
+                        Button(action: {
+                            manager.clearItemCache(id: item.id)
+                            isCached = false
+                        }) {
+                            Image(systemName: "bolt.circle.fill")
+                                .font(.system(size: 16))
+                                .foregroundColor(.yellow)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Clear cached AI result for this image")
                     }
                 }
                 
@@ -757,6 +788,9 @@ struct QueueRowView: View {
                 }
             }
             .padding(.leading, 4)
+        }
+        .onAppear {
+            isCached = !item.cacheHash.isEmpty && CacheManager.shared.hasCache(hash: item.cacheHash)
         }
     }
     
@@ -802,6 +836,8 @@ struct EditMetadataPopover: View {
     
     @State private var isGeocoding = false
     
+    @State private var hintText: String
+    
     init(item: ImageItem, manager: PinmageManager) {
         self.item = item
         self.manager = manager
@@ -815,6 +851,7 @@ struct EditMetadataPopover: View {
         _latitudeStr = State(initialValue: item.latitude != nil ? String(format: "%.6f", item.latitude!) : "")
         _longitudeStr = State(initialValue: item.longitude != nil ? String(format: "%.6f", item.longitude!) : "")
         _geocodedPlace = State(initialValue: item.geocodedPlace ?? "")
+        _hintText = State(initialValue: item.hint)
     }
     
     var body: some View {
@@ -900,6 +937,23 @@ struct EditMetadataPopover: View {
                         .padding(.leading, 16)
                     }
                 }
+                
+                Divider().background(Color.white.opacity(0.05))
+                
+                // Hint Section
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "lightbulb")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                        Text("AI Hint")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                    }
+                    TextField("Optional hint to help the AI...", text: $hintText)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+                }
             }
             .frame(width: 280)
             
@@ -955,6 +1009,7 @@ struct EditMetadataPopover: View {
             longitude: finalLon,
             geocodedPlace: finalGeo
         )
+        manager.updateItemHint(id: item.id, hint: hintText)
     }
 }
 

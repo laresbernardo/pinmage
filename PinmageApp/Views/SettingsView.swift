@@ -4,6 +4,10 @@ import AppKit
 struct SettingsView: View {
     @ObservedObject var settings: AppSettings
     @State private var showResetConfirm = false
+    @State private var showClearAllCacheConfirm = false
+    @State private var showClearDateCacheConfirm = false
+    @State private var showClearLocationCacheConfirm = false
+    @State private var cacheEntryCount: Int = 0
     
     var body: some View {
         ScrollView {
@@ -68,10 +72,9 @@ struct SettingsView: View {
                                 .fontWeight(.semibold)
                             
                             Picker("", selection: $settings.modelName) {
-                                Text("Gemini 3.5 Flash (Recommended)").tag("gemini-3.5-flash")
+                                Text("Gemini 3.1 Flash Lite (Recommended)").tag("gemini-3.1-flash-lite")
+                                Text("Gemini 3.5 Flash").tag("gemini-3.5-flash")
                                 Text("Gemini 2.5 Flash").tag("gemini-2.5-flash")
-                                Text("Gemini 1.5 Flash").tag("gemini-1.5-flash")
-                                Text("Gemini 1.5 Pro").tag("gemini-1.5-pro")
                             }
                             .pickerStyle(.menu)
                             .frame(maxWidth: 320)
@@ -234,17 +237,40 @@ struct SettingsView: View {
                                 .foregroundColor(.secondary)
                                 .fontWeight(.semibold)
                             
+                            Text("Avoids paying for repetitive API calls of unmodified images by caching results.")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                            
                             HStack {
-                                Text("Avoids paying for repetitive API calls of unmodified images by caching results.")
-                                    .font(.system(size: 10))
+                                Text("\(cacheEntryCount) cached entries")
+                                    .font(.caption)
                                     .foregroundColor(.secondary)
                                 Spacer()
-                                Button("Clear Cache Database") {
-                                    CacheManager.shared.clearCache()
+                                Button("Clear Date Cache") {
+                                    showClearDateCacheConfirm = true
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
+                                .disabled(cacheEntryCount == 0)
+                                
+                                Button("Clear Location Cache") {
+                                    showClearLocationCacheConfirm = true
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(cacheEntryCount == 0)
+                                
+                                Button("Clear All") {
+                                    showClearAllCacheConfirm = true
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(.red)
+                                .controlSize(.small)
+                                .disabled(cacheEntryCount == 0)
                             }
+                        }
+                        .onAppear {
+                            cacheEntryCount = CacheManager.shared.cacheCount
                         }
                     }
                     .padding(20)
@@ -341,6 +367,43 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Are you sure you want to reset the cumulative API spend history to $0.00? This action cannot be undone.")
+        }
+        .confirmationDialog(
+            "Clear All Cache?",
+            isPresented: $showClearAllCacheConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Clear All Cache", role: .destructive) {
+                CacheManager.shared.clearCache()
+                cacheEntryCount = 0
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will remove all cached AI analysis results (\(cacheEntryCount) entries). Future analysis will re-query the Gemini API for these images.")
+        }
+        .confirmationDialog(
+            "Clear Date Cache?",
+            isPresented: $showClearDateCacheConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Clear Date Cache", role: .destructive) {
+                CacheManager.shared.clearDateCache()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will remove the date fields from all cached entries. Location data will be preserved. Future analysis will re-detect dates for these images.")
+        }
+        .confirmationDialog(
+            "Clear Location Cache?",
+            isPresented: $showClearLocationCacheConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Clear Location Cache", role: .destructive) {
+                CacheManager.shared.clearLocationCache()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will remove the location fields from all cached entries. Date data will be preserved. Future analysis will re-detect locations for these images.")
         }
     }
     

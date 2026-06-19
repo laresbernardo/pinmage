@@ -64,6 +64,13 @@ struct ImageItem: Identifiable, Equatable {
     var saveLocation: Bool = false
     var geocodedPlace: String? = nil
     
+    // Per-image hint to help the AI
+    var hint: String = ""
+    
+    // SHA-256 hash of the file for cache lookups
+    var cacheHash: String = ""
+    var isCached: Bool { !cacheHash.isEmpty }
+    
     static func == (lhs: ImageItem, rhs: ImageItem) -> Bool {
         lhs.id == rhs.id
     }
@@ -150,7 +157,7 @@ enum FilenamePattern: String, CaseIterable, Identifiable {
     
     init() {
         self.apiKey = UserDefaults.standard.string(forKey: "pinmage_api_key") ?? ""
-        self.modelName = UserDefaults.standard.string(forKey: "pinmage_model_name") ?? "gemini-3.5-flash"
+        self.modelName = UserDefaults.standard.string(forKey: "pinmage_model_name") ?? "gemini-3.1-flash-lite"
         self.outputFolderPath = UserDefaults.standard.string(forKey: "pinmage_output_folder") ?? ""
         self.overwriteOriginals = UserDefaults.standard.bool(forKey: "pinmage_overwrite_originals")
         let rawPattern = UserDefaults.standard.string(forKey: "pinmage_filename_pattern") ?? ""

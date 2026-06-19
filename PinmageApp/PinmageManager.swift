@@ -48,12 +48,13 @@ import MapKit
         
         var newItems = uniqueNewUrls.map { ImageItem(fileURL: $0) }
         
-        // Check for existing GPS coordinates in each new image
+        // Check for existing GPS coordinates and compute cache hash for each new image
         for i in newItems.indices {
             if let coords = MetadataWriter.readExistingCoordinates(from: newItems[i].fileURL) {
                 newItems[i].existingLatitude = coords.latitude
                 newItems[i].existingLongitude = coords.longitude
             }
+            newItems[i].cacheHash = CacheManager.computeHash(for: newItems[i].fileURL) ?? ""
         }
         
         // Reverse geocode existing coordinates for immediate place name display
@@ -127,6 +128,17 @@ import MapKit
         }
     }
     
+    func updateItemHint(id: UUID, hint: String) {
+        if let index = imageItems.firstIndex(where: { $0.id == id }) {
+            imageItems[index].hint = hint
+        }
+    }
+    
+    func clearItemCache(id: UUID) {
+        guard let index = imageItems.firstIndex(where: { $0.id == id }) else { return }
+        CacheManager.shared.invalidateCache(hash: imageItems[index].cacheHash)
+    }
+    
     func updateItemMetadata(
         id: UUID,
         date: Date?,
@@ -149,6 +161,9 @@ import MapKit
             if imageItems[index].status == .pending || imageItems[index].status == .failed || imageItems[index].status == .completed {
                 imageItems[index].status = .analyzed
             }
+            
+            // Invalidate cache since the user manually overwrote values
+            CacheManager.shared.invalidateCache(hash: imageItems[index].cacheHash)
         }
     }
     
@@ -167,6 +182,7 @@ import MapKit
             if imageItems[index].status == .pending || imageItems[index].status == .failed || imageItems[index].status == .completed {
                 imageItems[index].status = .analyzed
             }
+            CacheManager.shared.invalidateCache(hash: imageItems[index].cacheHash)
         }
     }
     
@@ -262,6 +278,7 @@ import MapKit
                         existingLatitude: item.existingLatitude,
                         existingLongitude: item.existingLongitude,
                         locationHint: locationHint,
+                        imageHint: item.hint,
                         manager: self,
                         settings: settings
                     )
@@ -299,6 +316,7 @@ import MapKit
                             existingLatitude: item.existingLatitude,
                             existingLongitude: item.existingLongitude,
                             locationHint: locationHint,
+                            imageHint: item.hint,
                             manager: self,
                             settings: settings
                         )
@@ -357,6 +375,7 @@ import MapKit
         existingLatitude: Double?,
         existingLongitude: Double?,
         locationHint: String,
+        imageHint: String,
         manager: PinmageManager,
         settings: AppSettings
     ) async -> AnalysisUpdate {
@@ -388,6 +407,9 @@ import MapKit
                     var contextualPrompt = "\(customPrompt)\n\nThe image file is named \"\(fileName)\". The filename may contain date or location hints — use it as additional context if relevant."
                     if !locationHint.isEmpty {
                         contextualPrompt += "\n\nThe user provided the following context about this batch of images: \"\(locationHint)\". Use it as helpful context for identifying dates and locations with more confidence, but only where it aligns with the visual evidence in each image."
+                    }
+                    if !imageHint.isEmpty {
+                        contextualPrompt += "\n\nThe user provided a hint specific to this image: \"\(imageHint)\". Use this as a strong signal for identifying the date and location."
                     }
                     let response = try await GeminiManager.analyzeImage(
                         fileURL: itemURL,

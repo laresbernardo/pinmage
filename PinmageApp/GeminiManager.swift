@@ -2,12 +2,12 @@ import Foundation
 
 class GeminiManager {
     struct GeminiResult: Codable {
-        let date: String?
-        let dateCertainty: Int?
-        let place: String?
-        let locationCertainty: Int?
-        let latitude: Double?
-        let longitude: Double?
+        var date: String?
+        var dateCertainty: Int?
+        var place: String?
+        var locationCertainty: Int?
+        var latitude: Double?
+        var longitude: Double?
     }
     
     // API request structure
