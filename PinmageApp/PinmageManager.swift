@@ -416,6 +416,7 @@ import MapKit
                         contextualPrompt += "\n\nThe user provided a hint specific to this image: \"\(imageHint)\". Use this as a strong signal for identifying the date and location."
                     }
                     contextualPrompt += "\n\nIMPORTANT: When identifying the place/location, use a well-known canonical name (e.g., \"Eiffel Tower, Paris, France\" rather than \"that tower in Paris\" or vague descriptions). This ensures the location can be accurately geocoded to coordinates."
+                    contextualPrompt += "\n\nCRITICAL — dateCertainty and locationCertainty MUST be integers between 0 and 100 only. Values like 95, 80, 50 are valid. A value of 500, 1000, or 0.95 is INVALID and will be rejected."
                     let response: OllamaManager.AnalysisResponse
                     if provider == .ollama {
                         let ollamaResponse = try await OllamaManager.analyzeImage(
@@ -525,8 +526,8 @@ import MapKit
                 parsedDate = parseDate(from: dateStr)
             }
             
-            let dateCertainty = result.dateCertainty ?? 0
-            let locationCertainty = result.locationCertainty ?? 0
+            let dateCertainty = min(max(result.dateCertainty ?? 0, 0), 100)
+            let locationCertainty = min(max(result.locationCertainty ?? 0, 0), 100)
             
             self.imageItems[index].detectedDate = parsedDate
             self.imageItems[index].detectedPlace = result.place

@@ -94,9 +94,9 @@ class OllamaManager {
             type: "object",
             properties: [
                 "date": OllamaProperty(type: "string", description: "Date in YYYY-MM-DD format (or partial YYYY-MM or YYYY if precise date is unknown), or null if totally unknown"),
-                "dateCertainty": OllamaProperty(type: "integer", description: "Confidence/certainty of the date, from 0 to 100. 0 if date is null."),
+                "dateCertainty": OllamaProperty(type: "integer", description: "Confidence/certainty of the date. CRITICAL: MUST be an integer between 0 and 100 ONLY. 0 if date is null. Values like 95, 80, 50 are valid. Values outside 0-100 are INVALID."),
                 "place": OllamaProperty(type: "string", description: "Location name, landmark, city, country, or null if totally unknown"),
-                "locationCertainty": OllamaProperty(type: "integer", description: "Confidence/certainty of the location/place, from 0 to 100. 0 if place is null.")
+                "locationCertainty": OllamaProperty(type: "integer", description: "Confidence/certainty of the location/place. CRITICAL: MUST be an integer between 0 and 100 ONLY. 0 if place is null. Values like 95, 80, 50 are valid. Values outside 0-100 are INVALID.")
             ],
             required: ["date", "dateCertainty", "place", "locationCertainty"]
         )

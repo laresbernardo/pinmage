@@ -95,9 +95,9 @@ class GeminiManager {
             type: "OBJECT",
             properties: [
                 "date": RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "Date in YYYY-MM-DD format (or partial YYYY-MM or YYYY if precise date is unknown), or null if totally unknown"),
-                "dateCertainty": RequestBody.GenerationConfig.Schema.Property(type: "INTEGER", description: "Confidence/certainty of the date, from 0 to 100. 0 if date is null."),
+                "dateCertainty": RequestBody.GenerationConfig.Schema.Property(type: "INTEGER", description: "Confidence/certainty of the date. CRITICAL: MUST be an integer between 0 and 100 ONLY. 0 if date is null. Values like 95, 80, 50 are valid. Values outside 0-100 are INVALID."),
                 "place": RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "Location name, landmark, city, country, or null if totally unknown"),
-                "locationCertainty": RequestBody.GenerationConfig.Schema.Property(type: "INTEGER", description: "Confidence/certainty of the location/place, from 0 to 100. 0 if place is null.")
+                "locationCertainty": RequestBody.GenerationConfig.Schema.Property(type: "INTEGER", description: "Confidence/certainty of the location/place. CRITICAL: MUST be an integer between 0 and 100 ONLY. 0 if place is null. Values like 95, 80, 50 are valid. Values outside 0-100 are INVALID.")
             ],
             required: ["date", "dateCertainty", "place", "locationCertainty"]
         )
