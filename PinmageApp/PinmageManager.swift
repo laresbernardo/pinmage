@@ -810,6 +810,28 @@ class GeocodingManager {
             return cached
         }
 
+        if let result = await performGeocode(address: address) {
+            forwardCache[key] = result
+            return result
+        }
+
+        // Fallback: If geocoding failed for the full address (which often happens with specific tourist sights/monuments),
+        // try geocoding the parent location by dropping the first part of a comma-separated address.
+        let parts = address.components(separatedBy: ",")
+        if parts.count > 1 {
+            let fallbackAddress = parts.dropFirst().joined(separator: ",").trimmingCharacters(in: .whitespacesAndNewlines)
+            print("Geocoding failed for '\(address)'. Trying fallback: '\(fallbackAddress)'")
+            if let result = await geocode(address: fallbackAddress) {
+                // Cache the resolved fallback location for the original query key to avoid repeating
+                forwardCache[key] = result
+                return result
+            }
+        }
+
+        return nil
+    }
+
+    private static func performGeocode(address: String) async -> GeocodedLocation? {
         for attempt in 1...3 {
             await rateLimiter.throttle()
 
@@ -846,7 +868,6 @@ class GeocodingManager {
                     return nil
                 }
 
-                forwardCache[key] = result
                 await rateLimiter.recordSuccess()
                 return result
             } catch {

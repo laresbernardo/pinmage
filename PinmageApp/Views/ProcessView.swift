@@ -112,7 +112,7 @@ struct ProcessView: View {
                         }) {
                             HStack {
                                 Image(systemName: "plus.circle")
-                                Text("Add Images...")
+                                Text("Add Images")
                             }
                         }
                         .buttonStyle(.bordered)
@@ -161,6 +161,101 @@ struct ProcessView: View {
                 Divider().background(Color.white.opacity(0.1))
             }
             
+            // Certainty Threshold Panel
+            if !manager.isProcessing, hasAnalyzedItems {
+                certaintyThresholdPanel
+            }
+            
+            // Import & Processing Options Card
+            if !manager.isProcessing, !manager.imageItems.isEmpty {
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "slider.horizontal.3")
+                                .font(.caption)
+                                .foregroundColor(.cyan)
+                            Text("Processing Options")
+                                .font(.caption)
+                                .fontWeight(.bold)
+                                .foregroundColor(.white)
+                        }
+                        
+                        Divider().background(Color.white.opacity(0.08))
+                        
+                        // Option 1: Existing GPS Toggle
+                        let gpsCount = manager.imageItems.filter { $0.hasExistingCoordinates }.count
+                        if gpsCount > 0 {
+                            HStack {
+                                Toggle("Keep existing GPS for \(gpsCount) image(s) — disable to allow AI overwrite", isOn: $settings.skipExistingCoordinates)
+                                    .font(.caption)
+                                    .foregroundColor(.white)
+                                    .toggleStyle(.switch)
+                                    .controlSize(.small)
+                                Spacer()
+                            }
+                        }
+                        
+                        // Option 2: Date extrapolation controls
+                        if hasAnalyzedItems {
+                            HStack {
+                                Toggle("Extrapolate dates forward (repeat last known date for unknown dates)", isOn: $settings.extrapolateDates)
+                                    .font(.caption)
+                                    .foregroundColor(.white)
+                                    .toggleStyle(.switch)
+                                    .controlSize(.small)
+                                    .onChange(of: settings.extrapolateDates) { _, newValue in
+                                        if newValue {
+                                            manager.applyDateExtrapolation()
+                                        }
+                                    }
+                                
+                                if settings.extrapolateDates {
+                                    Button("Apply Now") {
+                                        manager.applyDateExtrapolation()
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+                                
+                                Spacer()
+                            }
+                        }
+                        
+                        // Option 3: Global Hint Textfield
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "map.fill")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                Text("Optional date/location hint (e.g. \"Trip to Italy, 1991\")")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            HStack {
+                                TextField("Trip details, year, or country context...", text: $settings.locationHint)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.caption)
+                                    .foregroundColor(.white)
+                                    .disableAutocorrection(false)
+                                
+                                if !settings.locationHint.isEmpty {
+                                    Button(action: { settings.locationHint = "" }) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+                    }
+                    .padding(14)
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 8)
+            }
+            
             // Selection toolbar
             if !manager.isProcessing, !manager.imageItems.isEmpty {
                 HStack {
@@ -187,81 +282,8 @@ struct ProcessView: View {
                     Spacer()
                 }
                 .padding(.horizontal, 24)
-                .padding(.vertical, 4)
-            }
-            
-            // Certainty Threshold Panel
-            if !manager.isProcessing, hasAnalyzedItems {
-                certaintyThresholdPanel
-            }
-            
-            // Existing GPS toggle
-            if !manager.isProcessing, !manager.imageItems.isEmpty {
-                let gpsCount = manager.imageItems.filter { $0.hasExistingCoordinates }.count
-                if gpsCount > 0 {
-                    HStack {
-                        Toggle("Keep existing GPS for \(gpsCount) image(s) — disable to allow AI overwrite", isOn: $settings.skipExistingCoordinates)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .toggleStyle(.switch)
-                            .controlSize(.small)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 6)
-                }
-            }
-            
-            // Location hint
-            if !manager.isProcessing, !manager.imageItems.isEmpty {
-                HStack {
-                    Image(systemName: "map.fill")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    TextField("Optional date/location hint (e.g. \"Trip to Italy, 1991\")", text: $settings.locationHint)
-                        .textFieldStyle(.plain)
-                        .font(.caption)
-                        .foregroundColor(.white)
-                        .disableAutocorrection(false)
-                    if !settings.locationHint.isEmpty {
-                        Button(action: { settings.locationHint = "" }) {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 6)
-            }
-            
-            // Date extrapolation controls
-            if !manager.isProcessing, hasAnalyzedItems {
-                HStack {
-                    Toggle("Extrapolate dates forward (repeat last known date for unknown dates)", isOn: $settings.extrapolateDates)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                        .onChange(of: settings.extrapolateDates) { _, newValue in
-                            if newValue {
-                                manager.applyDateExtrapolation()
-                            }
-                        }
-                    
-                    if settings.extrapolateDates {
-                        Button("Apply Now") {
-                            manager.applyDateExtrapolation()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                    
-                    Spacer()
-                }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 6)
+                .padding(.top, 4)
+                .padding(.bottom, 8)
             }
             
             // Queue List or Empty State
@@ -371,23 +393,23 @@ struct ProcessView: View {
                 // Previews
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Certainty Filter Preview:")
-                        .font(.caption)
+                        .font(.caption2)
                         .foregroundColor(.secondary)
                         .fontWeight(.semibold)
                     
-                    HStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Label(
                             "\(dateWillModifyCount) dates to save",
                             systemImage: "calendar"
                         )
-                        .font(.subheadline)
+                        .font(.caption)
                         .foregroundColor(.white)
                         
                         Label(
                             "\(locationWillModifyCount) locations to save",
                             systemImage: "mappin.and.ellipse"
                         )
-                        .font(.subheadline)
+                        .font(.caption)
                         .foregroundColor(.white)
                     }
                 }
@@ -410,6 +432,7 @@ struct ProcessView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.cyan)
                 .disabled(dateWillModifyCount == 0 && locationWillModifyCount == 0)
+                .fixedSize(horizontal: true, vertical: false)
             }
             .padding(16)
         }
@@ -540,56 +563,56 @@ struct QueueRowView: View {
     @State private var isCached: Bool = false
     
     var body: some View {
-        HStack(spacing: 12) {
-            // Selection checkbox
-            Toggle(isOn: Binding(
-                get: { selectedIds.contains(item.id) },
-                set: { if $0 { selectedIds.insert(item.id) } else { selectedIds.remove(item.id) } }
-            )) {
-                EmptyView()
-            }
-            .toggleStyle(.checkbox)
-            .controlSize(.small)
-            .help("Select for batch edit")
-            
-            // Image Thumbnail
-            ZStack {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.white.opacity(0.05))
-                    .frame(width: 50, height: 50)
+        HStack(alignment: .top, spacing: 16) {
+            // Left: Checkbox & Thumbnail
+            HStack(spacing: 12) {
+                Toggle(isOn: Binding(
+                    get: { selectedIds.contains(item.id) },
+                    set: { if $0 { selectedIds.insert(item.id) } else { selectedIds.remove(item.id) } }
+                )) {
+                    EmptyView()
+                }
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+                .help("Select for batch edit")
                 
-                if let thumb = thumbnail {
-                    Image(nsImage: thumb)
-                        .resizable()
-                        .scaledToFill()
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.white.opacity(0.05))
                         .frame(width: 50, height: 50)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                } else {
-                    Image(systemName: "photo")
-                        .foregroundColor(.secondary)
+                    
+                    if let thumb = thumbnail {
+                        Image(nsImage: thumb)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 50, height: 50)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    } else {
+                        Image(systemName: "photo")
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    showingPreviewPopover = true
+                }
+                .help("Click to enlarge")
+                .popover(isPresented: $showingPreviewPopover, arrowEdge: .leading) {
+                    ImagePreviewPopover(fileURL: item.fileURL)
+                }
+                .task {
+                    loadThumbnail()
                 }
             }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                showingPreviewPopover = true
-            }
-            .help("Click to enlarge")
-            .popover(isPresented: $showingPreviewPopover, arrowEdge: .leading) {
-                ImagePreviewPopover(fileURL: item.fileURL)
-            }
-            .task {
-                loadThumbnail()
-            }
+            .alignmentGuide(.top) { d in d[.top] }
             
-            // File Details
-            VStack(alignment: .leading, spacing: 4) {
+            // Center Column: File details, Date, Place, and Hint
+            VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     Text(item.fileName)
                         .font(.headline)
                         .foregroundColor(.white)
                         .lineLimit(1)
-                    
-                    Spacer()
                     
                     // Status Badge
                     HStack(spacing: 4) {
@@ -612,9 +635,13 @@ struct QueueRowView: View {
                     }
                 }
                 
-                HStack(spacing: 16) {
+                // Stack Date & Place vertically to prevent squishing
+                VStack(alignment: .leading, spacing: 4) {
                     // Date output
-                    HStack(spacing: 4) {
+                    HStack(spacing: 6) {
+                        let isPending = item.status == .pending || item.status == .processing || item.status == .callingAPI
+                        let hasVal = (item.detectedDateString != nil && item.detectedDateString!.lowercased() != "null" && !item.detectedDateString!.isEmpty) || item.detectedDate != nil
+                        
                         if item.status == .analyzed || item.status == .completed || item.detectedDate != nil {
                             Button(action: {
                                 manager.toggleSaveDate(id: item.id)
@@ -630,15 +657,19 @@ struct QueueRowView: View {
                         Image(systemName: "calendar")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
+                            .frame(width: 12, alignment: .center)
                         
-                        if let dateStr = item.detectedDateString {
+                        if isPending {
+                            Text("Pending...")
+                                .foregroundColor(.secondary)
+                        } else if let dateStr = item.detectedDateString, dateStr.lowercased() != "null", !dateStr.isEmpty {
                             Text(dateStr)
                                 .foregroundColor(.white.opacity(0.9))
                         } else if let date = item.detectedDate {
                             Text(formattedDate(date))
                                 .foregroundColor(.white.opacity(0.9))
                         } else {
-                            Text("Pending...")
+                            Text("—")
                                 .foregroundColor(.secondary)
                         }
                         
@@ -652,7 +683,7 @@ struct QueueRowView: View {
                                 .cornerRadius(3)
                         }
                         
-                        if let certainty = item.dateCertainty {
+                        if let certainty = item.dateCertainty, hasVal {
                             let isAbove = certainty >= settings.certaintyThreshold
                             Text("\(certainty)%")
                                 .font(.system(size: 9, weight: .bold))
@@ -665,8 +696,12 @@ struct QueueRowView: View {
                     }
                     
                     // Place output
-                    HStack(spacing: 4) {
+                    HStack(spacing: 6) {
                         let hasCoords = (item.latitude != nil && item.longitude != nil) || item.hasExistingCoordinates
+                        let isPending = item.status == .pending || item.status == .processing || item.status == .callingAPI || item.status == .geocoding
+                        let hasPlaceVal = (item.detectedPlace != nil && item.detectedPlace!.lowercased() != "null" && !item.detectedPlace!.isEmpty) ||
+                                          (settings.skipExistingCoordinates && item.geocodedPlace != nil && item.geocodedPlace!.lowercased() != "null" && !item.geocodedPlace!.isEmpty)
+                        
                         if item.status == .analyzed || item.status == .completed || item.detectedPlace != nil || hasCoords {
                             Button(action: {
                                 manager.toggleSaveLocation(id: item.id)
@@ -682,8 +717,12 @@ struct QueueRowView: View {
                         Image(systemName: "mappin.and.ellipse")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
+                            .frame(width: 12, alignment: .center)
                         
-                        if let place = item.detectedPlace {
+                        if isPending {
+                            Text("Pending...")
+                                .foregroundColor(.secondary)
+                        } else if let place = item.detectedPlace, place.lowercased() != "null", !place.isEmpty {
                             let query = place.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? place
                             Button(place) {
                                 NSWorkspace.shared.open(URL(string: "https://www.google.com/maps/search/?api=1&query=\(query)")!)
@@ -692,7 +731,7 @@ struct QueueRowView: View {
                             .foregroundColor(.white.opacity(0.9))
                             .lineLimit(1)
                             .help("Open in Google Maps")
-                        } else if settings.skipExistingCoordinates, let geo = item.geocodedPlace {
+                        } else if settings.skipExistingCoordinates, let geo = item.geocodedPlace, geo.lowercased() != "null", !geo.isEmpty {
                             let query = geo.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? geo
                             Button(geo) {
                                 NSWorkspace.shared.open(URL(string: "https://www.google.com/maps/search/?api=1&query=\(query)")!)
@@ -701,15 +740,12 @@ struct QueueRowView: View {
                             .foregroundColor(.cyan.opacity(0.85))
                             .lineLimit(1)
                             .help("Open in Google Maps")
-                        } else if item.hasExistingCoordinates || item.geocodedPlace != nil {
-                            Text("Pending...")
-                                .foregroundColor(.secondary)
                         } else {
-                            Text("Pending...")
+                            Text("—")
                                 .foregroundColor(.secondary)
                         }
                         
-                        if let certainty = item.locationCertainty {
+                        if let certainty = item.locationCertainty, hasPlaceVal {
                             let isAbove = certainty >= settings.certaintyThreshold
                             Text("\(certainty)%")
                                 .font(.system(size: 9, weight: .bold))
@@ -719,28 +755,6 @@ struct QueueRowView: View {
                                 .background((isAbove ? Color.cyan : Color.orange).opacity(0.15))
                                 .cornerRadius(3)
                         }
-                    }
-                    
-                    // Coordinates output — show both existing and suggested with labels
-                    let hasExisting = item.existingLatitude != nil && item.existingLongitude != nil
-                    let hasSuggested = item.latitude != nil && item.longitude != nil
-                    let coordsDiffer: Bool = {
-                        guard let eLat = item.existingLatitude, let eLon = item.existingLongitude,
-                              let sLat = item.latitude, let sLon = item.longitude else { return true }
-                        return abs(eLat - sLat) > 0.0001 || abs(eLon - sLon) > 0.0001
-                    }()
-                    
-                    if hasExisting && hasSuggested && coordsDiffer {
-                        VStack(alignment: .leading, spacing: 1) {
-                            coordinateRow(label: "Original:", lat: item.existingLatitude!, lon: item.existingLongitude!, color: .secondary)
-                            coordinateRow(label: "Suggested:", lat: item.latitude!, lon: item.longitude!, color: .cyan)
-                        }
-                        .padding(.top, 2)
-                    } else if let lat = item.latitude ?? item.existingLatitude,
-                              let lon = item.longitude ?? item.existingLongitude {
-                        let label = hasExisting && !hasSuggested ? "Original:" : "Coords:"
-                        coordinateRow(label: label, lat: lat, lon: lon, color: .secondary)
-                            .padding(.top, 2)
                     }
                 }
                 .font(.subheadline)
@@ -760,7 +774,7 @@ struct QueueRowView: View {
                     .foregroundColor(.secondary)
                     .disabled(manager.isProcessing)
                 }
-                .padding(.top, 4)
+                .padding(.top, 2)
                 
                 if let error = item.errorMessage {
                     Text(error)
@@ -771,57 +785,83 @@ struct QueueRowView: View {
                 }
             }
             
-            // Row Action Buttons
-            HStack(spacing: 8) {
-                if item.status != .processing && item.status != .callingAPI && item.status != .geocoding && item.status != .writing {
-                    Button(action: {
-                        showingEditPopover = true
-                    }) {
-                        Image(systemName: "pencil.circle")
-                            .font(.system(size: 16))
-                            .foregroundColor(.secondary)
+            Spacer()
+            
+            // Right Column: Coordinates and Action buttons
+            VStack(alignment: .trailing, spacing: 6) {
+                // Coordinates section
+                let hasExisting = item.existingLatitude != nil && item.existingLongitude != nil
+                let hasSuggested = item.latitude != nil && item.longitude != nil
+                let coordsDiffer: Bool = {
+                    guard let eLat = item.existingLatitude, let eLon = item.existingLongitude,
+                           let sLat = item.latitude, let sLon = item.longitude else { return true }
+                    return abs(eLat - sLat) > 0.0001 || abs(eLon - sLon) > 0.0001
+                }()
+                
+                if hasExisting && hasSuggested && coordsDiffer {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        coordinateRow(label: "Original:", lat: item.existingLatitude!, lon: item.existingLongitude!, color: .secondary)
+                        coordinateRow(label: "Suggested:", lat: item.latitude!, lon: item.longitude!, color: .cyan)
                     }
-                    .buttonStyle(.plain)
-                    .help("Edit details manually")
-                    .popover(isPresented: $showingEditPopover, arrowEdge: .trailing) {
-                        EditMetadataPopover(item: item, manager: manager)
-                    }
-                    
-                    // Cache indicator and clear button
-                    if isCached {
-                        Button(action: {
-                            manager.clearItemCache(id: item.id)
-                            isCached = false
-                        }) {
-                            Image(systemName: "bolt.circle.fill")
-                                .font(.system(size: 16))
-                                .foregroundColor(.yellow)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Clear cached AI result for this image")
-                    }
+                } else if let lat = item.latitude ?? item.existingLatitude,
+                           let lon = item.longitude ?? item.existingLongitude {
+                    let label = hasExisting && !hasSuggested ? "Original:" : "Coords:"
+                    coordinateRow(label: label, lat: lat, lon: lon, color: .secondary)
                 }
                 
-                if item.status == .pending || item.status == .failed {
-                    Button(action: onRemove) {
-                        Image(systemName: "xmark.circle")
-                            .font(.system(size: 16))
-                            .foregroundColor(.secondary)
+                // Align Action Buttons at the bottom-right of the row
+                HStack(spacing: 8) {
+                    if item.status != .processing && item.status != .callingAPI && item.status != .geocoding && item.status != .writing {
+                        Button(action: {
+                            showingEditPopover = true
+                        }) {
+                            Image(systemName: "pencil.circle")
+                                .font(.system(size: 16))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Edit details manually")
+                        .popover(isPresented: $showingEditPopover, arrowEdge: .trailing) {
+                            EditMetadataPopover(item: item, manager: manager)
+                        }
+                        
+                        // Cache indicator and clear button
+                        if isCached {
+                            Button(action: {
+                                manager.clearItemCache(id: item.id)
+                                isCached = false
+                            }) {
+                                Image(systemName: "bolt.circle.fill")
+                                    .font(.system(size: 16))
+                                    .foregroundColor(.yellow)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Clear cached AI result for this image")
+                        }
                     }
-                    .buttonStyle(.plain)
-                } else if item.status == .completed, let outputURL = item.outputURL {
-                    Button(action: {
-                        NSWorkspace.shared.activateFileViewerSelecting([outputURL])
-                    }) {
-                        Image(systemName: "magnifyingglass.circle")
-                            .font(.system(size: 16))
-                            .foregroundColor(.cyan)
+                    
+                    if item.status == .pending || item.status == .failed {
+                        Button(action: onRemove) {
+                            Image(systemName: "xmark.circle")
+                                .font(.system(size: 16))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    } else if item.status == .completed, let outputURL = item.outputURL {
+                        Button(action: {
+                            NSWorkspace.shared.activateFileViewerSelecting([outputURL])
+                        }) {
+                            Image(systemName: "magnifyingglass.circle")
+                                .font(.system(size: 16))
+                                .foregroundColor(.cyan)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Show in Finder")
                     }
-                    .buttonStyle(.plain)
-                    .help("Show in Finder")
                 }
+                .padding(.top, 4)
             }
-            .padding(.leading, 4)
+            .frame(minWidth: 170, alignment: .trailing)
         }
         .onAppear {
             isCached = !item.cacheHash.isEmpty && CacheManager.shared.hasCache(hash: item.cacheHash)
@@ -878,6 +918,7 @@ struct QueueRowView: View {
             .font(.system(size: 10, design: .monospaced))
             .foregroundColor(color)
             .help("Open in Google Maps")
+            .fixedSize(horizontal: true, vertical: false)
         }
     }
 }
