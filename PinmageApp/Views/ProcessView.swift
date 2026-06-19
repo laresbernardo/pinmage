@@ -128,14 +128,6 @@ struct ProcessView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(.blue)
                         .disabled(manager.imageItems.isEmpty || manager.imageItems.allSatisfy { $0.status == .analyzed || $0.status == .completed })
-                        
-                        Button(action: {
-                            manager.clearAll()
-                        }) {
-                            Text("Clear")
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(manager.imageItems.isEmpty)
                     }
                 }
             }
@@ -280,6 +272,18 @@ struct ProcessView: View {
                     }
                     
                     Spacer()
+                    
+                    Button(action: {
+                        manager.clearAll()
+                    }) {
+                        HStack {
+                            Image(systemName: "trash")
+                            Text("Clear Queue")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                    .controlSize(.small)
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 4)
@@ -642,7 +646,7 @@ struct QueueRowView: View {
                         let isPending = item.status == .pending || item.status == .processing || item.status == .callingAPI
                         let hasVal = (item.detectedDateString != nil && item.detectedDateString!.lowercased() != "null" && !item.detectedDateString!.isEmpty) || item.detectedDate != nil
                         
-                        if item.status == .analyzed || item.status == .completed || item.detectedDate != nil {
+                        if item.status == .analyzed || item.status == .completed {
                             Button(action: {
                                 manager.toggleSaveDate(id: item.id)
                             }) {
@@ -697,12 +701,11 @@ struct QueueRowView: View {
                     
                     // Place output
                     HStack(spacing: 6) {
-                        let hasCoords = (item.latitude != nil && item.longitude != nil) || item.hasExistingCoordinates
                         let isPending = item.status == .pending || item.status == .processing || item.status == .callingAPI || item.status == .geocoding
                         let hasPlaceVal = (item.detectedPlace != nil && item.detectedPlace!.lowercased() != "null" && !item.detectedPlace!.isEmpty) ||
                                           (settings.skipExistingCoordinates && item.geocodedPlace != nil && item.geocodedPlace!.lowercased() != "null" && !item.geocodedPlace!.isEmpty)
                         
-                        if item.status == .analyzed || item.status == .completed || item.detectedPlace != nil || hasCoords {
+                        if item.status == .analyzed || item.status == .completed {
                             Button(action: {
                                 manager.toggleSaveLocation(id: item.id)
                             }) {
