@@ -162,8 +162,10 @@ import MapKit
                 formatter.timeZone = TimeZone(secondsFromGMT: 0)
                 formatter.dateFormat = "yyyy-MM-dd"
                 imageItems[index].detectedDateString = formatter.string(from: date)
+                imageItems[index].dateCertainty = 100
             } else {
                 imageItems[index].detectedDateString = nil
+                imageItems[index].dateCertainty = nil
             }
             imageItems[index].detectedPlace = place
             imageItems[index].saveLocation = saveLocation && latitude != nil && longitude != nil
@@ -198,8 +200,10 @@ import MapKit
                     formatter.timeZone = TimeZone(secondsFromGMT: 0)
                     formatter.dateFormat = "yyyy-MM-dd"
                     imageItems[index].detectedDateString = formatter.string(from: date)
+                    imageItems[index].dateCertainty = 100
                 } else {
                     imageItems[index].detectedDateString = nil
+                    imageItems[index].dateCertainty = nil
                 }
             }
             if removeLocation {
@@ -370,7 +374,7 @@ import MapKit
         
         // Phase 1b: Chronological date extrapolation (off by default)
         if settings.extrapolateDates {
-            applyDateExtrapolation()
+            applyDateExtrapolation(threshold: settings.certaintyThreshold)
         }
         
         if let start = self.batchStartTime {
@@ -433,13 +437,15 @@ import MapKit
     
     /// Chronological date extrapolation: forward-fills dates from analyzed items to items with unknown dates.
     /// Can be called independently after analysis to apply or re-apply date inheritance.
-    func applyDateExtrapolation() {
+    func applyDateExtrapolation(threshold: Int? = nil) {
         var lastKnownDate: Date? = nil
+        var lastKnownCertainty: Int? = nil
         
         for item in self.imageItems {
             if (item.status == .analyzed || item.status == .completed) && !item.dateIsInherited {
                 if let date = item.detectedDate {
                     lastKnownDate = date
+                    lastKnownCertainty = item.dateCertainty
                 }
             }
         }
@@ -449,10 +455,16 @@ import MapKit
             if item.status == .analyzed || item.status == .completed {
                 if let date = item.detectedDate, !item.dateIsInherited {
                     lastKnownDate = date
+                    lastKnownCertainty = item.dateCertainty
                 } else if item.detectedDate == nil || item.dateIsInherited {
                     if let previousDate = lastKnownDate {
                         self.imageItems[index].detectedDate = previousDate
+                        self.imageItems[index].dateCertainty = lastKnownCertainty
                         self.imageItems[index].dateIsInherited = true
+                        
+                        if let certainty = lastKnownCertainty, let threshold = threshold {
+                            self.imageItems[index].saveDate = certainty >= threshold
+                        }
                     }
                 }
             }

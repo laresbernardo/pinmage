@@ -11,6 +11,8 @@ struct ProcessView: View {
     @State private var showingBatchEdit = false
     
     @State private var selectedMapItem: ImageItem? = nil
+    @State private var isProcessingOptionsExpanded = true
+    @State private var isCertaintyPanelExpanded = true
     
     var body: some View {
         VStack(spacing: 0) {
@@ -164,102 +166,116 @@ struct ProcessView: View {
             if !manager.isProcessing, !manager.imageItems.isEmpty {
                 GlassCard {
                     VStack(alignment: .leading, spacing: 12) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "slider.horizontal.3")
-                                .font(.caption)
-                                .foregroundColor(.cyan)
-                            Text("Processing Options")
-                                .font(.caption)
-                                .fontWeight(.bold)
-                                .foregroundColor(.white)
+                        HStack {
+                            HStack(spacing: 6) {
+                                Image(systemName: "slider.horizontal.3")
+                                    .font(.caption)
+                                    .foregroundColor(.cyan)
+                                Text("Processing Options")
+                                    .font(.caption)
+                                    .fontWeight(.bold)
+                                    .foregroundColor(.white)
+                            }
+                            Spacer()
+                            Image(systemName: isProcessingOptionsExpanded ? "chevron.up" : "chevron.down")
+                                .foregroundColor(.secondary)
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            withAnimation {
+                                isProcessingOptionsExpanded.toggle()
+                            }
                         }
                         
-                        Divider().background(Color.white.opacity(0.08))
-                        
-                        // Processing Mode Selection
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Metadata to Extract")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .fontWeight(.semibold)
+                        if isProcessingOptionsExpanded {
+                            Divider().background(Color.white.opacity(0.08))
                             
-                            Picker("", selection: $settings.processingMode) {
-                                ForEach(ProcessingMode.allCases) { mode in
-                                    Text(mode.rawValue).tag(mode)
+                            // Processing Mode Selection
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Metadata to Extract")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .fontWeight(.semibold)
+                                
+                                Picker("", selection: $settings.processingMode) {
+                                    ForEach(ProcessingMode.allCases) { mode in
+                                        Text(mode.rawValue).tag(mode)
+                                    }
+                                }
+                                .pickerStyle(.segmented)
+                                .controlSize(.small)
+                                .frame(maxWidth: 320)
+                            }
+                            .padding(.bottom, 4)
+                            
+                            Divider().background(Color.white.opacity(0.08))
+                            
+                            // Option 1: Existing GPS Toggle
+                            let gpsCount = manager.imageItems.filter { $0.hasExistingCoordinates }.count
+                            if gpsCount > 0 {
+                                HStack {
+                                    Toggle("Keep existing GPS for \(gpsCount) image(s) — disable to allow AI overwrite", isOn: $settings.skipExistingCoordinates)
+                                        .font(.caption)
+                                        .foregroundColor(.white)
+                                        .toggleStyle(.switch)
+                                        .controlSize(.small)
+                                    Spacer()
                                 }
                             }
-                            .pickerStyle(.segmented)
-                            .controlSize(.small)
-                            .frame(maxWidth: 320)
-                        }
-                        .padding(.bottom, 4)
-                        
-                        Divider().background(Color.white.opacity(0.08))
-                        
-                        // Option 1: Existing GPS Toggle
-                        let gpsCount = manager.imageItems.filter { $0.hasExistingCoordinates }.count
-                        if gpsCount > 0 {
-                            HStack {
-                                Toggle("Keep existing GPS for \(gpsCount) image(s) — disable to allow AI overwrite", isOn: $settings.skipExistingCoordinates)
-                                    .font(.caption)
-                                    .foregroundColor(.white)
-                                    .toggleStyle(.switch)
-                                    .controlSize(.small)
-                                Spacer()
-                            }
-                        }
-                        
-                        // Option 2: Date extrapolation controls
-                        if hasAnalyzedItems {
-                            HStack {
-                                Toggle("Extrapolate dates forward (repeat last known date for unknown dates)", isOn: $settings.extrapolateDates)
-                                    .font(.caption)
-                                    .foregroundColor(.white)
-                                    .toggleStyle(.switch)
-                                    .controlSize(.small)
-                                    .onChange(of: settings.extrapolateDates) { _, newValue in
-                                        if newValue {
+                            
+                            // Option 2: Date extrapolation controls
+                            if hasAnalyzedItems {
+                                HStack {
+                                    Toggle("Extrapolate dates forward (repeat last known date for unknown dates)", isOn: $settings.extrapolateDates)
+                                        .font(.caption)
+                                        .foregroundColor(.white)
+                                        .toggleStyle(.switch)
+                                        .controlSize(.small)
+                                        .onChange(of: settings.extrapolateDates) { _, newValue in
+                                            if newValue {
+                                                manager.applyDateExtrapolation()
+                                            }
+                                        }
+                                    
+                                    if settings.extrapolateDates {
+                                        Button("Apply Now") {
                                             manager.applyDateExtrapolation()
                                         }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
                                     }
-                                
-                                if settings.extrapolateDates {
-                                    Button("Apply Now") {
-                                        manager.applyDateExtrapolation()
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.small)
+                                    
+                                    Spacer()
                                 }
-                                
-                                Spacer()
-                            }
-                        }
-                        
-                        // Option 3: Global Hint Textfield
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "map.fill")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                                Text("Optional date/location hint (e.g. \"Trip to Italy, 1991\")")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
                             }
                             
-                            HStack {
-                                TextField("Trip details, year, or country context...", text: $settings.locationHint)
-                                    .textFieldStyle(.roundedBorder)
-                                    .font(.caption)
-                                    .foregroundColor(.white)
-                                    .disableAutocorrection(false)
+                            // Option 3: Global Hint Textfield
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "map.fill")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                    Text("Optional date/location hint (e.g. \"Trip to Italy, 1991\")")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
                                 
-                                if !settings.locationHint.isEmpty {
-                                    Button(action: { settings.locationHint = "" }) {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
+                                HStack {
+                                    TextField("Trip details, year, or country context...", text: $settings.locationHint)
+                                        .textFieldStyle(.roundedBorder)
+                                        .font(.caption)
+                                        .foregroundColor(.white)
+                                        .disableAutocorrection(false)
+                                    
+                                    if !settings.locationHint.isEmpty {
+                                        Button(action: { settings.locationHint = "" }) {
+                                            Image(systemName: "xmark.circle.fill")
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
+                                        .buttonStyle(.plain)
                                     }
-                                    .buttonStyle(.plain)
                                 }
                             }
                         }
@@ -396,108 +412,169 @@ struct ProcessView: View {
     
     private var certaintyThresholdPanel: some View {
         GlassCard {
-            HStack(spacing: 24) {
-                // Slider
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("Certainty Threshold:")
-                            .font(.subheadline)
-                            .fontWeight(.semibold)
-                            .foregroundColor(.white)
-                        Text("\(settings.certaintyThreshold)%")
-                            .font(.subheadline)
-                            .fontWeight(.bold)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle")
+                            .font(.caption)
                             .foregroundColor(.cyan)
+                        Text("Certainty Threshold & Save")
+                            .font(.caption)
+                            .fontWeight(.bold)
+                            .foregroundColor(.white)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation {
+                            isCertaintyPanelExpanded.toggle()
+                        }
                     }
                     
-                    Slider(
-                        value: Binding(
-                            get: { Double(settings.certaintyThreshold) },
-                            set: { val in
-                                settings.certaintyThreshold = Int(val)
-                                manager.updateCheckboxes(threshold: Int(val))
-                            }
-                        ),
-                        in: 0...100,
-                        step: 5
-                    )
-                    .tint(.cyan)
-                }
-                .frame(maxWidth: 320)
-                
-                Divider()
-                    .background(Color.white.opacity(0.1))
-                    .frame(height: 40)
-                
-                // Previews
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Certainty Filter Preview:")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .fontWeight(.semibold)
+                    Spacer()
                     
-                    VStack(alignment: .leading, spacing: 4) {
-                        if settings.processingMode == .both || settings.processingMode == .dateOnly {
-                            Label(
-                                "\(dateWillModifyCount) dates to save",
-                                systemImage: "calendar"
-                            )
-                            .font(.caption)
-                            .foregroundColor(.white)
+                    if !isCertaintyPanelExpanded {
+                        // Quick-save button when collapsed
+                        Button(action: {
+                            if settings.overwriteOriginals {
+                                showOverwriteAlert = true
+                            } else {
+                                startWritingQueue()
+                            }
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.circle.fill")
+                                Text("Save Metadata")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.cyan)
+                        .controlSize(.small)
+                        .disabled(
+                            (settings.processingMode == .dateOnly && dateWillModifyCount == 0 && dateWillRemoveCount == 0) ||
+                            (settings.processingMode == .locationOnly && locationWillModifyCount == 0 && locationWillRemoveCount == 0) ||
+                            (settings.processingMode == .both && dateWillModifyCount == 0 && locationWillModifyCount == 0 && dateWillRemoveCount == 0 && locationWillRemoveCount == 0)
+                        )
+                    }
+                    
+                    Button(action: {
+                        withAnimation {
+                            isCertaintyPanelExpanded.toggle()
+                        }
+                    }) {
+                        Image(systemName: isCertaintyPanelExpanded ? "chevron.up" : "chevron.down")
+                            .foregroundColor(.secondary)
+                            .font(.system(size: 11, weight: .bold))
+                    }
+                    .buttonStyle(.plain)
+                }
+                
+                if isCertaintyPanelExpanded {
+                    Divider().background(Color.white.opacity(0.08))
+                    
+                    HStack(spacing: 24) {
+                        // Slider
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("Certainty Threshold:")
+                                    .font(.subheadline)
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(.white)
+                                Text("\(settings.certaintyThreshold)%")
+                                    .font(.subheadline)
+                                    .fontWeight(.bold)
+                                    .foregroundColor(.cyan)
+                            }
                             
-                            if dateWillRemoveCount > 0 {
-                                Label(
-                                    "\(dateWillRemoveCount) dates to delete",
-                                    systemImage: "calendar.badge.minus"
-                                )
-                                .font(.caption)
-                                .foregroundColor(.red)
+                            Slider(
+                                value: Binding(
+                                    get: { Double(settings.certaintyThreshold) },
+                                    set: { val in
+                                        settings.certaintyThreshold = Int(val)
+                                        manager.updateCheckboxes(threshold: Int(val))
+                                    }
+                                ),
+                                in: 0...100,
+                                step: 5
+                            )
+                            .tint(.cyan)
+                        }
+                        .frame(maxWidth: 320)
+                        
+                        Divider()
+                            .background(Color.white.opacity(0.1))
+                            .frame(height: 40)
+                        
+                        // Previews
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Certainty Filter Preview:")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .fontWeight(.semibold)
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                if settings.processingMode == .both || settings.processingMode == .dateOnly {
+                                    Label(
+                                        "\(dateWillModifyCount) dates to save",
+                                        systemImage: "calendar"
+                                    )
+                                    .font(.caption)
+                                    .foregroundColor(.white)
+                                    
+                                    if dateWillRemoveCount > 0 {
+                                        Label(
+                                            "\(dateWillRemoveCount) dates to delete",
+                                            systemImage: "calendar.badge.minus"
+                                        )
+                                        .font(.caption)
+                                        .foregroundColor(.red)
+                                    }
+                                }
+                                
+                                if settings.processingMode == .both || settings.processingMode == .locationOnly {
+                                    Label(
+                                        "\(locationWillModifyCount) locations to save",
+                                        systemImage: "mappin.and.ellipse"
+                                    )
+                                    .font(.caption)
+                                    .foregroundColor(.white)
+                                    
+                                    if locationWillRemoveCount > 0 {
+                                        Label(
+                                            "\(locationWillRemoveCount) locations to delete",
+                                            systemImage: "mappin.slash"
+                                        )
+                                        .font(.caption)
+                                        .foregroundColor(.red)
+                                    }
+                                }
                             }
                         }
                         
-                        if settings.processingMode == .both || settings.processingMode == .locationOnly {
-                            Label(
-                                "\(locationWillModifyCount) locations to save",
-                                systemImage: "mappin.and.ellipse"
-                            )
-                            .font(.caption)
-                            .foregroundColor(.white)
-                            
-                            if locationWillRemoveCount > 0 {
-                                Label(
-                                    "\(locationWillRemoveCount) locations to delete",
-                                    systemImage: "mappin.slash"
-                                )
-                                .font(.caption)
-                                .foregroundColor(.red)
+                        Spacer()
+                        
+                        // Write/Save Button
+                        Button(action: {
+                            if settings.overwriteOriginals {
+                                showOverwriteAlert = true
+                            } else {
+                                startWritingQueue()
+                            }
+                        }) {
+                            HStack {
+                                Image(systemName: "checkmark.circle.fill")
+                                Text("Save Metadata to Files")
                             }
                         }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.cyan)
+                        .disabled(
+                            (settings.processingMode == .dateOnly && dateWillModifyCount == 0 && dateWillRemoveCount == 0) ||
+                            (settings.processingMode == .locationOnly && locationWillModifyCount == 0 && locationWillRemoveCount == 0) ||
+                            (settings.processingMode == .both && dateWillModifyCount == 0 && locationWillModifyCount == 0 && dateWillRemoveCount == 0 && locationWillRemoveCount == 0)
+                        )
+                        .fixedSize(horizontal: true, vertical: false)
                     }
                 }
-                
-                Spacer()
-                
-                // Write/Save Button
-                Button(action: {
-                    if settings.overwriteOriginals {
-                        showOverwriteAlert = true
-                    } else {
-                        startWritingQueue()
-                    }
-                }) {
-                    HStack {
-                        Image(systemName: "checkmark.circle.fill")
-                        Text("Save Metadata to Files")
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.cyan)
-                .disabled(
-                    (settings.processingMode == .dateOnly && dateWillModifyCount == 0 && dateWillRemoveCount == 0) ||
-                    (settings.processingMode == .locationOnly && locationWillModifyCount == 0 && locationWillRemoveCount == 0) ||
-                    (settings.processingMode == .both && dateWillModifyCount == 0 && locationWillModifyCount == 0 && dateWillRemoveCount == 0 && locationWillRemoveCount == 0)
-                )
-                .fixedSize(horizontal: true, vertical: false)
             }
             .padding(16)
         }
