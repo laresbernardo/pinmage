@@ -164,8 +164,20 @@ hdiutil create \
 xattr -rc "$DMG_LOCAL"
 cp "$DMG_LOCAL" "$FINAL_DMG"
 
+# Copy DMG to the website public directory for hosting download
+if [ -d "$SOURCE_DIR/website" ]; then
+    echo -e "${YELLOW}Copying Pinmage.dmg to website directory...${NC}"
+    cp "$FINAL_DMG" "$SOURCE_DIR/website/Pinmage.dmg"
+fi
+
 # Clean up /tmp
 rm -rf "$BUILD_DIR"
+
+# Deploy to Firebase Hosting
+if command -v npx &> /dev/null; then
+    echo -e "${YELLOW}Deploying updated website to Firebase Hosting...${NC}"
+    (cd "$SOURCE_DIR" && npx -y firebase-tools@latest deploy --only hosting)
+fi
 
 # ─── LAUNCH ──────────────────────────────────────────────────────────────────
 echo -e "${BLUE}==================================================${NC}"

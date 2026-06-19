@@ -1,14 +1,14 @@
 /* Pinmage CSS Variables & Base Styles */
 :root {
-    --bg-primary: #0a0e12;
-    --bg-secondary: #11171d;
-    --accent-indigo: #6366f1;
+    --bg-primary: #0b0f17;
+    --bg-secondary: #0f172a;
+    --accent-indigo: #3b82f6;
     --accent-cyan: #06b6d4;
     --text-primary: #ffffff;
     --text-secondary: #9ca3af;
     --glass-bg: rgba(255, 255, 255, 0.03);
     --glass-border: rgba(255, 255, 255, 0.06);
-    --glass-glow: rgba(99, 102, 241, 0.15);
+    --glass-glow: rgba(6, 182, 212, 0.15);
 }
 
 * {
@@ -20,8 +20,17 @@
 html {
     scroll-behavior: smooth;
     background-color: var(--bg-primary);
+    background-image: 
+        radial-gradient(circle at 15% 15%, rgba(6, 182, 212, 0.12) 0%, transparent 40%),
+        radial-gradient(circle at 85% 85%, rgba(59, 130, 246, 0.08) 0%, transparent 40%);
+    background-size: 100% 100%, 100% 100%;
+    background-attachment: fixed;
     color: var(--text-primary);
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+body {
+    background: transparent;
 }
 
 /* Scrollbar */
@@ -69,12 +78,11 @@ html {
     gap: 10px;
 }
 
-.logo-icon {
-    width: 28px;
-    height: 28px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, var(--accent-indigo), var(--accent-cyan));
-    box-shadow: 0 0 10px rgba(99, 102, 241, 0.4);
+.logo-img {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    box-shadow: 0 0 12px rgba(6, 182, 212, 0.3);
 }
 
 .logo-text {
@@ -118,13 +126,42 @@ html {
     border-color: rgba(255, 255, 255, 0.15);
 }
 
-/* Hero Section */
 .hero {
     min-height: 100vh;
     padding-top: 120px;
     padding-bottom: 60px;
     display: flex;
     align-items: center;
+    position: relative;
+    overflow: hidden;
+}
+
+.background-time-pattern {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 480px;
+    height: 480px;
+    color: rgba(6, 182, 212, 0.07);
+    z-index: 1;
+    pointer-events: none;
+    user-select: none;
+}
+
+.hour-hand {
+    transform-origin: 100px 100px;
+    animation: rotateHand 86400s linear infinite;
+}
+
+.minute-hand {
+    transform-origin: 100px 100px;
+    animation: rotateHand 3600s linear infinite;
+}
+
+@keyframes rotateHand {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
 }
 
 .hero-container {
@@ -228,8 +265,11 @@ html {
 
 .mockup-wrapper {
     position: relative;
-    width: 100%;
-    max-width: 520px;
+    width: 260px;
+    height: 260px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
 }
 
 .app-mockup {
@@ -290,17 +330,43 @@ html {
 }
 
 .feature-card {
-    background: var(--glass-bg);
-    border: 1px solid var(--glass-border);
-    border-radius: 16px;
+    background: rgba(15, 23, 42, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-radius: 20px;
     padding: 40px 30px;
-    transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    position: relative;
+    overflow: hidden;
+}
+
+.feature-card::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(180deg, rgba(6, 182, 212, 0.03) 0%, transparent 100%);
+    opacity: 0;
+    transition: opacity 0.4s ease;
+    z-index: 0;
 }
 
 .feature-card:hover {
-    transform: translateY(-6px);
-    border-color: rgba(99, 102, 241, 0.3);
-    box-shadow: 0 10px 30px rgba(99, 102, 241, 0.05);
+    transform: translateY(-8px);
+    border-color: rgba(6, 182, 212, 0.25);
+    box-shadow: 0 20px 40px rgba(6, 182, 212, 0.04);
+}
+
+.feature-card:hover::after {
+    opacity: 1;
+}
+
+.feature-card * {
+    position: relative;
+    z-index: 1;
 }
 
 .card-icon {
@@ -352,9 +418,11 @@ html {
 /* How it works */
 .how-it-works-section {
     padding: 100px 24px;
-    background-color: var(--bg-secondary);
+    background-color: rgba(15, 23, 42, 0.4);
     border-top: 1px solid var(--glass-border);
     border-bottom: 1px solid var(--glass-border);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
 }
 
 .steps-container {
@@ -411,10 +479,37 @@ footer {
     font-size: 0.9rem;
 }
 
-.built-with {
+.bervos-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.bervos-link {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-secondary);
+    text-decoration: none;
     font-family: 'Outfit', sans-serif;
     font-weight: 600;
+    font-size: 0.95rem;
+    transition: all 0.2s ease;
+}
+
+.bervos-link:hover {
     color: var(--text-primary);
+}
+
+.bervos-logo {
+    width: 20px;
+    height: 20px;
+    opacity: 0.8;
+    transition: opacity 0.2s ease;
+}
+
+.bervos-link:hover .bervos-logo {
+    opacity: 1;
 }
 
 /* Responsive design */
@@ -444,3 +539,115 @@ footer {
         text-align: center;
     }
 }
+
+/* Screenshots Section */
+.screenshots-section {
+    padding: 100px 24px;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.screenshots-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 30px;
+    margin-top: 40px;
+}
+
+/* Screenshots Section Styling */
+.screenshot-item {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    background: rgba(15, 23, 42, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 20px;
+    padding: 20px;
+    transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    overflow: hidden;
+}
+
+.screenshot-item:hover {
+    transform: translateY(-6px);
+    border-color: rgba(6, 182, 212, 0.25);
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+}
+
+.screenshot-container {
+    width: 100%;
+    aspect-ratio: 16 / 10;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.screenshot-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 0.4s ease;
+}
+
+.screenshot-item:hover .screenshot-img {
+    transform: scale(1.03);
+}
+
+.screenshot-info h4 {
+    font-family: 'Outfit', sans-serif;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 8px;
+}
+
+.screenshot-info p {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+@media (max-width: 968px) {
+    .screenshots-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Hero macOS App Icon */
+.app-icon-hero {
+    width: 260px;
+    height: 260px;
+    border-radius: 56px;
+    box-shadow: 0 30px 100px rgba(0, 0, 0, 0.7), 0 0 50px rgba(6, 182, 212, 0.15);
+    position: relative;
+    z-index: 2;
+    transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    animation: floatIcon 6s ease-in-out infinite;
+}
+
+.mockup-wrapper:hover .app-icon-hero {
+    transform: scale(1.05);
+}
+
+@keyframes floatIcon {
+    0%, 100% { transform: translateY(0px) rotate(0deg); }
+    50% { transform: translateY(-12px) rotate(0.8deg); }
+}
+
+/* Topographic Contour Background Layer */
+.background-topo-lines {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: -1;
+    pointer-events: none;
+    user-select: none;
+    color: rgba(6, 182, 212, 0.045);
+}
+
+.background-topo-lines svg {
+    width: 100%;
+    height: 100%;
+}
+
