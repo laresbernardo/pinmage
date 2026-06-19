@@ -145,8 +145,10 @@ import MapKit
         id: UUID,
         date: Date?,
         saveDate: Bool,
+        removeDate: Bool,
         place: String?,
         saveLocation: Bool,
+        removeLocation: Bool,
         latitude: Double?,
         longitude: Double?,
         geocodedPlace: String?
@@ -154,6 +156,7 @@ import MapKit
         if let index = imageItems.firstIndex(where: { $0.id == id }) {
             imageItems[index].detectedDate = date
             imageItems[index].saveDate = saveDate && date != nil
+            imageItems[index].removeDate = removeDate
             if let date = date {
                 let formatter = DateFormatter()
                 formatter.timeZone = TimeZone(secondsFromGMT: 0)
@@ -164,6 +167,7 @@ import MapKit
             }
             imageItems[index].detectedPlace = place
             imageItems[index].saveLocation = saveLocation && latitude != nil && longitude != nil
+            imageItems[index].removeLocation = removeLocation
             imageItems[index].latitude = latitude
             imageItems[index].longitude = longitude
             imageItems[index].geocodedPlace = geocodedPlace
@@ -177,12 +181,18 @@ import MapKit
         }
     }
     
-    func batchUpdateMetadata(ids: Set<UUID>, date: Date?, saveDate: Bool, latitude: Double?, longitude: Double?, saveLocation: Bool) {
+    func batchUpdateMetadata(ids: Set<UUID>, date: Date?, saveDate: Bool, removeDate: Bool, latitude: Double?, longitude: Double?, saveLocation: Bool, removeLocation: Bool) {
         for index in imageItems.indices {
             guard ids.contains(imageItems[index].id) else { continue }
-            if saveDate {
+            if removeDate {
+                imageItems[index].detectedDate = nil
+                imageItems[index].detectedDateString = nil
+                imageItems[index].saveDate = false
+                imageItems[index].removeDate = true
+            } else if saveDate {
                 imageItems[index].detectedDate = date
                 imageItems[index].saveDate = date != nil
+                imageItems[index].removeDate = false
                 if let date = date {
                     let formatter = DateFormatter()
                     formatter.timeZone = TimeZone(secondsFromGMT: 0)
@@ -192,10 +202,16 @@ import MapKit
                     imageItems[index].detectedDateString = nil
                 }
             }
-            if saveLocation {
+            if removeLocation {
+                imageItems[index].latitude = nil
+                imageItems[index].longitude = nil
+                imageItems[index].saveLocation = false
+                imageItems[index].removeLocation = true
+            } else if saveLocation {
                 imageItems[index].latitude = latitude
                 imageItems[index].longitude = longitude
                 imageItems[index].saveLocation = latitude != nil && longitude != nil
+                imageItems[index].removeLocation = false
             }
             if imageItems[index].status == .pending || imageItems[index].status == .failed || imageItems[index].status == .completed {
                 imageItems[index].status = .analyzed
@@ -362,6 +378,56 @@ import MapKit
         }
         self.isProcessing = false
         self.currentProgress = 1.0
+        self.currentProcessingFile = "Done"
+    }
+    
+    /// Reprocesses a single item directly, clearing its cache first.
+    func reprocessSingleItem(id: UUID, settings: AppSettings) async {
+        guard let index = imageItems.firstIndex(where: { $0.id == id }) else { return }
+        guard !isProcessing else { return }
+        
+        isProcessing = true
+        self.sessionSpend = 0.0
+        
+        let item = imageItems[index]
+        
+        // 1. Invalidate local cache for this item to force AI run
+        CacheManager.shared.invalidateCache(hash: item.cacheHash)
+        
+        // 2. Setup configuration parameters
+        let provider = settings.provider
+        let apiKey = settings.apiKey
+        let modelName = settings.modelName
+        let customPrompt = settings.customPrompt
+        let reduceImageSize = settings.reduceImageSize
+        let locationHint = settings.locationHint
+        let processingMode = settings.processingMode
+        let skipCoords = settings.skipExistingCoordinates
+        
+        // 3. Analyze item
+        let update = await analyzeSingleItem(
+            index: index,
+            itemURL: item.fileURL,
+            fileName: item.fileName,
+            provider: provider,
+            apiKey: apiKey,
+            modelName: modelName,
+            customPrompt: customPrompt,
+            reduceImageSize: reduceImageSize,
+            skipExistingCoordinates: skipCoords,
+            existingLatitude: item.existingLatitude,
+            existingLongitude: item.existingLongitude,
+            locationHint: locationHint,
+            imageHint: item.hint,
+            processingMode: processingMode,
+            manager: self,
+            settings: settings
+        )
+        
+        // 4. Apply update
+        self.applyUpdate(update, processingMode: processingMode, certaintyThreshold: settings.certaintyThreshold)
+        
+        self.isProcessing = false
         self.currentProcessingFile = "Done"
     }
     
@@ -593,11 +659,13 @@ import MapKit
                 self.imageItems[index].detectedDateString = finalDateStr
                 self.imageItems[index].dateCertainty = dateCertainty
                 self.imageItems[index].saveDate = parsedDate != nil && dateCertainty >= certaintyThreshold
+                self.imageItems[index].removeDate = false
             } else {
                 self.imageItems[index].detectedDate = nil
                 self.imageItems[index].detectedDateString = nil
                 self.imageItems[index].dateCertainty = nil
                 self.imageItems[index].saveDate = false
+                self.imageItems[index].removeDate = false
             }
             
             if processingMode == .both || processingMode == .locationOnly {
@@ -606,6 +674,7 @@ import MapKit
                 self.imageItems[index].latitude = update.latitude
                 self.imageItems[index].longitude = update.longitude
                 self.imageItems[index].geocodedPlace = update.geocodedPlace
+                self.imageItems[index].removeLocation = false
                 
                 let item = self.imageItems[index]
                 let usingExistingCoords = update.latitude != nil && item.existingLatitude != nil &&
@@ -623,6 +692,7 @@ import MapKit
                 self.imageItems[index].longitude = nil
                 self.imageItems[index].geocodedPlace = nil
                 self.imageItems[index].saveLocation = false
+                self.imageItems[index].removeLocation = false
             }
             
             self.imageItems[index].dateIsInherited = false
@@ -740,13 +810,19 @@ import MapKit
                 outputURL = outputFolderURL.appendingPathComponent(resolvedName)
             }
             
+            // Write EXIF tags / GPS tags or strip them based on configuration
+            let removeDateTag = (processingMode == .both || processingMode == .dateOnly) && item.removeDate
+            let removeLocationTag = (processingMode == .both || processingMode == .locationOnly) && item.removeLocation
+            
             // Write Metadata to copy file
             let success = MetadataWriter.updateImageMetadata(
                 sourceURL: item.fileURL,
                 destinationURL: outputURL,
                 date: parsedDate,
+                removeDate: removeDateTag,
                 latitude: latitude,
-                longitude: longitude
+                longitude: longitude,
+                removeLocation: removeLocationTag
             )
             
             if success {

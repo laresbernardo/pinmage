@@ -386,6 +386,14 @@ struct ProcessView: View {
         manager.imageItems.filter { ($0.status == .analyzed || $0.status == .completed) && $0.saveLocation }.count
     }
     
+    private var dateWillRemoveCount: Int {
+        manager.imageItems.filter { ($0.status == .analyzed || $0.status == .completed) && $0.removeDate }.count
+    }
+    
+    private var locationWillRemoveCount: Int {
+        manager.imageItems.filter { ($0.status == .analyzed || $0.status == .completed) && $0.removeLocation }.count
+    }
+    
     private var certaintyThresholdPanel: some View {
         GlassCard {
             HStack(spacing: 24) {
@@ -436,6 +444,15 @@ struct ProcessView: View {
                             )
                             .font(.caption)
                             .foregroundColor(.white)
+                            
+                            if dateWillRemoveCount > 0 {
+                                Label(
+                                    "\(dateWillRemoveCount) dates to delete",
+                                    systemImage: "calendar.badge.minus"
+                                )
+                                .font(.caption)
+                                .foregroundColor(.red)
+                            }
                         }
                         
                         if settings.processingMode == .both || settings.processingMode == .locationOnly {
@@ -445,6 +462,15 @@ struct ProcessView: View {
                             )
                             .font(.caption)
                             .foregroundColor(.white)
+                            
+                            if locationWillRemoveCount > 0 {
+                                Label(
+                                    "\(locationWillRemoveCount) locations to delete",
+                                    systemImage: "mappin.slash"
+                                )
+                                .font(.caption)
+                                .foregroundColor(.red)
+                            }
                         }
                     }
                 }
@@ -467,9 +493,9 @@ struct ProcessView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.cyan)
                 .disabled(
-                    (settings.processingMode == .dateOnly && dateWillModifyCount == 0) ||
-                    (settings.processingMode == .locationOnly && locationWillModifyCount == 0) ||
-                    (settings.processingMode == .both && dateWillModifyCount == 0 && locationWillModifyCount == 0)
+                    (settings.processingMode == .dateOnly && dateWillModifyCount == 0 && dateWillRemoveCount == 0) ||
+                    (settings.processingMode == .locationOnly && locationWillModifyCount == 0 && locationWillRemoveCount == 0) ||
+                    (settings.processingMode == .both && dateWillModifyCount == 0 && locationWillModifyCount == 0 && dateWillRemoveCount == 0 && locationWillRemoveCount == 0)
                 )
                 .fixedSize(horizontal: true, vertical: false)
             }
@@ -684,15 +710,46 @@ struct QueueRowView: View {
                             let hasVal = (item.detectedDateString != nil && item.detectedDateString!.lowercased() != "null" && !item.detectedDateString!.isEmpty) || item.detectedDate != nil
                             
                             if item.status == .analyzed || item.status == .completed {
-                                Button(action: {
-                                    manager.toggleSaveDate(id: item.id)
-                                }) {
-                                    Image(systemName: item.saveDate ? "checkmark.circle.fill" : "circle")
-                                        .font(.system(size: 11, weight: .bold))
-                                        .foregroundColor(item.saveDate ? .emerald : .secondary.opacity(0.4))
+                                if item.removeDate {
+                                    Button(action: {
+                                        manager.updateItemMetadata(
+                                            id: item.id,
+                                            date: item.detectedDate,
+                                            saveDate: false,
+                                            removeDate: false,
+                                            place: item.detectedPlace,
+                                            saveLocation: item.saveLocation,
+                                            removeLocation: item.removeLocation,
+                                            latitude: item.latitude,
+                                            longitude: item.longitude,
+                                            geocodedPlace: item.geocodedPlace
+                                        )
+                                    }) {
+                                        HStack(spacing: 3) {
+                                            Image(systemName: "trash.fill")
+                                                .font(.system(size: 8))
+                                            Text("Remove")
+                                                .font(.system(size: 9, weight: .bold))
+                                        }
+                                        .foregroundColor(.red)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.red.opacity(0.12))
+                                        .cornerRadius(4)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Click to restore date metadata tag")
+                                } else {
+                                    Button(action: {
+                                        manager.toggleSaveDate(id: item.id)
+                                    }) {
+                                        Image(systemName: item.saveDate ? "checkmark.circle.fill" : "circle")
+                                            .font(.system(size: 11, weight: .bold))
+                                            .foregroundColor(item.saveDate ? .emerald : .secondary.opacity(0.4))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(item.detectedDate == nil)
                                 }
-                                .buttonStyle(.plain)
-                                .disabled(item.detectedDate == nil)
                             }
                             
                             Button(action: {
@@ -706,7 +763,11 @@ struct QueueRowView: View {
                                         .foregroundColor(.secondary)
                                         .frame(width: 12, alignment: .center)
                                     
-                                    if isPending {
+                                    if item.removeDate {
+                                        Text("Date will be deleted from image EXIF")
+                                            .foregroundColor(.red.opacity(0.8))
+                                            .italic()
+                                    } else if isPending {
                                         Text("Pending...")
                                             .foregroundColor(.secondary)
                                     } else if let dateStr = item.detectedDateString, dateStr.lowercased() != "null", !dateStr.isEmpty {
@@ -725,7 +786,7 @@ struct QueueRowView: View {
                             .help("Click to edit date manually")
                             .disabled(item.status == .processing || item.status == .callingAPI || item.status == .geocoding || item.status == .writing)
                             
-                            if item.dateIsInherited {
+                            if item.dateIsInherited && !item.removeDate {
                                 Text("(Inherited)")
                                     .font(.system(size: 9))
                                     .foregroundColor(.cyan)
@@ -735,7 +796,7 @@ struct QueueRowView: View {
                                     .cornerRadius(3)
                             }
                             
-                            if let certainty = item.dateCertainty, hasVal {
+                            if let certainty = item.dateCertainty, hasVal && !item.removeDate {
                                 let isAbove = certainty >= settings.certaintyThreshold
                                 Text("\(certainty)%")
                                     .font(.system(size: 9, weight: .bold))
@@ -756,15 +817,46 @@ struct QueueRowView: View {
                                               (settings.skipExistingCoordinates && item.geocodedPlace != nil && item.geocodedPlace!.lowercased() != "null" && !item.geocodedPlace!.isEmpty)
                             
                             if item.status == .analyzed || item.status == .completed {
-                                Button(action: {
-                                    manager.toggleSaveLocation(id: item.id)
-                                }) {
-                                    Image(systemName: item.saveLocation ? "checkmark.circle.fill" : "circle")
-                                        .font(.system(size: 11, weight: .bold))
-                                        .foregroundColor(item.saveLocation ? .emerald : .secondary.opacity(0.4))
+                                if item.removeLocation {
+                                    Button(action: {
+                                        manager.updateItemMetadata(
+                                            id: item.id,
+                                            date: item.detectedDate,
+                                            saveDate: item.saveDate,
+                                            removeDate: item.removeDate,
+                                            place: item.detectedPlace,
+                                            saveLocation: false,
+                                            removeLocation: false,
+                                            latitude: item.latitude,
+                                            longitude: item.longitude,
+                                            geocodedPlace: item.geocodedPlace
+                                        )
+                                    }) {
+                                        HStack(spacing: 3) {
+                                            Image(systemName: "trash.fill")
+                                                .font(.system(size: 8))
+                                            Text("Remove")
+                                                .font(.system(size: 9, weight: .bold))
+                                        }
+                                        .foregroundColor(.red)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.red.opacity(0.12))
+                                        .cornerRadius(4)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Click to restore location metadata tag")
+                                } else {
+                                    Button(action: {
+                                        manager.toggleSaveLocation(id: item.id)
+                                    }) {
+                                        Image(systemName: item.saveLocation ? "checkmark.circle.fill" : "circle")
+                                            .font(.system(size: 11, weight: .bold))
+                                            .foregroundColor(item.saveLocation ? .emerald : .secondary.opacity(0.4))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(item.latitude == nil && !item.hasExistingCoordinates)
                                 }
-                                .buttonStyle(.plain)
-                                .disabled(item.latitude == nil && !item.hasExistingCoordinates)
                             }
                             
                             Image(systemName: "mappin.and.ellipse")
@@ -772,7 +864,11 @@ struct QueueRowView: View {
                                 .foregroundColor(.secondary)
                                 .frame(width: 12, alignment: .center)
                             
-                            if isPending {
+                            if item.removeLocation {
+                                Text("GPS location will be deleted from image EXIF")
+                                    .foregroundColor(.red.opacity(0.8))
+                                    .italic()
+                            } else if isPending {
                                 Text("Pending...")
                                     .foregroundColor(.secondary)
                             } else if let place = item.detectedPlace, place.lowercased() != "null", !place.isEmpty {
@@ -808,7 +904,7 @@ struct QueueRowView: View {
                                     .foregroundColor(.secondary)
                             }
                             
-                            if let certainty = item.locationCertainty, hasPlaceVal {
+                            if let certainty = item.locationCertainty, hasPlaceVal && !item.removeLocation {
                                 let isAbove = certainty >= settings.certaintyThreshold
                                 Text("\(certainty)%")
                                     .font(.system(size: 9, weight: .bold))
@@ -825,7 +921,7 @@ struct QueueRowView: View {
                 .foregroundColor(.secondary)
                 
                 // Per-image hint
-                HStack(spacing: 4) {
+                HStack(spacing: 6) {
                     Image(systemName: "lightbulb")
                         .font(.system(size: 9))
                         .foregroundColor(.secondary.opacity(0.6))
@@ -837,8 +933,29 @@ struct QueueRowView: View {
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
                     .disabled(manager.isProcessing)
+                    
+                    if !item.hint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Button(action: {
+                            Task {
+                                await manager.reprocessSingleItem(id: item.id, settings: settings)
+                            }
+                        }) {
+                            HStack(spacing: 2) {
+                                Image(systemName: "arrow.clockwise.circle.fill")
+                                    .font(.system(size: 11))
+                                Text("Reprocess")
+                                    .font(.system(size: 9, weight: .bold))
+                            }
+                            .foregroundColor(.cyan)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(manager.isProcessing)
+                        .transition(.opacity.combined(with: .scale))
+                        .help("Invalidates cache and re-analyzes this image using the custom hint")
+                    }
                 }
                 .padding(.top, 2)
+                .animation(.spring(), value: item.hint.isEmpty)
                 
                 if let error = item.errorMessage {
                     Text(error)
@@ -917,7 +1034,7 @@ struct QueueRowView: View {
                             .help("Pin location on map")
                         }
                         
-                        // Cache indicator and clear button
+                        // Cache indicator / Clear button OR Remove from queue
                         if isCached {
                             Button(action: {
                                 manager.clearItemCache(id: item.id)
@@ -929,16 +1046,16 @@ struct QueueRowView: View {
                             }
                             .buttonStyle(.plain)
                             .help("Clear cached AI result for this image")
+                        } else {
+                            // Remove from queue
+                            Button(action: onRemove) {
+                                Image(systemName: "xmark.circle")
+                                    .font(.system(size: 16))
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Remove from queue")
                         }
-                        
-                        // Remove from queue
-                        Button(action: onRemove) {
-                            Image(systemName: "xmark.circle")
-                                .font(.system(size: 16))
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Remove from queue")
                     }
                 }
                 .padding(.top, 4)
@@ -1019,6 +1136,12 @@ struct EditMetadataPopover: View {
     let onOpenMap: () -> Void
     @Environment(\.dismiss) var dismiss
     
+    // Three states: 0 = Save/Write, 1 = Keep Original, 2 = Remove/Strip
+    @State private var dateAction: Int
+    
+    // Three states: 0 = Save/Write, 1 = Keep Original, 2 = Remove/Strip
+    @State private var locationAction: Int
+    
     @State private var useDate: Bool
     @State private var date: Date
     
@@ -1039,10 +1162,14 @@ struct EditMetadataPopover: View {
         self.onOpenMap = onOpenMap
         
         // Initialize state
-        _useDate = State(initialValue: item.saveDate || item.detectedDate != nil)
+        let initDateAction = item.removeDate ? 2 : (item.saveDate || item.detectedDate != nil ? 0 : 1)
+        _dateAction = State(initialValue: initDateAction)
+        _useDate = State(initialValue: initDateAction == 0)
         _date = State(initialValue: item.detectedDate ?? Date())
         
-        _useLocation = State(initialValue: item.saveLocation || item.latitude != nil)
+        let initLocAction = item.removeLocation ? 2 : (item.saveLocation || item.latitude != nil ? 0 : 1)
+        _locationAction = State(initialValue: initLocAction)
+        _useLocation = State(initialValue: initLocAction == 0)
         _place = State(initialValue: item.detectedPlace ?? "")
         _latitudeStr = State(initialValue: item.latitude != nil ? String(format: "%.6f", item.latitude!) : "")
         _longitudeStr = State(initialValue: item.longitude != nil ? String(format: "%.6f", item.longitude!) : "")
@@ -1067,14 +1194,23 @@ struct EditMetadataPopover: View {
                 // Date Section
                 if settings.processingMode == .both || settings.processingMode == .dateOnly {
                     VStack(alignment: .leading, spacing: 6) {
-                        Toggle("Include Date", isOn: $useDate)
+                        Text("Date Metadata Action")
                             .font(.subheadline)
                             .fontWeight(.semibold)
                         
-                        if useDate {
+                        Picker("", selection: $dateAction) {
+                            Text("Save Date").tag(0)
+                            Text("Keep Original").tag(1)
+                            Text("Remove Date").tag(2)
+                        }
+                        .pickerStyle(.segmented)
+                        .controlSize(.small)
+                        
+                        if dateAction == 0 {
                             DatePicker("", selection: $date, displayedComponents: .date)
                                 .datePickerStyle(.field)
                                 .labelsHidden()
+                                .padding(.top, 4)
                         }
                     }
                     
@@ -1084,11 +1220,19 @@ struct EditMetadataPopover: View {
                 // Location Section
                 if settings.processingMode == .both || settings.processingMode == .locationOnly {
                     VStack(alignment: .leading, spacing: 6) {
-                        Toggle("Include Location", isOn: $useLocation)
+                        Text("Location Metadata Action")
                             .font(.subheadline)
                             .fontWeight(.semibold)
                         
-                        if useLocation {
+                        Picker("", selection: $locationAction) {
+                            Text("Save Coords").tag(0)
+                            Text("Keep Original").tag(1)
+                            Text("Remove Loc").tag(2)
+                        }
+                        .pickerStyle(.segmented)
+                        .controlSize(.small)
+                        
+                        if locationAction == 0 {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Place Name")
                                     .font(.caption)
@@ -1154,6 +1298,7 @@ struct EditMetadataPopover: View {
                                 .padding(.top, 4)
                             }
                             .padding(.leading, 16)
+                            .padding(.top, 4)
                         }
                     }
                     
@@ -1226,18 +1371,26 @@ struct EditMetadataPopover: View {
     }
     
     private func saveChanges() {
-        let finalDate = useDate ? date : nil
-        let finalPlace = useLocation && !place.isEmpty ? place : nil
-        let finalLat = useLocation ? Double(latitudeStr) : nil
-        let finalLon = useLocation ? Double(longitudeStr) : nil
-        let finalGeo = useLocation ? geocodedPlace : nil
+        let saveDateVal = dateAction == 0
+        let removeDateVal = dateAction == 2
+        
+        let saveLocVal = locationAction == 0
+        let removeLocVal = locationAction == 2
+        
+        let finalDate = saveDateVal ? date : nil
+        let finalPlace = saveLocVal && !place.isEmpty ? place : nil
+        let finalLat = saveLocVal ? Double(latitudeStr) : nil
+        let finalLon = saveLocVal ? Double(longitudeStr) : nil
+        let finalGeo = saveLocVal ? geocodedPlace : nil
         
         manager.updateItemMetadata(
             id: item.id,
             date: settings.processingMode == .locationOnly ? nil : finalDate,
-            saveDate: settings.processingMode == .locationOnly ? false : useDate,
+            saveDate: settings.processingMode == .locationOnly ? false : saveDateVal,
+            removeDate: settings.processingMode == .locationOnly ? false : removeDateVal,
             place: settings.processingMode == .dateOnly ? nil : finalPlace,
-            saveLocation: settings.processingMode == .dateOnly ? false : useLocation,
+            saveLocation: settings.processingMode == .dateOnly ? false : saveLocVal,
+            removeLocation: settings.processingMode == .dateOnly ? false : removeLocVal,
             latitude: settings.processingMode == .dateOnly ? nil : finalLat,
             longitude: settings.processingMode == .dateOnly ? nil : finalLon,
             geocodedPlace: settings.processingMode == .dateOnly ? nil : finalGeo
@@ -1252,9 +1405,12 @@ struct BatchEditPopover: View {
     @ObservedObject var settings: AppSettings
     @Environment(\.dismiss) var dismiss
 
-    @State private var setDate: Bool = false
+    // 0 = Do Not Change, 1 = Set/Save Date, 2 = Remove Date
+    @State private var dateAction: Int = 0
     @State private var date: Date = Date()
-    @State private var setLocation: Bool = false
+    
+    // 0 = Do Not Change, 1 = Set/Save Coords, 2 = Remove Location
+    @State private var locationAction: Int = 0
     @State private var latitudeStr: String = ""
     @State private var longitudeStr: String = ""
 
@@ -1268,21 +1424,38 @@ struct BatchEditPopover: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 if settings.processingMode == .both || settings.processingMode == .dateOnly {
-                    Toggle("Set Date", isOn: $setDate)
+                    Text("Batch Date Action")
                         .font(.subheadline).fontWeight(.semibold)
-                    if setDate {
+                    Picker("", selection: $dateAction) {
+                        Text("Do Not Change").tag(0)
+                        Text("Set Date").tag(1)
+                        Text("Remove Date").tag(2)
+                    }
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                    
+                    if dateAction == 1 {
                         DatePicker("", selection: $date, displayedComponents: .date)
                             .datePickerStyle(.field)
                             .labelsHidden()
+                            .padding(.top, 4)
                     }
                     
                     Divider().background(Color.white.opacity(0.05))
                 }
 
                 if settings.processingMode == .both || settings.processingMode == .locationOnly {
-                    Toggle("Set Coordinates", isOn: $setLocation)
+                    Text("Batch Location Action")
                         .font(.subheadline).fontWeight(.semibold)
-                    if setLocation {
+                    Picker("", selection: $locationAction) {
+                        Text("Do Not Change").tag(0)
+                        Text("Set Coordinates").tag(1)
+                        Text("Remove Location").tag(2)
+                    }
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                    
+                    if locationAction == 1 {
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Latitude").font(.caption).foregroundColor(.secondary)
@@ -1301,6 +1474,7 @@ struct BatchEditPopover: View {
                                     }
                             }
                         }
+                        .padding(.top, 4)
                     }
                 }
             }
@@ -1325,15 +1499,24 @@ struct BatchEditPopover: View {
     }
 
     private func applyBatch() {
-        let lat = setLocation ? Double(latitudeStr) : nil
-        let lon = setLocation ? Double(longitudeStr) : nil
+        let setDateVal = dateAction == 1
+        let removeDateVal = dateAction == 2
+        
+        let setLocVal = locationAction == 1
+        let removeLocVal = locationAction == 2
+        
+        let lat = setLocVal ? Double(latitudeStr) : nil
+        let lon = setLocVal ? Double(longitudeStr) : nil
+        
         manager.batchUpdateMetadata(
             ids: ids,
-            date: settings.processingMode == .locationOnly ? nil : (setDate ? date : nil),
-            saveDate: settings.processingMode == .locationOnly ? false : setDate,
+            date: settings.processingMode == .locationOnly ? nil : (setDateVal ? date : nil),
+            saveDate: settings.processingMode == .locationOnly ? false : setDateVal,
+            removeDate: settings.processingMode == .locationOnly ? false : removeDateVal,
             latitude: settings.processingMode == .dateOnly ? nil : lat,
             longitude: settings.processingMode == .dateOnly ? nil : lon,
-            saveLocation: settings.processingMode == .dateOnly ? false : setLocation
+            saveLocation: settings.processingMode == .dateOnly ? false : setLocVal,
+            removeLocation: settings.processingMode == .dateOnly ? false : removeLocVal
         )
     }
 

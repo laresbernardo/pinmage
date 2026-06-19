@@ -62,6 +62,8 @@ struct ImageItem: Identifiable, Equatable {
     // User acceptance & Geocoded Reference Place name
     var saveDate: Bool = false
     var saveLocation: Bool = false
+    var removeDate: Bool = false
+    var removeLocation: Bool = false
     var geocodedPlace: String? = nil
     
     // Per-image hint to help the AI

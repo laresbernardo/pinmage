@@ -272,8 +272,10 @@ struct InteractiveMapEditorView: View {
             id: item.id,
             date: item.detectedDate,
             saveDate: item.saveDate,
+            removeDate: item.removeDate,
             place: resolvedPlaceName,
             saveLocation: true,
+            removeLocation: false,
             latitude: coord.latitude,
             longitude: coord.longitude,
             geocodedPlace: resolvedPlaceName

@@ -5,7 +5,7 @@ import CoreServices
 struct MetadataWriter {
     /// Copies image from sourceURL to destinationURL while embedding date and coordinates.
     /// Returns true on success.
-    static func updateImageMetadata(sourceURL: URL, destinationURL: URL, date: Date?, latitude: Double?, longitude: Double?) -> Bool {
+    static func updateImageMetadata(sourceURL: URL, destinationURL: URL, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool) -> Bool {
         // Read file data
         guard let sourceData = try? Data(contentsOf: sourceURL),
               let imageSource = CGImageSourceCreateWithData(sourceData as CFData, nil) else {
@@ -35,7 +35,16 @@ struct MetadataWriter {
         // Update EXIF:
         //   DateTimeOriginal — the date/time the photo was taken (original creation date)
         //   DateTimeDigitized — the date/time the image was digitized (relevant for scans)
-        if let date = date {
+        if removeDate {
+            var exifDict = metadataDict[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+            exifDict.removeValue(forKey: kCGImagePropertyExifDateTimeOriginal)
+            exifDict.removeValue(forKey: kCGImagePropertyExifDateTimeDigitized)
+            metadataDict[kCGImagePropertyExifDictionary] = exifDict
+            
+            var tiffDict = metadataDict[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+            tiffDict.removeValue(forKey: kCGImagePropertyTIFFDateTime)
+            metadataDict[kCGImagePropertyTIFFDictionary] = tiffDict
+        } else if let date = date {
             var exifDict = metadataDict[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
@@ -51,7 +60,9 @@ struct MetadataWriter {
         }
         
         // Update GPS
-        if let lat = latitude, let lon = longitude {
+        if removeLocation {
+            metadataDict.removeValue(forKey: kCGImagePropertyGPSDictionary)
+        } else if let lat = latitude, let lon = longitude {
             var gpsDict = metadataDict[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
             gpsDict[kCGImagePropertyGPSLatitude] = abs(lat)
             gpsDict[kCGImagePropertyGPSLatitudeRef] = lat >= 0 ? "N" : "S"
