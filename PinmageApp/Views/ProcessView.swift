@@ -10,6 +10,8 @@ struct ProcessView: View {
     @State private var selectedIds: Set<UUID> = []
     @State private var showingBatchEdit = false
     
+    @State private var selectedMapItem: ImageItem? = nil
+    
     var body: some View {
         VStack(spacing: 0) {
             // Processing Header / Actions Panel
@@ -317,6 +319,8 @@ struct ProcessView: View {
                     ForEach(manager.imageItems) { item in
                         QueueRowView(item: item, manager: manager, settings: settings, selectedIds: $selectedIds, onRemove: {
                             manager.removeImage(id: item.id)
+                        }, onEditLocation: {
+                            selectedMapItem = item
                         })
                         .padding(.vertical, 4)
                         .listRowSeparator(.visible)
@@ -344,6 +348,9 @@ struct ProcessView: View {
                 },
                 secondaryButton: .cancel()
             )
+        }
+        .sheet(item: $selectedMapItem) { item in
+            InteractiveMapEditorView(item: item, manager: manager)
         }
     }
     
@@ -561,6 +568,7 @@ struct QueueRowView: View {
     @ObservedObject var settings: AppSettings
     @Binding var selectedIds: Set<UUID>
     let onRemove: () -> Void
+    let onEditLocation: () -> Void
     @State private var thumbnail: NSImage? = nil
     @State private var showingEditPopover = false
     @State private var showingPreviewPopover = false
@@ -658,24 +666,35 @@ struct QueueRowView: View {
                             .disabled(item.detectedDate == nil)
                         }
                         
-                        Image(systemName: "calendar")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                            .frame(width: 12, alignment: .center)
-                        
-                        if isPending {
-                            Text("Pending...")
-                                .foregroundColor(.secondary)
-                        } else if let dateStr = item.detectedDateString, dateStr.lowercased() != "null", !dateStr.isEmpty {
-                            Text(dateStr)
-                                .foregroundColor(.white.opacity(0.9))
-                        } else if let date = item.detectedDate {
-                            Text(formattedDate(date))
-                                .foregroundColor(.white.opacity(0.9))
-                        } else {
-                            Text("—")
-                                .foregroundColor(.secondary)
+                        Button(action: {
+                            if item.status != .processing && item.status != .callingAPI && item.status != .geocoding && item.status != .writing {
+                                showingEditPopover = true
+                            }
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "calendar")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 12, alignment: .center)
+                                
+                                if isPending {
+                                    Text("Pending...")
+                                        .foregroundColor(.secondary)
+                                } else if let dateStr = item.detectedDateString, dateStr.lowercased() != "null", !dateStr.isEmpty {
+                                    Text(dateStr)
+                                        .foregroundColor(.white.opacity(0.9))
+                                } else if let date = item.detectedDate {
+                                    Text(formattedDate(date))
+                                        .foregroundColor(.white.opacity(0.9))
+                                } else {
+                                    Text("—")
+                                        .foregroundColor(.secondary)
+                                }
+                            }
                         }
+                        .buttonStyle(.plain)
+                        .help("Click to edit date manually")
+                        .disabled(item.status == .processing || item.status == .callingAPI || item.status == .geocoding || item.status == .writing)
                         
                         if item.dateIsInherited {
                             Text("(Inherited)")
@@ -726,23 +745,33 @@ struct QueueRowView: View {
                             Text("Pending...")
                                 .foregroundColor(.secondary)
                         } else if let place = item.detectedPlace, place.lowercased() != "null", !place.isEmpty {
-                            let query = place.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? place
                             Button(place) {
-                                NSWorkspace.shared.open(URL(string: "https://www.google.com/maps/search/?api=1&query=\(query)")!)
+                                onEditLocation()
                             }
                             .buttonStyle(.plain)
                             .foregroundColor(.white.opacity(0.9))
                             .lineLimit(1)
-                            .help("Open in Google Maps")
+                            .help("Pin location on map")
+                            .contextMenu {
+                                Button("Copy Place Name") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(place, forType: .string)
+                                }
+                            }
                         } else if settings.skipExistingCoordinates, let geo = item.geocodedPlace, geo.lowercased() != "null", !geo.isEmpty {
-                            let query = geo.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? geo
                             Button(geo) {
-                                NSWorkspace.shared.open(URL(string: "https://www.google.com/maps/search/?api=1&query=\(query)")!)
+                                onEditLocation()
                             }
                             .buttonStyle(.plain)
                             .foregroundColor(.cyan.opacity(0.85))
                             .lineLimit(1)
-                            .help("Open in Google Maps")
+                            .help("Pin location on map")
+                            .contextMenu {
+                                Button("Copy Place Name") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(geo, forType: .string)
+                                }
+                            }
                         } else {
                             Text("—")
                                 .foregroundColor(.secondary)
@@ -815,6 +844,20 @@ struct QueueRowView: View {
                 // Align Action Buttons at the bottom-right of the row
                 HStack(spacing: 8) {
                     if item.status != .processing && item.status != .callingAPI && item.status != .geocoding && item.status != .writing {
+                        
+                        // Show in Finder
+                        if item.status == .completed, let outputURL = item.outputURL {
+                            Button(action: {
+                                NSWorkspace.shared.activateFileViewerSelecting([outputURL])
+                            }) {
+                                Image(systemName: "magnifyingglass.circle")
+                                    .font(.system(size: 16))
+                                    .foregroundColor(.cyan)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Show in Finder")
+                        }
+                        
                         Button(action: {
                             showingEditPopover = true
                         }) {
@@ -825,8 +868,18 @@ struct QueueRowView: View {
                         .buttonStyle(.plain)
                         .help("Edit details manually")
                         .popover(isPresented: $showingEditPopover, arrowEdge: .trailing) {
-                            EditMetadataPopover(item: item, manager: manager)
+                            EditMetadataPopover(item: item, manager: manager, onOpenMap: onEditLocation)
                         }
+                        
+                        Button(action: {
+                            onEditLocation()
+                        }) {
+                            Image(systemName: "map.circle")
+                                .font(.system(size: 16))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Pin location on map")
                         
                         // Cache indicator and clear button
                         if isCached {
@@ -841,25 +894,15 @@ struct QueueRowView: View {
                             .buttonStyle(.plain)
                             .help("Clear cached AI result for this image")
                         }
-                    }
-                    
-                    if item.status == .pending || item.status == .failed {
+                        
+                        // Remove from queue
                         Button(action: onRemove) {
                             Image(systemName: "xmark.circle")
                                 .font(.system(size: 16))
                                 .foregroundColor(.secondary)
                         }
                         .buttonStyle(.plain)
-                    } else if item.status == .completed, let outputURL = item.outputURL {
-                        Button(action: {
-                            NSWorkspace.shared.activateFileViewerSelecting([outputURL])
-                        }) {
-                            Image(systemName: "magnifyingglass.circle")
-                                .font(.system(size: 16))
-                                .foregroundColor(.cyan)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Show in Finder")
+                        .help("Remove from queue")
                     }
                 }
                 .padding(.top, 4)
@@ -915,13 +958,20 @@ struct QueueRowView: View {
                 .font(.caption2)
                 .foregroundColor(color)
             Button(String(format: "%.4f, %.4f", lat, lon)) {
-                NSWorkspace.shared.open(URL(string: "https://www.google.com/maps?q=\(lat),\(lon)")!)
+                onEditLocation()
             }
             .buttonStyle(.plain)
             .font(.system(size: 10, design: .monospaced))
             .foregroundColor(color)
-            .help("Open in Google Maps")
+            .help("Pin location on map")
             .fixedSize(horizontal: true, vertical: false)
+            .contextMenu {
+                Button("Copy Coordinates") {
+                    let text = String(format: "%.6f, %.6f", lat, lon)
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                }
+            }
         }
     }
 }
@@ -929,6 +979,7 @@ struct QueueRowView: View {
 struct EditMetadataPopover: View {
     let item: ImageItem
     @ObservedObject var manager: PinmageManager
+    let onOpenMap: () -> Void
     @Environment(\.dismiss) var dismiss
     
     @State private var useDate: Bool
@@ -944,9 +995,10 @@ struct EditMetadataPopover: View {
     
     @State private var hintText: String
     
-    init(item: ImageItem, manager: PinmageManager) {
+    init(item: ImageItem, manager: PinmageManager, onOpenMap: @escaping () -> Void) {
         self.item = item
         self.manager = manager
+        self.onOpenMap = onOpenMap
         
         // Initialize state
         _useDate = State(initialValue: item.saveDate || item.detectedDate != nil)
@@ -1022,6 +1074,9 @@ struct EditMetadataPopover: View {
                                         .foregroundColor(.secondary)
                                     TextField("Latitude", text: $latitudeStr)
                                         .textFieldStyle(.roundedBorder)
+                                        .onChange(of: latitudeStr) { _, newValue in
+                                            handleCoordinatePaste(newValue)
+                                        }
                                 }
                                 
                                 VStack(alignment: .leading, spacing: 4) {
@@ -1030,6 +1085,9 @@ struct EditMetadataPopover: View {
                                         .foregroundColor(.secondary)
                                     TextField("Longitude", text: $longitudeStr)
                                         .textFieldStyle(.roundedBorder)
+                                        .onChange(of: longitudeStr) { _, newValue in
+                                            handleCoordinatePaste(newValue)
+                                        }
                                 }
                             }
                             
@@ -1039,6 +1097,20 @@ struct EditMetadataPopover: View {
                                     .foregroundColor(.cyan)
                                     .italic()
                             }
+                            
+                            Button(action: {
+                                dismiss()
+                                onOpenMap()
+                            }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "map")
+                                    Text("Open Map Pin Editor")
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(.cyan)
+                            .font(.caption)
+                            .padding(.top, 4)
                         }
                         .padding(.leading, 16)
                     }
@@ -1095,6 +1167,19 @@ struct EditMetadataPopover: View {
                 geocodedPlace = geocoded.resolvedName ?? ""
             }
             isGeocoding = false
+        }
+    }
+    
+    private func handleCoordinatePaste(_ input: String) {
+        let cleaned = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = cleaned.components(separatedBy: ",")
+        if parts.count == 2 {
+            let latVal = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            let lonVal = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            if Double(latVal) != nil && Double(lonVal) != nil {
+                latitudeStr = latVal
+                longitudeStr = lonVal
+            }
         }
     }
     
@@ -1157,11 +1242,17 @@ struct BatchEditPopover: View {
                             Text("Latitude").font(.caption).foregroundColor(.secondary)
                             TextField("Latitude", text: $latitudeStr)
                                 .textFieldStyle(.roundedBorder)
+                                .onChange(of: latitudeStr) { _, newValue in
+                                    handleCoordinatePaste(newValue)
+                                }
                         }
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Longitude").font(.caption).foregroundColor(.secondary)
                             TextField("Longitude", text: $longitudeStr)
                                 .textFieldStyle(.roundedBorder)
+                                .onChange(of: longitudeStr) { _, newValue in
+                                    handleCoordinatePaste(newValue)
+                                }
                         }
                     }
                 }
@@ -1197,6 +1288,19 @@ struct BatchEditPopover: View {
             longitude: lon,
             saveLocation: setLocation
         )
+    }
+
+    private func handleCoordinatePaste(_ input: String) {
+        let cleaned = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = cleaned.components(separatedBy: ",")
+        if parts.count == 2 {
+            let latVal = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            let lonVal = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            if Double(latVal) != nil && Double(lonVal) != nil {
+                latitudeStr = latVal
+                longitudeStr = lonVal
+            }
+        }
     }
 }
 

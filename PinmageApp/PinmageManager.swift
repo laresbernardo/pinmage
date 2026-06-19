@@ -154,6 +154,14 @@ import MapKit
         if let index = imageItems.firstIndex(where: { $0.id == id }) {
             imageItems[index].detectedDate = date
             imageItems[index].saveDate = saveDate && date != nil
+            if let date = date {
+                let formatter = DateFormatter()
+                formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                formatter.dateFormat = "yyyy-MM-dd"
+                imageItems[index].detectedDateString = formatter.string(from: date)
+            } else {
+                imageItems[index].detectedDateString = nil
+            }
             imageItems[index].detectedPlace = place
             imageItems[index].saveLocation = saveLocation && latitude != nil && longitude != nil
             imageItems[index].latitude = latitude
@@ -175,6 +183,14 @@ import MapKit
             if saveDate {
                 imageItems[index].detectedDate = date
                 imageItems[index].saveDate = date != nil
+                if let date = date {
+                    let formatter = DateFormatter()
+                    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                    formatter.dateFormat = "yyyy-MM-dd"
+                    imageItems[index].detectedDateString = formatter.string(from: date)
+                } else {
+                    imageItems[index].detectedDateString = nil
+                }
             }
             if saveLocation {
                 imageItems[index].latitude = latitude
@@ -533,16 +549,30 @@ import MapKit
         
         if update.success, let result = update.result {
             var parsedDate: Date? = nil
+            var dateCertainty = min(max(result.dateCertainty ?? 0, 0), 100)
+            var finalDateStr = result.date
+            
             if let dateStr = result.date, !dateStr.isEmpty, dateStr.lowercased() != "null" {
-                parsedDate = parseDate(from: dateStr)
+                if let parseResult = parseDateAndCheckPartial(from: dateStr) {
+                    parsedDate = parseResult.date
+                    if parseResult.isPartial {
+                        // Cap certainty to 75% for partial dates (guessed days/months)
+                        dateCertainty = min(dateCertainty, 75)
+                        
+                        // Format back to YYYY-MM-DD
+                        let outFormatter = DateFormatter()
+                        outFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+                        outFormatter.dateFormat = "yyyy-MM-dd"
+                        finalDateStr = outFormatter.string(from: parseResult.date)
+                    }
+                }
             }
             
-            let dateCertainty = min(max(result.dateCertainty ?? 0, 0), 100)
             let locationCertainty = min(max(result.locationCertainty ?? 0, 0), 100)
             
             self.imageItems[index].detectedDate = parsedDate
             self.imageItems[index].detectedPlace = result.place
-            self.imageItems[index].detectedDateString = result.date
+            self.imageItems[index].detectedDateString = finalDateStr
             self.imageItems[index].dateCertainty = dateCertainty
             self.imageItems[index].locationCertainty = locationCertainty
             self.imageItems[index].latitude = update.latitude
@@ -694,24 +724,39 @@ import MapKit
         }
     }
     
-    private func parseDate(from string: String) -> Date? {
+    struct DateParseResult {
+        let date: Date
+        let isPartial: Bool
+    }
+    
+    private func parseDateAndCheckPartial(from string: String) -> DateParseResult? {
         let cleanStr = string.trimmingCharacters(in: .whitespacesAndNewlines)
         let formatter = DateFormatter()
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         
         // Try YYYY-MM-DD
         formatter.dateFormat = "yyyy-MM-dd"
-        if let date = formatter.date(from: cleanStr) { return date }
+        if let date = formatter.date(from: cleanStr) {
+            return DateParseResult(date: date, isPartial: false)
+        }
         
         // Try YYYY-MM
         formatter.dateFormat = "yyyy-MM"
-        if let date = formatter.date(from: cleanStr) { return date }
+        if let date = formatter.date(from: cleanStr) {
+            return DateParseResult(date: date, isPartial: true)
+        }
         
         // Try YYYY
         formatter.dateFormat = "yyyy"
-        if let date = formatter.date(from: cleanStr) { return date }
+        if let date = formatter.date(from: cleanStr) {
+            return DateParseResult(date: date, isPartial: true)
+        }
         
         return nil
+    }
+    
+    private func parseDate(from string: String) -> Date? {
+        return parseDateAndCheckPartial(from: string)?.date
     }
     
     private nonisolated func resolveOutputFilename(fileURL: URL, date: Date?, place: String?, pattern: FilenamePattern) -> String {

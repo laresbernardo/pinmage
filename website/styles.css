@@ -133,6 +133,7 @@ body {
     display: flex;
     align-items: center;
     position: relative;
+    z-index: 2;
     overflow: hidden;
 }
 
@@ -304,6 +305,8 @@ body {
     padding: 100px 24px;
     max-width: 1200px;
     margin: 0 auto;
+    position: relative;
+    z-index: 2;
 }
 
 .section-header {
@@ -423,6 +426,8 @@ body {
     border-bottom: 1px solid var(--glass-border);
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
+    position: relative;
+    z-index: 2;
 }
 
 .steps-container {
@@ -467,6 +472,8 @@ body {
 footer {
     padding: 60px 24px;
     border-top: 1px solid var(--glass-border);
+    position: relative;
+    z-index: 2;
 }
 
 .footer-container {
@@ -545,6 +552,8 @@ footer {
     padding: 100px 24px;
     max-width: 1200px;
     margin: 0 auto;
+    position: relative;
+    z-index: 2;
 }
 
 .screenshots-grid {
@@ -640,10 +649,10 @@ footer {
     left: 0;
     width: 100vw;
     height: 100vh;
-    z-index: -1;
+    z-index: 1;
     pointer-events: none;
     user-select: none;
-    color: rgba(6, 182, 212, 0.045);
+    color: rgba(6, 182, 212, 0.3);
 }
 
 .background-topo-lines svg {
