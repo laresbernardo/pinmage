@@ -480,6 +480,10 @@ struct ProcessView: View {
     private func estimatedCostString(count: Int, model: String) -> String {
         guard count > 0 else { return "$0.00" }
         
+        if settings.provider == .ollama {
+            return "Free (Local)"
+        }
+        
         let isPro = model.contains("pro")
         let inputRate = isPro ? 1.25 : 0.075
         let outputRate = isPro ? 5.00 : 0.30

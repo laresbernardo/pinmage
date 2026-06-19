@@ -76,6 +76,11 @@ struct ImageItem: Identifiable, Equatable {
     }
 }
 
+enum AIProvider: String, CaseIterable, Codable {
+    case gemini = "Google Gemini"
+    case ollama = "Ollama (Local)"
+}
+
 enum FilenamePattern: String, CaseIterable, Identifiable {
     case original = "Keep Original Name"
     case dateAndName = "Prepend Date (YYYYMMDD_Name)"
@@ -88,6 +93,11 @@ enum FilenamePattern: String, CaseIterable, Identifiable {
     @Published var apiKey: String {
         didSet {
             UserDefaults.standard.set(apiKey, forKey: "pinmage_api_key")
+        }
+    }
+    @Published var provider: AIProvider {
+        didSet {
+            UserDefaults.standard.set(provider.rawValue, forKey: "pinmage_ai_provider")
         }
     }
     @Published var modelName: String {
@@ -157,12 +167,14 @@ enum FilenamePattern: String, CaseIterable, Identifiable {
     
     init() {
         self.apiKey = UserDefaults.standard.string(forKey: "pinmage_api_key") ?? ""
+        let storedProvider = UserDefaults.standard.string(forKey: "pinmage_ai_provider") ?? ""
+        self.provider = AIProvider(rawValue: storedProvider) ?? .gemini
         self.modelName = UserDefaults.standard.string(forKey: "pinmage_model_name") ?? "gemini-3.1-flash-lite"
         self.outputFolderPath = UserDefaults.standard.string(forKey: "pinmage_output_folder") ?? ""
         self.overwriteOriginals = UserDefaults.standard.bool(forKey: "pinmage_overwrite_originals")
         let rawPattern = UserDefaults.standard.string(forKey: "pinmage_filename_pattern") ?? ""
         self.filenamePattern = FilenamePattern(rawValue: rawPattern) ?? .original
-        self.customPrompt = UserDefaults.standard.string(forKey: "pinmage_custom_prompt") ?? "Analyze this image. If it is a scanned page containing multiple photos or a single photo, try to read any written text (captions, notes, dates) or visual cues to extract:\n1. The approximate or exact date when the photo(s) were taken.\n2. The location/place name (city, country, landmark) where the photo was taken.\n\nBe as accurate as possible. Return null for date or place if completely unknown."
+        self.customPrompt = UserDefaults.standard.string(forKey: "pinmage_custom_prompt") ?? "Analyze this image. If it is a scanned page containing multiple photos or a single photo, try to read any written text (captions, notes, dates) or visual cues to extract:\n1. The approximate or exact date when the photo(s) were taken.\n2. The location/place name (city, country, landmark) where the photo was taken.\n\nBe as accurate as possible. Return null for date or place if completely unknown.\n\nIMPORTANT certainty calibration guidelines:\n- Only report certainty above 90% if the date or location is explicitly and clearly visible in the image content (e.g., a handwritten caption, a printed date stamp from film development in the corner of a photo, a prominent sign).\n- If you are inferring from context clues, clothing, cars, or other indirect evidence, report lower certainty (30-70%).\n- Printed date stamps in the corner of old photos ARE part of the original photo content — treat them as high certainty.\n- Digital watermarks, copyright overlays, software branding logos, or text that appears digitally overlaid/post-processed rather than physically printed on the photo should be ignored.\n- If uncertain, report lower certainty rather than guessing confidently."
         
         let storedThreshold = UserDefaults.standard.integer(forKey: "pinmage_certainty_threshold")
         self.certaintyThreshold = storedThreshold == 0 ? 80 : storedThreshold

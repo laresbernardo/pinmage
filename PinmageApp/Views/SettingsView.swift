@@ -8,6 +8,9 @@ struct SettingsView: View {
     @State private var showClearDateCacheConfirm = false
     @State private var showClearLocationCacheConfirm = false
     @State private var cacheEntryCount: Int = 0
+    @State private var ollamaModels: [OllamaManager.OllamaModelInfo] = []
+    @State private var ollamaRunning = false
+    @State private var isRefreshingOllama = false
     
     var body: some View {
         ScrollView {
@@ -24,14 +27,14 @@ struct SettingsView: View {
                 }
                 .padding(.bottom, 8)
                 
-                // Gemini API Settings
+                // AI Provider & Model Settings
                 GlassCard {
                     VStack(alignment: .leading, spacing: 16) {
                         HStack(spacing: 8) {
                             Image(systemName: "sparkles")
                                 .font(.title3)
                                 .foregroundColor(.cyan)
-                            Text("Gemini API Setup")
+                            Text("AI Provider & Model Setup")
                                 .font(.headline)
                                 .foregroundColor(.white)
                         }
@@ -39,50 +42,41 @@ struct SettingsView: View {
                         Divider().background(Color.white.opacity(0.1))
                         
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Gemini API Key")
+                            Text("AI Provider")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .fontWeight(.semibold)
                             
-                            HStack {
-                                SecureField("AIzaSy...", text: $settings.apiKey)
-                                    .textFieldStyle(.roundedBorder)
-                                    .font(.system(.body, design: .monospaced))
-                                
-                                Button(action: {
-                                    if let url = URL(string: "https://aistudio.google.com/") {
-                                        NSWorkspace.shared.open(url)
-                                    }
-                                }) {
-                                    Text("Get Key")
-                                        .font(.subheadline)
-                                        .fontWeight(.semibold)
+                            Picker("", selection: $settings.provider) {
+                                ForEach(AIProvider.allCases, id: \.self) { provider in
+                                    Text(provider.rawValue).tag(provider)
                                 }
-                                .buttonStyle(.bordered)
                             }
-                            Text("Your API key is saved locally in system UserDefaults.")
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
+                            .pickerStyle(.segmented)
+                            .frame(maxWidth: 380)
                         }
                         
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Gemini Model Selection")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .fontWeight(.semibold)
-                            
-                            Picker("", selection: $settings.modelName) {
-                                Text("Gemini 3.1 Flash Lite (Recommended)").tag("gemini-3.1-flash-lite")
-                                Text("Gemini 3.5 Flash").tag("gemini-3.5-flash")
-                                Text("Gemini 2.5 Flash").tag("gemini-2.5-flash")
-                            }
-                            .pickerStyle(.menu)
-                            .frame(maxWidth: 320)
+                        Divider().background(Color.white.opacity(0.1))
+                        
+                        if settings.provider == .gemini {
+                            geminiSection
+                        } else {
+                            ollamaSection
                         }
                     }
                     .padding(20)
                 }
                 .glassCardHoverEffect()
+                .onChange(of: settings.provider) { _, newProvider in
+                    if newProvider == .ollama {
+                        Task { await refreshOllamaModels() }
+                    }
+                }
+                .onAppear {
+                    if settings.provider == .ollama {
+                        Task { await refreshOllamaModels() }
+                    }
+                }
                 
                 // File Destination Settings
                 GlassCard {
@@ -407,6 +401,148 @@ struct SettingsView: View {
         }
     }
     
+    @ViewBuilder
+    private var geminiSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Gemini API Key")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fontWeight(.semibold)
+
+            HStack {
+                SecureField("AIzaSy...", text: $settings.apiKey)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+
+                Button(action: {
+                    if let url = URL(string: "https://aistudio.google.com/") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }) {
+                    Text("Get Key")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                }
+                .buttonStyle(.bordered)
+            }
+            Text("Your API key is saved locally in system UserDefaults.")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+        }
+
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Gemini Model")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fontWeight(.semibold)
+
+            Picker("", selection: $settings.modelName) {
+                Text("Gemini 3.1 Flash Lite (Recommended)").tag("gemini-3.1-flash-lite")
+                Text("Gemini 3.5 Flash").tag("gemini-3.5-flash")
+                Text("Gemini 2.5 Flash").tag("gemini-2.5-flash")
+            }
+            .pickerStyle(.menu)
+            .frame(maxWidth: 320)
+        }
+    }
+
+    @ViewBuilder
+    private var ollamaSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(ollamaRunning ? Color.green : Color.red)
+                    .frame(width: 8, height: 8)
+                Text(ollamaRunning ? "Ollama is running" : "Ollama is not running")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                if !ollamaRunning {
+                    Button("Retry") {
+                        Task { await refreshOllamaModels() }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.subheadline)
+                    .foregroundColor(.cyan)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Ollama Model")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fontWeight(.semibold)
+
+                    Spacer()
+
+                    Button(action: {
+                        Task { await refreshOllamaModels() }
+                    }) {
+                        HStack(spacing: 4) {
+                            if isRefreshingOllama {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                            Text("Refresh")
+                        }
+                        .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.cyan)
+                    .disabled(isRefreshingOllama)
+                }
+
+                if ollamaModels.isEmpty {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                        Text(ollamaRunning
+                            ? "No models found. Install a multimodal model (e.g. llava) via Ollama first."
+                            : "Start Ollama to see your installed models."
+                        )
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 6)
+                } else {
+                    Picker("", selection: $settings.modelName) {
+                        ForEach(ollamaModels) { model in
+                            Text(model.name).tag(model.name)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 320)
+
+                    Text("Only multimodal models (e.g. llava, bakllava, moondream) support image analysis.")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+
+    private func refreshOllamaModels() async {
+        isRefreshingOllama = true
+        ollamaRunning = await OllamaManager.isRunning
+        if ollamaRunning {
+            do {
+                let models = try await OllamaManager.fetchModels()
+                ollamaModels = models
+                if !models.contains(where: { $0.name == settings.modelName }) {
+                    settings.modelName = models.first?.name ?? ""
+                }
+            } catch {
+                ollamaModels = []
+            }
+        } else {
+            ollamaModels = []
+        }
+        isRefreshingOllama = false
+    }
+
     private func selectFolder() {
         let openPanel = NSOpenPanel()
         openPanel.title = "Select Output Folder"

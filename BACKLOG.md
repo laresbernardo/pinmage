@@ -2,4 +2,3 @@
 - Add a one time only payment method of $4.99 with no subscription using stripe.
 - Enable as a plugin for Photos app so user can edit singl photos.
 - To perform single or bulk operations directly to Photos library, utilizing the PHPhotoLibrary framework to iterate through a collection of PHAsset objects, process them, and commit changes to the library in a single transaction.
-- Ensure live photos files are supported.

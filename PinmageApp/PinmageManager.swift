@@ -217,8 +217,8 @@ import MapKit
     func startAnalysis(settings: AppSettings) async {
         guard !isProcessing else { return }
         
-        // Check API key
-        if settings.apiKey.isEmpty {
+        // Check API key (Gemini only)
+        if settings.provider == .gemini && settings.apiKey.isEmpty {
             for i in 0..<self.imageItems.count {
                 if self.imageItems[i].status == .pending {
                     self.imageItems[i].status = .failed
@@ -247,6 +247,7 @@ import MapKit
             return
         }
         
+        let provider = settings.provider
         let apiKey = settings.apiKey
         let modelName = settings.modelName
         let customPrompt = settings.customPrompt
@@ -270,6 +271,7 @@ import MapKit
                         index: idx,
                         itemURL: item.fileURL,
                         fileName: item.fileName,
+                        provider: provider,
                         apiKey: apiKey,
                         modelName: modelName,
                         customPrompt: customPrompt,
@@ -308,6 +310,7 @@ import MapKit
                             index: idx,
                             itemURL: item.fileURL,
                             fileName: item.fileName,
+                            provider: provider,
                             apiKey: apiKey,
                             modelName: modelName,
                             customPrompt: customPrompt,
@@ -367,6 +370,7 @@ import MapKit
         index: Int,
         itemURL: URL,
         fileName: String,
+        provider: AIProvider,
         apiKey: String,
         modelName: String,
         customPrompt: String,
@@ -411,16 +415,32 @@ import MapKit
                     if !imageHint.isEmpty {
                         contextualPrompt += "\n\nThe user provided a hint specific to this image: \"\(imageHint)\". Use this as a strong signal for identifying the date and location."
                     }
-                    let response = try await GeminiManager.analyzeImage(
-                        fileURL: itemURL,
-                        apiKey: apiKey,
-                        modelName: modelName,
-                        prompt: contextualPrompt,
-                        reduceSize: reduceImageSize
-                    )
+                    let response: OllamaManager.AnalysisResponse
+                    if provider == .ollama {
+                        let ollamaResponse = try await OllamaManager.analyzeImage(
+                            fileURL: itemURL,
+                            modelName: modelName,
+                            prompt: contextualPrompt,
+                            reduceSize: reduceImageSize
+                        )
+                        response = ollamaResponse
+                    } else {
+                        let geminiResponse = try await GeminiManager.analyzeImage(
+                            fileURL: itemURL,
+                            apiKey: apiKey,
+                            modelName: modelName,
+                            prompt: contextualPrompt,
+                            reduceSize: reduceImageSize
+                        )
+                        response = OllamaManager.AnalysisResponse(
+                            result: geminiResponse.result,
+                            inputTokens: geminiResponse.inputTokens,
+                            outputTokens: geminiResponse.outputTokens
+                        )
+                    }
                     geminiResult = response.result
                     
-                    let cost = Self.calculateCost(inputTokens: response.inputTokens, outputTokens: response.outputTokens, model: modelName)
+                    let cost = Self.calculateCost(inputTokens: response.inputTokens, outputTokens: response.outputTokens, model: modelName, provider: provider)
                     await manager.updateSpend(settings: settings, cost: cost)
                     break // success
                 } catch {
@@ -725,7 +745,10 @@ import MapKit
         }
     }
     
-    private nonisolated static func calculateCost(inputTokens: Int, outputTokens: Int, model: String) -> Double {
+    private nonisolated static func calculateCost(inputTokens: Int, outputTokens: Int, model: String, provider: AIProvider = .gemini) -> Double {
+        if provider == .ollama {
+            return 0.0
+        }
         let isPro = model.contains("pro")
         let inputRate = isPro ? 1.25 : 0.075
         let outputRate = isPro ? 5.00 : 0.30
