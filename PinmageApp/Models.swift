@@ -67,6 +67,9 @@ struct ImageItem: Identifiable, Equatable {
     // Per-image hint to help the AI
     var hint: String = ""
     
+    // Processing duration (seconds)
+    var processingDuration: TimeInterval? = nil
+
     // SHA-256 hash of the file for cache lookups
     var cacheHash: String = ""
     var isCached: Bool { !cacheHash.isEmpty }

@@ -13,8 +13,10 @@ import MapKit
     @Published var successfulCount = 0
     @Published var failedCount = 0
     @Published var sessionSpend: Double = 0.0
+    @Published var batchDuration: TimeInterval? = nil
     
     private var cancellables = Set<AnyCancellable>()
+    private var batchStartTime: Date? = nil
     
     // Supported extensions
     private let supportedExtensions = ["jpg", "jpeg", "png", "heic", "heif", "webp", "gif"]
@@ -194,6 +196,7 @@ import MapKit
         let latitude: Double?
         let longitude: Double?
         let geocodedPlace: String?
+        let processingDuration: TimeInterval?
     }
     
     func updateItemStatus(index: Int, status: ProcessStatus, fileName: String? = nil, place: String? = nil) {
@@ -234,6 +237,8 @@ import MapKit
         self.failedCount = 0
         self.sessionSpend = 0.0
         self.currentProgress = 0.0
+        self.batchDuration = nil
+        self.batchStartTime = Date()
         
         let indicesToProcess = imageItems.indices.filter {
             let item = imageItems[$0]
@@ -333,6 +338,9 @@ import MapKit
             applyDateExtrapolation()
         }
         
+        if let start = self.batchStartTime {
+            self.batchDuration = Date().timeIntervalSince(start)
+        }
         self.isProcessing = false
         self.currentProgress = 1.0
         self.currentProcessingFile = "Done"
@@ -384,6 +392,7 @@ import MapKit
         settings: AppSettings
     ) async -> AnalysisUpdate {
         await manager.updateItemStatus(index: index, status: .processing, fileName: fileName)
+        let itemStartTime = Date()
         
         let hasExistingCoords = skipExistingCoordinates && existingLatitude != nil && existingLongitude != nil
         
@@ -480,7 +489,8 @@ import MapKit
                 errorDescription: errorDescription ?? "AI analysis failed",
                 latitude: nil,
                 longitude: nil,
-                geocodedPlace: nil
+                geocodedPlace: nil,
+                processingDuration: Date().timeIntervalSince(itemStartTime)
             )
         }
         
@@ -512,7 +522,8 @@ import MapKit
             errorDescription: nil,
             latitude: latitude,
             longitude: longitude,
-            geocodedPlace: geocodedPlace
+            geocodedPlace: geocodedPlace,
+            processingDuration: Date().timeIntervalSince(itemStartTime)
         )
     }
     
@@ -552,9 +563,11 @@ import MapKit
                 self.imageItems[index].saveLocation = update.latitude != nil && locationCertainty >= certaintyThreshold
             }
             
+            self.imageItems[index].processingDuration = update.processingDuration
             self.imageItems[index].status = .analyzed
             self.successfulCount += 1
         } else {
+            self.imageItems[index].processingDuration = update.processingDuration
             self.imageItems[index].status = .failed
             self.imageItems[index].errorMessage = update.errorDescription
             self.failedCount += 1

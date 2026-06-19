@@ -76,6 +76,16 @@ struct ProcessView: View {
                                         .font(.system(size: 10, weight: .semibold, design: .rounded))
                                         .foregroundColor(.secondary.opacity(0.6))
                                 }
+                                
+                                if let batchDuration = manager.batchDuration {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "clock")
+                                            .font(.system(size: 9))
+                                        Text("Time: \(formattedDuration(batchDuration))")
+                                    }
+                                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                    .foregroundColor(.secondary.opacity(0.6))
+                                }
                             }
                         }
                     }
@@ -506,6 +516,16 @@ struct ProcessView: View {
             return formatter.string(from: NSNumber(value: cost)) ?? String(format: "$%.4f", cost)
         }
     }
+    
+    private func formattedDuration(_ interval: TimeInterval) -> String {
+        if interval < 60 {
+            return String(format: "%.1fs", interval)
+        } else {
+            let minutes = Int(interval) / 60
+            let seconds = Int(interval) % 60
+            return String(format: "%dm %ds", minutes, seconds)
+        }
+    }
 }
 
 struct QueueRowView: View {
@@ -583,6 +603,13 @@ struct QueueRowView: View {
                     .padding(.vertical, 2)
                     .background(item.status.color.opacity(0.12))
                     .cornerRadius(4)
+                    
+                    // Per-item duration
+                    if let duration = item.processingDuration {
+                        Text(formattedDuration(duration))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(.secondary)
+                    }
                 }
                 
                 HStack(spacing: 16) {
@@ -694,23 +721,26 @@ struct QueueRowView: View {
                         }
                     }
                     
-                    // Coordinates output
-                    let coordLat = item.latitude ?? item.existingLatitude
-                    let coordLon = item.longitude ?? item.existingLongitude
-                    if let lat = coordLat, let lon = coordLon {
-                        HStack(spacing: 4) {
-                            Image(systemName: "globe")
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                            Button(String(format: "%.4f, %.4f", lat, lon)) {
-                                NSWorkspace.shared.open(URL(string: "https://www.google.com/maps?q=\(lat),\(lon)")!)
-                            }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .help("Open in Google Maps")
+                    // Coordinates output — show both existing and suggested with labels
+                    let hasExisting = item.existingLatitude != nil && item.existingLongitude != nil
+                    let hasSuggested = item.latitude != nil && item.longitude != nil
+                    let coordsDiffer: Bool = {
+                        guard let eLat = item.existingLatitude, let eLon = item.existingLongitude,
+                              let sLat = item.latitude, let sLon = item.longitude else { return true }
+                        return abs(eLat - sLat) > 0.0001 || abs(eLon - sLon) > 0.0001
+                    }()
+                    
+                    if hasExisting && hasSuggested && coordsDiffer {
+                        VStack(alignment: .leading, spacing: 1) {
+                            coordinateRow(label: "Original:", lat: item.existingLatitude!, lon: item.existingLongitude!, color: .secondary)
+                            coordinateRow(label: "Suggested:", lat: item.latitude!, lon: item.longitude!, color: .cyan)
                         }
                         .padding(.top, 2)
+                    } else if let lat = item.latitude ?? item.existingLatitude,
+                              let lon = item.longitude ?? item.existingLongitude {
+                        let label = hasExisting && !hasSuggested ? "Original:" : "Coords:"
+                        coordinateRow(label: label, lat: lat, lon: lon, color: .secondary)
+                            .padding(.top, 2)
                     }
                 }
                 .font(.subheadline)
@@ -821,6 +851,34 @@ struct QueueRowView: View {
         formatter.dateStyle = .medium
         formatter.timeStyle = .none
         return formatter.string(from: date)
+    }
+    
+    private func formattedDuration(_ interval: TimeInterval) -> String {
+        if interval < 60 {
+            return String(format: "%.1fs", interval)
+        } else {
+            let minutes = Int(interval) / 60
+            let seconds = Int(interval) % 60
+            return String(format: "%dm %ds", minutes, seconds)
+        }
+    }
+    
+    private func coordinateRow(label: String, lat: Double, lon: Double, color: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "globe")
+                .font(.system(size: 11))
+                .foregroundColor(color)
+            Text(label)
+                .font(.caption2)
+                .foregroundColor(color)
+            Button(String(format: "%.4f, %.4f", lat, lon)) {
+                NSWorkspace.shared.open(URL(string: "https://www.google.com/maps?q=\(lat),\(lon)")!)
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundColor(color)
+            .help("Open in Google Maps")
+        }
     }
 }
 
