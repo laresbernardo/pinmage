@@ -194,7 +194,7 @@ struct SettingsView: View {
                         Divider().background(Color.white.opacity(0.1))
                         
                         VStack(alignment: .leading, spacing: 8) {
-                            Toggle("Smart downscale of images (max 1600px width/height)", isOn: $settings.reduceImageSize)
+                            Toggle("Smart downscale of images (max 2048px width/height)", isOn: $settings.reduceImageSize)
                                 .toggleStyle(.checkbox)
                                 .font(.body)
                                 .foregroundColor(.white)

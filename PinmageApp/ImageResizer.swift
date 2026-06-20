@@ -26,7 +26,7 @@ struct ImageResizer {
         }
         
         let properties: [CFString: Any] = [
-            kCGImageDestinationLossyCompressionQuality: 0.8
+            kCGImageDestinationLossyCompressionQuality: 0.95
         ]
         
         CGImageDestinationAddImage(destination, thumbnail, properties as CFDictionary)

@@ -1621,7 +1621,7 @@ struct ImagePreviewPopover: View {
                 Image(nsImage: img)
                     .resizable()
                     .scaledToFit()
-                    .frame(maxWidth: 400, maxHeight: 400)
+                    .frame(maxWidth: 800, maxHeight: 800)
                     .cornerRadius(8)
             } else {
                 VStack(spacing: 8) {

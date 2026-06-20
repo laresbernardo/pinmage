@@ -13,6 +13,7 @@ struct InteractiveMapEditorView: View {
     @State private var isReverseGeocoding = false
     @State private var mapCenterNeedUpdate = true
     @State private var thumbnail: NSImage? = nil
+    @State private var showingPreviewPopover = false
     
     init(item: ImageItem, manager: PinmageManager) {
         self.item = item
@@ -114,6 +115,14 @@ struct InteractiveMapEditorView: View {
                     }
                 }
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    showingPreviewPopover = true
+                }
+                .help("Click to enlarge")
+                .popover(isPresented: $showingPreviewPopover, arrowEdge: .top) {
+                    ImagePreviewPopover(fileURL: item.fileURL)
+                }
                 
                 // Coordinates and resolved place description
                 VStack(alignment: .leading, spacing: 4) {

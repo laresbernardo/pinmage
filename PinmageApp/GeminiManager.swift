@@ -75,7 +75,7 @@ class GeminiManager {
         var mimeType = getMimeType(for: fileURL)
         
         if reduceSize {
-            if let resizedData = ImageResizer.resizeImage(at: fileURL, maxDimension: 1600) {
+            if let resizedData = ImageResizer.resizeImage(at: fileURL, maxDimension: 2048) {
                 fileData = resizedData
                 mimeType = "image/jpeg" // resized returns JPEG
             } else {

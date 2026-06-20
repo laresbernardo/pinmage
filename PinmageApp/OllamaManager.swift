@@ -73,7 +73,7 @@ class OllamaManager {
     static func analyzeImage(fileURL: URL, modelName: String, prompt: String, processingMode: ProcessingMode, reduceSize: Bool = true) async throws -> AnalysisResponse {
         let fileData: Data
         if reduceSize {
-            if let resizedData = ImageResizer.resizeImage(at: fileURL, maxDimension: 1600) {
+            if let resizedData = ImageResizer.resizeImage(at: fileURL, maxDimension: 2048) {
                 fileData = resizedData
             } else {
                 guard let origData = try? Data(contentsOf: fileURL) else {
