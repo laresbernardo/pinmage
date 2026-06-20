@@ -11,6 +11,9 @@ struct SettingsView: View {
     @State private var ollamaModels: [OllamaManager.OllamaModelInfo] = []
     @State private var ollamaRunning = false
     @State private var isRefreshingOllama = false
+    @State private var newFavName = ""
+    @State private var newFavLat = ""
+    @State private var newFavLon = ""
     
     var body: some View {
         ScrollView {
@@ -298,6 +301,101 @@ struct SettingsView: View {
                                 .foregroundColor(.secondary)
                         }
                         
+                    }
+                    .padding(20)
+                }
+                .glassCardHoverEffect()
+                
+                // Favourite Places Settings
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "heart.fill")
+                                .font(.title3)
+                                .foregroundColor(.red)
+                            Text("Favourite Places")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                        }
+                        
+                        Divider().background(Color.white.opacity(0.1))
+                        
+                        if settings.favoritePlaces.isEmpty {
+                            Text("No favourite places saved yet. Add them here or pin them on the map.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        } else {
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(settings.favoritePlaces) { place in
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(place.name)
+                                                .font(.body)
+                                                .fontWeight(.medium)
+                                                .foregroundColor(.white)
+                                            Text(String(format: "%.6f, %.6f", place.latitude, place.longitude))
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
+                                        Spacer()
+                                        Button(action: {
+                                            settings.favoritePlaces.removeAll { $0.id == place.id }
+                                        }) {
+                                            Image(systemName: "trash")
+                                                .foregroundColor(.red)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                    .padding(.vertical, 6)
+                                    
+                                    if place != settings.favoritePlaces.last {
+                                        Divider().background(Color.white.opacity(0.05))
+                                    }
+                                }
+                            }
+                        }
+                        
+                        Divider().background(Color.white.opacity(0.1))
+                        
+                        // Add New Favourite Place directly
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Add Favourite Place")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .fontWeight(.semibold)
+                            
+                            HStack(spacing: 10) {
+                                TextField("Place Name", text: $newFavName)
+                                    .textFieldStyle(.roundedBorder)
+                                
+                                TextField("Latitude", text: $newFavLat)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 80)
+                                
+                                TextField("Longitude", text: $newFavLon)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 80)
+                                
+                                Button(action: {
+                                    guard !newFavName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                                    guard let lat = Double(newFavLat.trimmingCharacters(in: .whitespacesAndNewlines)),
+                                          let lon = Double(newFavLon.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
+                                    let newPlace = FavoritePlace(name: newFavName, latitude: lat, longitude: lon)
+                                    settings.favoritePlaces.append(newPlace)
+                                    newFavName = ""
+                                    newFavLat = ""
+                                    newFavLon = ""
+                                }) {
+                                    Image(systemName: "plus.circle.fill")
+                                        .font(.title3)
+                                        .foregroundColor(.cyan)
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(newFavName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                                          Double(newFavLat.trimmingCharacters(in: .whitespacesAndNewlines)) == nil || 
+                                          Double(newFavLon.trimmingCharacters(in: .whitespacesAndNewlines)) == nil)
+                            }
+                        }
                     }
                     .padding(20)
                 }

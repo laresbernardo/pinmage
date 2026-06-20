@@ -515,6 +515,7 @@ import MapKit
     ) async -> AnalysisUpdate {
         await manager.updateItemStatus(index: index, status: .processing, fileName: fileName)
         let itemStartTime = Date()
+        var actualStartTime = itemStartTime
         
         let hasExistingCoords = skipExistingCoordinates && existingLatitude != nil && existingLongitude != nil
         
@@ -535,6 +536,7 @@ import MapKit
         
         if geminiResult == nil {
             // Cache miss - Analyze with AI
+            actualStartTime = Date()
             await manager.updateItemStatus(index: index, status: .callingAPI)
             
             // Retry with exponential backoff
@@ -613,6 +615,9 @@ import MapKit
                 cachedResult.locationAnalyzed = (processingMode == .both || processingMode == .locationOnly)
                 CacheManager.shared.set(hash: hash, result: cachedResult)
             }
+        } else {
+            // Cache hit - Reset start time to measure geocoding (active work) only
+            actualStartTime = Date()
         }
         
         guard let result = geminiResult else {
@@ -624,7 +629,7 @@ import MapKit
                 latitude: nil,
                 longitude: nil,
                 geocodedPlace: nil,
-                processingDuration: Date().timeIntervalSince(itemStartTime)
+                processingDuration: Date().timeIntervalSince(actualStartTime)
             )
         }
         
@@ -669,7 +674,7 @@ import MapKit
             latitude: latitude,
             longitude: longitude,
             geocodedPlace: geocodedPlace,
-            processingDuration: Date().timeIntervalSince(itemStartTime)
+            processingDuration: Date().timeIntervalSince(actualStartTime)
         )
     }
     

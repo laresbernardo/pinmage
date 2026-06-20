@@ -104,7 +104,26 @@ enum FilenamePattern: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+struct FavoritePlace: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var name: String
+    var latitude: Double
+    var longitude: Double
+    
+    static func == (lhs: FavoritePlace, rhs: FavoritePlace) -> Bool {
+        lhs.id == rhs.id
+    }
+}
+
 @MainActor class AppSettings: ObservableObject {
+    @Published var favoritePlaces: [FavoritePlace] {
+        didSet {
+            if let encoded = try? JSONEncoder().encode(favoritePlaces) {
+                UserDefaults.standard.set(encoded, forKey: "pinmage_favorite_places")
+            }
+        }
+    }
+    
     @Published var apiKey: String {
         didSet {
             UserDefaults.standard.set(apiKey, forKey: "pinmage_api_key")
@@ -227,6 +246,13 @@ enum FilenamePattern: String, CaseIterable, Identifiable {
         
         let storedMode = UserDefaults.standard.string(forKey: "pinmage_processing_mode") ?? ""
         self.processingMode = ProcessingMode(rawValue: storedMode) ?? .both
+        
+        if let storedFavoritesData = UserDefaults.standard.data(forKey: "pinmage_favorite_places"),
+           let decoded = try? JSONDecoder().decode([FavoritePlace].self, from: storedFavoritesData) {
+            self.favoritePlaces = decoded
+        } else {
+            self.favoritePlaces = []
+        }
     }
 }
 

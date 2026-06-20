@@ -397,7 +397,7 @@ struct ProcessView: View {
             )
         }
         .sheet(item: $selectedMapItem) { item in
-            InteractiveMapEditorView(item: item, manager: manager)
+            InteractiveMapEditorView(item: item, manager: manager, settings: settings)
         }
     }
     
@@ -814,15 +814,15 @@ struct QueueRowView: View {
                                         )
                                     }) {
                                         HStack(spacing: 3) {
-                                            Image(systemName: "trash.fill")
+                                            Image(systemName: "arrow.counterclockwise")
                                                 .font(.system(size: 8))
-                                            Text("Remove")
+                                            Text("Restore")
                                                 .font(.system(size: 9, weight: .bold))
                                         }
-                                        .foregroundColor(.red)
+                                        .foregroundColor(.secondary)
                                         .padding(.horizontal, 6)
                                         .padding(.vertical, 2)
-                                        .background(Color.red.opacity(0.12))
+                                        .background(Color.white.opacity(0.08))
                                         .cornerRadius(4)
                                     }
                                     .buttonStyle(.plain)
@@ -926,15 +926,15 @@ struct QueueRowView: View {
                                         )
                                     }) {
                                         HStack(spacing: 3) {
-                                            Image(systemName: "trash.fill")
+                                            Image(systemName: "arrow.counterclockwise")
                                                 .font(.system(size: 8))
-                                            Text("Remove")
+                                            Text("Restore")
                                                 .font(.system(size: 9, weight: .bold))
                                         }
-                                        .foregroundColor(.red)
+                                        .foregroundColor(.secondary)
                                         .padding(.horizontal, 6)
                                         .padding(.vertical, 2)
-                                        .background(Color.red.opacity(0.12))
+                                        .background(Color.white.opacity(0.08))
                                         .cornerRadius(4)
                                     }
                                     .buttonStyle(.plain)
@@ -997,6 +997,11 @@ struct QueueRowView: View {
                                     .foregroundColor(.secondary)
                             }
                             
+                            // "Why?" popover for location explanation
+                            if let explanation = item.locationExplanation, !explanation.isEmpty, hasPlaceVal && !item.removeLocation {
+                                ExplanationWhyButton(title: "Location Explanation", explanation: explanation)
+                            }
+                            
                             if let certainty = item.locationCertainty, hasPlaceVal && !item.removeLocation {
                                 let isAbove = certainty >= settings.certaintyThreshold
                                 Text("\(certainty)%")
@@ -1006,11 +1011,6 @@ struct QueueRowView: View {
                                     .padding(.vertical, 1)
                                     .background((isAbove ? Color.cyan : Color.orange).opacity(0.15))
                                     .cornerRadius(3)
-                            }
-                            
-                            // "Why?" popover for location explanation
-                            if let explanation = item.locationExplanation, !explanation.isEmpty, hasPlaceVal && !item.removeLocation {
-                                ExplanationWhyButton(title: "Location Explanation", explanation: explanation)
                             }
                         }
                     }
@@ -1332,9 +1332,34 @@ struct EditMetadataPopover: View {
                         
                         if locationAction == 0 {
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("Place Name")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
+                                HStack {
+                                    Text("Place Name")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                    
+                                    if !settings.favoritePlaces.isEmpty {
+                                        Spacer()
+                                        Menu {
+                                            ForEach(settings.favoritePlaces) { fav in
+                                                Button(fav.name) {
+                                                    place = fav.name
+                                                    latitudeStr = String(format: "%.6f", fav.latitude)
+                                                    longitudeStr = String(format: "%.6f", fav.longitude)
+                                                    geocodedPlace = fav.name
+                                                }
+                                            }
+                                        } label: {
+                                            HStack(spacing: 3) {
+                                                Image(systemName: "heart.fill")
+                                                    .foregroundColor(.red)
+                                                    .font(.system(size: 9))
+                                                Text("Choose Favourite")
+                                                    .font(.caption2)
+                                            }
+                                        }
+                                        .menuStyle(.borderlessButton)
+                                    }
+                                }
                                 
                                 HStack {
                                     TextField("e.g. Eiffel Tower, Paris", text: $place)

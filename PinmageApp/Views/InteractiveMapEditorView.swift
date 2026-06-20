@@ -4,6 +4,7 @@ import MapKit
 struct InteractiveMapEditorView: View {
     let item: ImageItem
     @ObservedObject var manager: PinmageManager
+    @ObservedObject var settings: AppSettings
     @Environment(\.dismiss) var dismiss
     
     @State private var coordinate: CLLocationCoordinate2D?
@@ -15,9 +16,10 @@ struct InteractiveMapEditorView: View {
     @State private var thumbnail: NSImage? = nil
     @State private var showingPreviewPopover = false
     
-    init(item: ImageItem, manager: PinmageManager) {
+    init(item: ImageItem, manager: PinmageManager, settings: AppSettings) {
         self.item = item
         self.manager = manager
+        self.settings = settings
         
         let initialCoord: CLLocationCoordinate2D?
         if let lat = item.latitude ?? item.existingLatitude,
@@ -180,6 +182,34 @@ struct InteractiveMapEditorView: View {
                 
                 // Action Buttons
                 HStack(spacing: 12) {
+                    if let coord = coordinate {
+                        let isAlreadyFav = settings.favoritePlaces.contains { fav in
+                            abs(fav.latitude - coord.latitude) < 0.000001 &&
+                            abs(fav.longitude - coord.longitude) < 0.000001
+                        }
+                        
+                        Button(action: {
+                            if isAlreadyFav {
+                                settings.favoritePlaces.removeAll { fav in
+                                    abs(fav.latitude - coord.latitude) < 0.000001 &&
+                                    abs(fav.longitude - coord.longitude) < 0.000001
+                                }
+                            } else {
+                                let name = resolvedPlaceName.isEmpty ? "Pinned Location" : resolvedPlaceName
+                                let newFav = FavoritePlace(name: name, latitude: coord.latitude, longitude: coord.longitude)
+                                settings.favoritePlaces.append(newFav)
+                            }
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: isAlreadyFav ? "heart.fill" : "heart")
+                                Text(isAlreadyFav ? "In Favourites" : "Add to Favourites")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
+                        .tint(isAlreadyFav ? .red : .secondary)
+                    }
+                    
                     Button("Cancel") {
                         dismiss()
                     }
