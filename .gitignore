@@ -33,4 +33,5 @@ xcuserdata/
 *.cache
 .firebase/
 
-
+# Log Files
+*.log

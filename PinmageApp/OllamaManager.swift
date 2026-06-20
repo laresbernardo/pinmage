@@ -94,7 +94,8 @@ class OllamaManager {
         var requiredFields: [String] = []
         
         if processingMode == .both || processingMode == .dateOnly {
-            schemaProperties["date"] = OllamaProperty(type: "string", description: "Date in YYYY-MM-DD format (or partial YYYY-MM or YYYY if precise date is unknown), or null if totally unknown")
+            schemaProperties["date"] = OllamaProperty(type: "string", description: "The clean date in YYYY-MM-DD format (or partial YYYY-MM or YYYY if precise date is unknown), or null if totally unknown. Do NOT write explanations or extra words here.")
+            schemaProperties["dateExplanation"] = OllamaProperty(type: "string", description: "Optional explanation/reasoning of why this date was chosen. Keep it brief.")
             schemaProperties["dateCertainty"] = OllamaProperty(type: "integer", description: "Confidence/certainty of the date. CRITICAL: MUST be an integer between 0 and 100 ONLY. 0 if date is null. Values like 95, 80, 50 are valid. Values outside 0-100 are INVALID.")
             requiredFields.append(contentsOf: ["date", "dateCertainty"])
         }

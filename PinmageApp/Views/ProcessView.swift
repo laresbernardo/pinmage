@@ -11,8 +11,8 @@ struct ProcessView: View {
     @State private var showingBatchEdit = false
     
     @State private var selectedMapItem: ImageItem? = nil
-    @State private var isProcessingOptionsExpanded = true
-    @State private var isCertaintyPanelExpanded = true
+    @State private var isProcessingOptionsExpanded = false
+    @State private var isCertaintyPanelExpanded = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -101,6 +101,17 @@ struct ProcessView: View {
                 HStack(spacing: 10) {
                     if manager.isProcessing {
                         Button(action: {
+                            manager.pauseProcessing()
+                        }) {
+                            HStack {
+                                Image(systemName: "pause.circle.fill")
+                                Text("Pause")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+
+                        Button(action: {
                             manager.stopProcessing()
                         }) {
                             HStack {
@@ -125,8 +136,8 @@ struct ProcessView: View {
                             startAnalysisQueue()
                         }) {
                             HStack {
-                                Image(systemName: "sparkles")
-                                Text("Process")
+                                Image(systemName: manager.isPaused ? "play.circle.fill" : "sparkles")
+                                Text(manager.isPaused ? "Resume" : "Process")
                             }
                         }
                         .buttonStyle(.borderedProminent)
@@ -848,10 +859,12 @@ struct QueueRowView: View {
                                         Text("Pending...")
                                             .foregroundColor(.secondary)
                                     } else if let dateStr = item.detectedDateString, dateStr.lowercased() != "null", !dateStr.isEmpty {
-                                        Text(dateStr)
+                                        let displayStr = dateStr + (item.dateExplanation.map { " (\($0))" } ?? "")
+                                        Text(displayStr)
                                             .foregroundColor(.white.opacity(0.9))
                                     } else if let date = item.detectedDate {
-                                        Text(formattedDate(date))
+                                        let displayStr = formattedDate(date) + (item.dateExplanation.map { " (\($0))" } ?? "")
+                                        Text(displayStr)
                                             .foregroundColor(.white.opacity(0.9))
                                     } else {
                                         Text("—")
@@ -1164,8 +1177,8 @@ struct QueueRowView: View {
     
     private func formattedDate(_ date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .none
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd"
         return formatter.string(from: date)
     }
     

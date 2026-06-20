@@ -33,26 +33,29 @@ struct MainView: View {
             // Sidebar Layout
             VStack(alignment: .leading, spacing: 20) {
                 // Logo Section
-                HStack(spacing: 12) {
-                    if let appIcon = NSImage(named: "AppIcon") {
-                        Image(nsImage: appIcon)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 34, height: 34)
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("PINMAGE")
-                            .font(.system(.body, design: .rounded))
-                            .fontWeight(.black)
-                            .foregroundColor(.white)
-                        Text("AI Geo & Date Injector")
-                            .font(.system(size: 9))
-                            .foregroundColor(.secondary)
-                            .textCase(.uppercase)
+                Link(destination: URL(string: "https://pinmage.bervos.org")!) {
+                    HStack(spacing: 12) {
+                        if let appIcon = NSImage(named: "AppIcon") {
+                            Image(nsImage: appIcon)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 34, height: 34)
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("PINMAGE")
+                                .font(.system(.body, design: .rounded))
+                                .fontWeight(.black)
+                                .foregroundColor(.white)
+                            Text("AI Geo & Date Injector")
+                                .font(.system(size: 9))
+                                .foregroundColor(.secondary)
+                                .textCase(.uppercase)
+                        }
                     }
                 }
+                .buttonStyle(.plain)
                 .padding(.horizontal, 16)
                 .padding(.top, 24)
                 

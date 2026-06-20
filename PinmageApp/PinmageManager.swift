@@ -6,6 +6,7 @@ import MapKit
 @MainActor class PinmageManager: ObservableObject {
     @Published var imageItems: [ImageItem] = []
     @Published var isProcessing = false
+    @Published var isPaused = false
     @Published var currentProgress: Double = 0.0
     @Published var currentProcessingFile: String = ""
     
@@ -83,6 +84,9 @@ import MapKit
     
     func removeImage(id: UUID) {
         self.imageItems.removeAll { $0.id == id }
+        if self.imageItems.isEmpty {
+            self.isPaused = false
+        }
     }
     
     func clearAll() {
@@ -92,9 +96,16 @@ import MapKit
         self.totalProcessedCount = 0
         self.successfulCount = 0
         self.failedCount = 0
+        self.isPaused = false
     }
     
     func stopProcessing() {
+        self.isProcessing = false
+        self.isPaused = false
+    }
+    
+    func pauseProcessing() {
+        self.isPaused = true
         self.isProcessing = false
     }
     
@@ -155,6 +166,7 @@ import MapKit
     ) {
         if let index = imageItems.firstIndex(where: { $0.id == id }) {
             imageItems[index].detectedDate = date
+            imageItems[index].dateExplanation = nil
             imageItems[index].saveDate = saveDate && date != nil
             imageItems[index].removeDate = removeDate
             if let date = date {
@@ -189,10 +201,12 @@ import MapKit
             if removeDate {
                 imageItems[index].detectedDate = nil
                 imageItems[index].detectedDateString = nil
+                imageItems[index].dateExplanation = nil
                 imageItems[index].saveDate = false
                 imageItems[index].removeDate = true
             } else if saveDate {
                 imageItems[index].detectedDate = date
+                imageItems[index].dateExplanation = nil
                 imageItems[index].saveDate = date != nil
                 imageItems[index].removeDate = false
                 if let date = date {
@@ -268,6 +282,7 @@ import MapKit
         }
         
         self.isProcessing = true
+        self.isPaused = false
         self.totalProcessedCount = 0
         self.successfulCount = 0
         self.failedCount = 0
@@ -381,8 +396,12 @@ import MapKit
             self.batchDuration = Date().timeIntervalSince(start)
         }
         self.isProcessing = false
-        self.currentProgress = 1.0
-        self.currentProcessingFile = "Done"
+        if self.isPaused {
+            self.currentProcessingFile = "Paused"
+        } else {
+            self.currentProgress = 1.0
+            self.currentProcessingFile = "Done"
+        }
     }
     
     /// Reprocesses a single item directly, clearing its cache first.
@@ -391,6 +410,7 @@ import MapKit
         guard !isProcessing else { return }
         
         isProcessing = true
+        isPaused = false
         self.sessionSpend = 0.0
         
         let item = imageItems[index]
@@ -432,7 +452,11 @@ import MapKit
         self.applyUpdate(update, processingMode: processingMode, certaintyThreshold: settings.certaintyThreshold)
         
         self.isProcessing = false
-        self.currentProcessingFile = "Done"
+        if self.isPaused {
+            self.currentProcessingFile = "Paused"
+        } else {
+            self.currentProcessingFile = "Done"
+        }
     }
     
     /// Chronological date extrapolation: forward-fills dates from analyzed items to items with unknown dates.
@@ -647,19 +671,21 @@ import MapKit
             var parsedDate: Date? = nil
             var dateCertainty = min(max(result.dateCertainty ?? 0, 0), 100)
             var finalDateStr = result.date
+            var explanation: String? = result.dateExplanation
             
             if let dateStr = result.date, !dateStr.isEmpty, dateStr.lowercased() != "null" {
-                if let parseResult = parseDateAndCheckPartial(from: dateStr) {
+                if let parseResult = parseCleanDate(from: dateStr, explanationOut: &explanation) {
                     parsedDate = parseResult.date
+                    
+                    // Format back to YYYY-MM-DD always as a clean string representation for UI
+                    let outFormatter = DateFormatter()
+                    outFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+                    outFormatter.dateFormat = "yyyy-MM-dd"
+                    finalDateStr = outFormatter.string(from: parseResult.date)
+                    
                     if parseResult.isPartial {
                         // Cap certainty to 75% for partial dates (guessed days/months)
                         dateCertainty = min(dateCertainty, 75)
-                        
-                        // Format back to YYYY-MM-DD
-                        let outFormatter = DateFormatter()
-                        outFormatter.timeZone = TimeZone(secondsFromGMT: 0)
-                        outFormatter.dateFormat = "yyyy-MM-dd"
-                        finalDateStr = outFormatter.string(from: parseResult.date)
                     }
                 }
             }
@@ -669,12 +695,14 @@ import MapKit
             if processingMode == .both || processingMode == .dateOnly {
                 self.imageItems[index].detectedDate = parsedDate
                 self.imageItems[index].detectedDateString = finalDateStr
+                self.imageItems[index].dateExplanation = explanation
                 self.imageItems[index].dateCertainty = dateCertainty
                 self.imageItems[index].saveDate = parsedDate != nil && dateCertainty >= certaintyThreshold
                 self.imageItems[index].removeDate = false
             } else {
                 self.imageItems[index].detectedDate = nil
                 self.imageItems[index].detectedDateString = nil
+                self.imageItems[index].dateExplanation = nil
                 self.imageItems[index].dateCertainty = nil
                 self.imageItems[index].saveDate = false
                 self.imageItems[index].removeDate = false
@@ -850,6 +878,82 @@ import MapKit
     struct DateParseResult {
         let date: Date
         let isPartial: Bool
+    }
+    
+    private func parseCleanDate(from string: String, explanationOut: inout String?) -> DateParseResult? {
+        var cleanStr = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // 1. Extract explanation in parentheses if explanationOut is nil/empty
+        if (explanationOut == nil || explanationOut!.isEmpty),
+           let openParen = cleanStr.firstIndex(of: "("),
+           let closeParen = cleanStr.firstIndex(of: ")"),
+           openParen < closeParen {
+            let explanation = String(cleanStr[cleanStr.index(after: openParen)..<closeParen]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !explanation.isEmpty {
+                explanationOut = explanation
+            }
+            // Remove parentheses and their contents
+            cleanStr = cleanStr.replacingCharacters(in: openParen...closeParen, with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        
+        // Remove trailing hyphens, punctuation or separators that might remain from splitting descriptions
+        while cleanStr.hasSuffix("-") || cleanStr.hasSuffix("_") || cleanStr.hasSuffix(",") || cleanStr.hasSuffix(".") || cleanStr.hasSuffix(" ") {
+            cleanStr.removeLast()
+        }
+        cleanStr = cleanStr.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // 2. Try strict regex matching for YYYY-MM-DD
+        if let regex = try? NSRegularExpression(pattern: "\\b(\\d{4})-(\\d{2})-(\\d{2})\\b"),
+           let match = regex.firstMatch(in: cleanStr, options: [], range: NSRange(cleanStr.startIndex..<cleanStr.endIndex, in: cleanStr)) {
+            if let r = Range(match.range, in: cleanStr) {
+                let dateSubstring = String(cleanStr[r])
+                let formatter = DateFormatter()
+                formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                formatter.dateFormat = "yyyy-MM-dd"
+                if let date = formatter.date(from: dateSubstring) {
+                    return DateParseResult(date: date, isPartial: false)
+                }
+            }
+        }
+        
+        // 3. Try strict regex matching for YYYY-MM
+        if let regex = try? NSRegularExpression(pattern: "\\b(\\d{4})-(\\d{2})\\b"),
+           let match = regex.firstMatch(in: cleanStr, options: [], range: NSRange(cleanStr.startIndex..<cleanStr.endIndex, in: cleanStr)) {
+            if let r = Range(match.range, in: cleanStr) {
+                let dateSubstring = String(cleanStr[r])
+                let formatter = DateFormatter()
+                formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                formatter.dateFormat = "yyyy-MM"
+                if let date = formatter.date(from: dateSubstring) {
+                    return DateParseResult(date: date, isPartial: true)
+                }
+            }
+        }
+        
+        // 4. Try strict regex matching for YYYY
+        if let regex = try? NSRegularExpression(pattern: "\\b(\\d{4})\\b"),
+           let match = regex.firstMatch(in: cleanStr, options: [], range: NSRange(cleanStr.startIndex..<cleanStr.endIndex, in: cleanStr)) {
+            if let r = Range(match.range, in: cleanStr) {
+                let dateSubstring = String(cleanStr[r])
+                let formatter = DateFormatter()
+                formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                formatter.dateFormat = "yyyy"
+                if let date = formatter.date(from: dateSubstring) {
+                    return DateParseResult(date: date, isPartial: true)
+                }
+            }
+        }
+        
+        // 5. Try NSDataDetector for natural language dates (e.g. "January 9, 2000" or "Feb 18, 2000")
+        if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue) {
+            let range = NSRange(cleanStr.startIndex..<cleanStr.endIndex, in: cleanStr)
+            if let match = detector.firstMatch(in: cleanStr, options: [], range: range),
+               let date = match.date {
+                return DateParseResult(date: date, isPartial: false)
+            }
+        }
+        
+        return nil
     }
     
     private func parseDateAndCheckPartial(from string: String) -> DateParseResult? {

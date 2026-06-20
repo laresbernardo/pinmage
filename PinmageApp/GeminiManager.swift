@@ -3,6 +3,7 @@ import Foundation
 class GeminiManager {
     struct GeminiResult: Codable {
         var date: String?
+        var dateExplanation: String?
         var dateCertainty: Int?
         var place: String?
         var locationCertainty: Int?
@@ -98,7 +99,8 @@ class GeminiManager {
         var requiredFields: [String] = []
         
         if processingMode == .both || processingMode == .dateOnly {
-            schemaProperties["date"] = RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "Date in YYYY-MM-DD format (or partial YYYY-MM or YYYY if precise date is unknown), or null if totally unknown")
+            schemaProperties["date"] = RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "The clean date in YYYY-MM-DD format (or partial YYYY-MM or YYYY if precise date is unknown), or null if totally unknown. Do NOT include any explanations or parentheses here.")
+            schemaProperties["dateExplanation"] = RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "Optional explanation/reasoning of why this date was chosen (e.g. context clues, signs, written notes, clothing). Keep it brief.")
             schemaProperties["dateCertainty"] = RequestBody.GenerationConfig.Schema.Property(type: "INTEGER", description: "Confidence/certainty of the date. CRITICAL: MUST be an integer between 0 and 100 ONLY. 0 if date is null. Values like 95, 80, 50 are valid. Values outside 0-100 are INVALID.")
             requiredFields.append(contentsOf: ["date", "dateCertainty"])
         }
