@@ -6,6 +6,7 @@ class GeminiManager {
         var dateExplanation: String?
         var dateCertainty: Int?
         var place: String?
+        var locationExplanation: String?
         var locationCertainty: Int?
         var latitude: Double?
         var longitude: Double?
@@ -106,8 +107,11 @@ class GeminiManager {
         }
         
         if processingMode == .both || processingMode == .locationOnly {
-            schemaProperties["place"] = RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "Location name, landmark, city, country, or null if totally unknown")
+            schemaProperties["place"] = RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "The most specific recognizable place name identified in the image, followed by city and country. For example: 'Instituto Cumbres de Caracas, Caracas, Venezuela' rather than just 'Caracas'. Include the landmark/institution/building name when identifiable.")
+            schemaProperties["locationExplanation"] = RequestBody.GenerationConfig.Schema.Property(type: "STRING", description: "Explanation of why this location was chosen, what visual or textual clues were used to identify the place. Keep it brief. ONLY location-related reasoning, do NOT include date reasoning here.")
             schemaProperties["locationCertainty"] = RequestBody.GenerationConfig.Schema.Property(type: "INTEGER", description: "Confidence/certainty of the location/place. CRITICAL: MUST be an integer between 0 and 100 ONLY. 0 if place is null. Values like 95, 80, 50 are valid. Values outside 0-100 are INVALID.")
+            schemaProperties["latitude"] = RequestBody.GenerationConfig.Schema.Property(type: "NUMBER", description: "Approximate latitude of the identified location in decimal degrees (e.g. 10.4806). Only provide if you are reasonably confident about the location. Return null if unknown.")
+            schemaProperties["longitude"] = RequestBody.GenerationConfig.Schema.Property(type: "NUMBER", description: "Approximate longitude of the identified location in decimal degrees (e.g. -66.9036). Only provide if you are reasonably confident about the location. Return null if unknown.")
             requiredFields.append(contentsOf: ["place", "locationCertainty"])
         }
         

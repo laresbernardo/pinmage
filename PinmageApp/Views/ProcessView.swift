@@ -859,12 +859,10 @@ struct QueueRowView: View {
                                         Text("Pending...")
                                             .foregroundColor(.secondary)
                                     } else if let dateStr = item.detectedDateString, dateStr.lowercased() != "null", !dateStr.isEmpty {
-                                        let displayStr = dateStr + (item.dateExplanation.map { " (\($0))" } ?? "")
-                                        Text(displayStr)
+                                        Text(dateStr)
                                             .foregroundColor(.white.opacity(0.9))
                                     } else if let date = item.detectedDate {
-                                        let displayStr = formattedDate(date) + (item.dateExplanation.map { " (\($0))" } ?? "")
-                                        Text(displayStr)
+                                        Text(formattedDate(date))
                                             .foregroundColor(.white.opacity(0.9))
                                     } else {
                                         Text("—")
@@ -875,6 +873,11 @@ struct QueueRowView: View {
                             .buttonStyle(.plain)
                             .help("Click to edit date manually")
                             .disabled(item.status == .processing || item.status == .callingAPI || item.status == .geocoding || item.status == .writing)
+                            
+                            // "Why?" popover for date explanation
+                            if let explanation = item.dateExplanation, !explanation.isEmpty, hasVal && !item.removeDate {
+                                ExplanationWhyButton(title: "Date Explanation", explanation: explanation)
+                            }
                             
                             if item.dateIsInherited && !item.removeDate {
                                 Text("(Inherited)")
@@ -1003,6 +1006,11 @@ struct QueueRowView: View {
                                     .padding(.vertical, 1)
                                     .background((isAbove ? Color.cyan : Color.orange).opacity(0.15))
                                     .cornerRadius(3)
+                            }
+                            
+                            // "Why?" popover for location explanation
+                            if let explanation = item.locationExplanation, !explanation.isEmpty, hasPlaceVal && !item.removeLocation {
+                                ExplanationWhyButton(title: "Location Explanation", explanation: explanation)
                             }
                         }
                     }
@@ -1623,19 +1631,114 @@ struct BatchEditPopover: View {
         }
     }
 }
+struct ExplanationWhyButton: View {
+    let title: String
+    let explanation: String
+    @State private var showingPopover = false
+    
+    var body: some View {
+        Button(action: { showingPopover = true }) {
+            Text("Why?")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundColor(.purple)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Color.purple.opacity(0.12))
+                .cornerRadius(3)
+        }
+        .buttonStyle(.plain)
+        .help("Show AI reasoning")
+        .popover(isPresented: $showingPopover, arrowEdge: .trailing) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundColor(.white)
+                
+                Divider().background(Color.white.opacity(0.1))
+                
+                Text(explanation)
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.8))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            .frame(maxWidth: 320)
+            .padding(12)
+            .background(Color(NSColor.windowBackgroundColor))
+        }
+    }
+}
 
 struct ImagePreviewPopover: View {
     let fileURL: URL
     @State private var image: NSImage? = nil
+    @State private var zoomScale: CGFloat = 1.0
     
     var body: some View {
-        VStack {
+        VStack(spacing: 0) {
+            // Header with filename and zoom controls
+            HStack {
+                Text(fileURL.lastPathComponent)
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                
+                Spacer()
+                
+                HStack(spacing: 8) {
+                    Button(action: { withAnimation { zoomScale = max(0.25, zoomScale - 0.25) } }) {
+                        Image(systemName: "minus.magnifyingglass")
+                            .font(.system(size: 14))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Zoom out")
+                    
+                    Text("\(Int(zoomScale * 100))%")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .frame(width: 40, alignment: .center)
+                    
+                    Button(action: { withAnimation { zoomScale = min(5.0, zoomScale + 0.25) } }) {
+                        Image(systemName: "plus.magnifyingglass")
+                            .font(.system(size: 14))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Zoom in")
+                    
+                    Button(action: { withAnimation { zoomScale = 1.0 } }) {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Reset zoom")
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color(NSColor.windowBackgroundColor).opacity(0.95))
+            
+            Divider().background(Color.white.opacity(0.1))
+            
+            // Zoomable image area
             if let img = image {
-                Image(nsImage: img)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 800, maxHeight: 800)
-                    .cornerRadius(8)
+                ScrollView([.horizontal, .vertical]) {
+                    Image(nsImage: img)
+                        .resizable()
+                        .scaledToFit()
+                        .scaleEffect(zoomScale)
+                        .frame(
+                            width: min(img.size.width, 1200) * zoomScale,
+                            height: min(img.size.height, 900) * zoomScale
+                        )
+                }
+                .frame(
+                    maxWidth: min(max(img.size.width * zoomScale, 400), 1200),
+                    maxHeight: min(max(img.size.height * zoomScale, 300), 900)
+                )
+                .background(Color.black.opacity(0.85))
             } else {
                 VStack(spacing: 8) {
                     ProgressView()
@@ -1644,10 +1747,10 @@ struct ImagePreviewPopover: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-                .frame(width: 150, height: 150)
+                .frame(width: 300, height: 300)
+                .background(Color.black.opacity(0.85))
             }
         }
-        .padding(8)
         .background(Color(NSColor.windowBackgroundColor))
         .task {
             // Load large image asynchronously

@@ -648,6 +648,16 @@ import MapKit
                     longitude = geocoded.coordinate.longitude
                     geocodedPlace = geocoded.resolvedName
                 }
+                
+                // AI lat/lon as last-resort fallback when geocoding failed
+                if latitude == nil || longitude == nil {
+                    if let aiLat = result.latitude, let aiLon = result.longitude,
+                       GeocodingManager.isValidCoordinate(aiLat, aiLon) {
+                        latitude = aiLat
+                        longitude = aiLon
+                        print("Using AI-provided coordinates as last-resort fallback for '\(place)': (\(aiLat), \(aiLon))")
+                    }
+                }
             }
         }
         
@@ -710,6 +720,7 @@ import MapKit
             
             if processingMode == .both || processingMode == .locationOnly {
                 self.imageItems[index].detectedPlace = result.place
+                self.imageItems[index].locationExplanation = result.locationExplanation
                 self.imageItems[index].locationCertainty = locationCertainty
                 self.imageItems[index].latitude = update.latitude
                 self.imageItems[index].longitude = update.longitude
@@ -727,6 +738,7 @@ import MapKit
                 }
             } else {
                 self.imageItems[index].detectedPlace = nil
+                self.imageItems[index].locationExplanation = nil
                 self.imageItems[index].locationCertainty = nil
                 self.imageItems[index].latitude = nil
                 self.imageItems[index].longitude = nil
@@ -1041,6 +1053,7 @@ class GeocodingManager {
     private static var forwardCache: [String: GeocodedLocation] = [:]
     private static var reverseCache: [String: GeocodedLocation] = [:]
     private static let rateLimiter = GeocodingRateLimiter()
+    private static let nominatimRateLimiter = GeocodingRateLimiter(minimumInterval: 1.0) // Nominatim requires max 1 req/sec
 
     struct GeocodedLocation {
         let coordinate: CLLocationCoordinate2D
@@ -1067,7 +1080,7 @@ class GeocodingManager {
             .joined(separator: " ")
     }
 
-    private static func isValidCoordinate(_ latitude: Double, _ longitude: Double) -> Bool {
+    static func isValidCoordinate(_ latitude: Double, _ longitude: Double) -> Bool {
         guard latitude != 0 || longitude != 0 else { return false }
         guard latitude.isFinite, longitude.isFinite else { return false }
         guard latitude >= -90 && latitude <= 90 else { return false }
@@ -1103,7 +1116,62 @@ class GeocodingManager {
         return nil
     }
 
-    private static func performGeocode(address: String) async -> GeocodedLocation? {
+    // Nominatim response structure
+    private struct NominatimResult: Codable {
+        let lat: String
+        let lon: String
+        let displayName: String
+        
+        enum CodingKeys: String, CodingKey {
+            case lat, lon
+            case displayName = "display_name"
+        }
+    }
+    
+    /// Primary geocoder: OpenStreetMap Nominatim (free, accurate for specific places)
+    private static func performNominatimGeocode(address: String) async -> GeocodedLocation? {
+        guard let encoded = address.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "https://nominatim.openstreetmap.org/search?q=\(encoded)&format=json&limit=1") else {
+            return nil
+        }
+        
+        // Respect Nominatim rate limit (max 1 request/second)
+        await nominatimRateLimiter.throttle()
+        
+        var request = URLRequest(url: url)
+        request.setValue("PinmageApp/1.0 (laresbernardo@gmail.com)", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 10
+        
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                return nil
+            }
+            
+            let results = try JSONDecoder().decode([NominatimResult].self, from: data)
+            guard let first = results.first,
+                  let lat = Double(first.lat),
+                  let lon = Double(first.lon) else {
+                return nil
+            }
+            
+            guard isValidCoordinate(lat, lon) else {
+                print("Nominatim discarded invalid coordinates for '\(address)': (\(lat), \(lon))")
+                return nil
+            }
+            
+            return GeocodedLocation(
+                coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon),
+                resolvedName: first.displayName
+            )
+        } catch {
+            print("Nominatim geocoding error for '\(address)': \(error.localizedDescription)")
+            return nil
+        }
+    }
+    
+    /// Fallback geocoder: Apple CLGeocoder / MKGeocodingRequest
+    private static func performAppleGeocode(address: String) async -> GeocodedLocation? {
         for attempt in 1...3 {
             await rateLimiter.throttle()
 
@@ -1136,20 +1204,38 @@ class GeocodingManager {
                 }
 
                 guard isValidCoordinate(result.coordinate.latitude, result.coordinate.longitude) else {
-                    print("Geocoding discarded invalid coordinates for '\(address)': (\(result.coordinate.latitude), \(result.coordinate.longitude))")
+                    print("Apple geocoding discarded invalid coordinates for '\(address)': (\(result.coordinate.latitude), \(result.coordinate.longitude))")
                     return nil
                 }
 
                 await rateLimiter.recordSuccess()
                 return result
             } catch {
-                print("Geocoding error for '\(address)' (attempt \(attempt)): \(error.localizedDescription)")
+                print("Apple geocoding error for '\(address)' (attempt \(attempt)): \(error.localizedDescription)")
                 await rateLimiter.recordError()
                 if attempt < 3 {
                     try? await Task.sleep(nanoseconds: await rateLimiter.backoffDelay)
                 }
             }
         }
+        return nil
+    }
+
+    /// Cascading geocode: Nominatim (primary) → Apple (fallback)
+    private static func performGeocode(address: String) async -> GeocodedLocation? {
+        // 1. Try OpenStreetMap Nominatim first (most accurate for specific institutions/landmarks)
+        if let nominatimResult = await performNominatimGeocode(address: address) {
+            print("Nominatim geocoded '\(address)' → (\(nominatimResult.coordinate.latitude), \(nominatimResult.coordinate.longitude))")
+            return nominatimResult
+        }
+        
+        // 2. Fall back to Apple geocoding
+        print("Nominatim returned no results for '\(address)', falling back to Apple geocoding...")
+        if let appleResult = await performAppleGeocode(address: address) {
+            print("Apple geocoded '\(address)' → (\(appleResult.coordinate.latitude), \(appleResult.coordinate.longitude))")
+            return appleResult
+        }
+        
         return nil
     }
 
@@ -1211,7 +1297,11 @@ class GeocodingManager {
 private actor GeocodingRateLimiter {
     private var lastRequest: Date = .distantPast
     private var errorCount = 0
-    let minimumInterval: TimeInterval = 0.3
+    let minimumInterval: TimeInterval
+    
+    init(minimumInterval: TimeInterval = 0.3) {
+        self.minimumInterval = minimumInterval
+    }
 
     func throttle() async {
         let elapsed = Date().timeIntervalSince(lastRequest)
