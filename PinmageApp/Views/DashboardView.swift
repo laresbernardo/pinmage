@@ -407,7 +407,7 @@ struct EmptyDashboardView: View {
                 .fontWeight(.medium)
                 .foregroundColor(.secondary)
             
-            Text("Go to the Process Queue tab, import photo albums or scans, and run AI processing to generate analytics charts and location maps.")
+            Text("Go to the Queue tab, import photo albums or scans, and run AI processing to generate analytics charts and location maps.")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)

@@ -1,16 +1,16 @@
 import SwiftUI
 
 enum ActiveTab: String, CaseIterable, Identifiable {
+    case processQueue = "Queue"
     case dashboard = "Dashboard"
-    case processQueue = "Process Queue"
     case settings = "Settings"
     
     var id: String { rawValue }
     
     var iconName: String {
         switch self {
-        case .dashboard: return "chart.bar.fill"
         case .processQueue: return "square.and.arrow.down.on.square.fill"
+        case .dashboard: return "chart.bar.fill"
         case .settings: return "gearshape.fill"
         }
     }

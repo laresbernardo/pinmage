@@ -19,7 +19,7 @@ struct ProcessView: View {
             // Processing Header / Actions Panel
             HStack(spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Import & Process Queue")
+                    Text("Import & Queue")
                         .font(.system(.title, design: .rounded))
                         .fontWeight(.bold)
                         .foregroundColor(.white)
@@ -49,8 +49,8 @@ struct ProcessView: View {
                             }
                         }
                         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
-                            if manager.isProcessing {
-                                elapsedTime += 1
+                            if manager.isProcessing, let start = manager.batchStartTime {
+                                elapsedTime = Date().timeIntervalSince(start)
                             }
                         }
                     } else {
@@ -383,6 +383,13 @@ struct ProcessView: View {
         .background(isDraggingOver ? Color.cyan.opacity(0.05) : Color.clear)
         .onChange(of: manager.isProcessing) { _, newValue in
             if newValue {
+                elapsedTime = 0
+            }
+        }
+        .onAppear {
+            if let start = manager.batchStartTime {
+                elapsedTime = Date().timeIntervalSince(start)
+            } else {
                 elapsedTime = 0
             }
         }

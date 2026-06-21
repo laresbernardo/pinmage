@@ -200,14 +200,12 @@ struct InteractiveMapEditorView: View {
                                 settings.favoritePlaces.append(newFav)
                             }
                         }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: isAlreadyFav ? "heart.fill" : "heart")
-                                Text(isAlreadyFav ? "In Favourites" : "Add to Favourites")
-                            }
+                            Image(systemName: isAlreadyFav ? "heart.fill" : "heart")
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.large)
                         .tint(isAlreadyFav ? .red : .secondary)
+                        .help(isAlreadyFav ? "Remove from Favourites" : "Add to Favourites")
                     }
                     
                     Button("Cancel") {

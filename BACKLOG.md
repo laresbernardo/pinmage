@@ -1,4 +1,3 @@
-- Add a one time only payment method of $4.99 with no subscription using stripe.
 - Enable as a plugin for Photos app so user can edit single photos with the same friendly UI.
 - To perform single or bulk operations directly to Photos library, utilizing the PHPhotoLibrary framework to iterate through a collection of PHAsset objects, process them, and commit changes to the library in a single transaction.
-- Mention this app is unlimited with your own Gemini API Key or local ollama installation.
+- Enable a one time only payment method of $9.99 with no subscription using stripe.

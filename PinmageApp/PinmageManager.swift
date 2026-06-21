@@ -17,7 +17,7 @@ import MapKit
     @Published var batchDuration: TimeInterval? = nil
     
     private var cancellables = Set<AnyCancellable>()
-    private var batchStartTime: Date? = nil
+    @Published var batchStartTime: Date? = nil
     
     // Supported extensions
     private let supportedExtensions = ["jpg", "jpeg", "png", "heic", "heif", "webp", "gif"]
@@ -774,6 +774,8 @@ import MapKit
         self.successfulCount = 0
         self.failedCount = 0
         self.currentProgress = 0.0
+        self.batchDuration = nil
+        self.batchStartTime = Date()
         
         let itemsToProcessIndices = imageItems.indices.filter { imageItems[$0].status == .analyzed }
         
@@ -813,6 +815,9 @@ import MapKit
             self.totalProcessedCount += 1
         }
         
+        if let start = self.batchStartTime {
+            self.batchDuration = Date().timeIntervalSince(start)
+        }
         self.isProcessing = false
         self.currentProgress = 1.0
         self.currentProcessingFile = "Done"

@@ -14,6 +14,10 @@ struct SettingsView: View {
     @State private var newFavName = ""
     @State private var newFavLat = ""
     @State private var newFavLon = ""
+    @State private var editingPlaceId: UUID? = nil
+    @State private var editingName = ""
+    @State private var editingLatitudeString = ""
+    @State private var editingLongitudeString = ""
     
     var body: some View {
         ScrollView {
@@ -316,6 +320,24 @@ struct SettingsView: View {
                             Text("Favourite Places")
                                 .font(.headline)
                                 .foregroundColor(.white)
+                            
+                            Spacer()
+                            
+                            if !settings.favoritePlaces.isEmpty {
+                                Button(action: {
+                                    settings.favoritePlaces.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                                }) {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "arrow.up.arrow.down")
+                                            .font(.caption)
+                                        Text("Sort A-Z")
+                                            .font(.caption2)
+                                    }
+                                    .foregroundColor(.cyan)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Sort Alphabetically")
+                            }
                         }
                         
                         Divider().background(Color.white.opacity(0.1))
@@ -327,29 +349,132 @@ struct SettingsView: View {
                         } else {
                             VStack(alignment: .leading, spacing: 0) {
                                 ForEach(settings.favoritePlaces) { place in
-                                    HStack {
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(place.name)
-                                                .font(.body)
-                                                .fontWeight(.medium)
-                                                .foregroundColor(.white)
-                                            Text(String(format: "%.6f, %.6f", place.latitude, place.longitude))
-                                                .font(.caption)
-                                                .foregroundColor(.secondary)
+                                    if let idx = settings.favoritePlaces.firstIndex(where: { $0.id == place.id }) {
+                                        if editingPlaceId == place.id {
+                                            // Edit Mode
+                                            HStack(alignment: .center) {
+                                                VStack(alignment: .leading, spacing: 6) {
+                                                    TextField("Place Name", text: $editingName)
+                                                        .textFieldStyle(.roundedBorder)
+                                                        .font(.body)
+                                                        .foregroundColor(.white)
+                                                    
+                                                    HStack(spacing: 8) {
+                                                        TextField("Latitude", text: $editingLatitudeString)
+                                                            .textFieldStyle(.roundedBorder)
+                                                            .font(.caption)
+                                                            .frame(width: 100)
+                                                        
+                                                        TextField("Longitude", text: $editingLongitudeString)
+                                                            .textFieldStyle(.roundedBorder)
+                                                            .font(.caption)
+                                                            .frame(width: 100)
+                                                    }
+                                                }
+                                                
+                                                Spacer()
+                                                
+                                                HStack(spacing: 12) {
+                                                    Button(action: {
+                                                        editingPlaceId = nil
+                                                    }) {
+                                                        Image(systemName: "xmark.circle.fill")
+                                                            .foregroundColor(.secondary)
+                                                            .font(.title3)
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                    .help("Cancel")
+                                                    
+                                                    Button(action: {
+                                                        guard !editingName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                                                        guard let lat = Double(editingLatitudeString.trimmingCharacters(in: .whitespacesAndNewlines)),
+                                                              let lon = Double(editingLongitudeString.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
+                                                        
+                                                        settings.favoritePlaces[idx].name = editingName
+                                                        settings.favoritePlaces[idx].latitude = lat
+                                                        settings.favoritePlaces[idx].longitude = lon
+                                                        editingPlaceId = nil
+                                                    }) {
+                                                        Image(systemName: "checkmark.circle.fill")
+                                                            .foregroundColor(.green)
+                                                            .font(.title3)
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                    .disabled(editingName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                                                              Double(editingLatitudeString.trimmingCharacters(in: .whitespacesAndNewlines)) == nil ||
+                                                              Double(editingLongitudeString.trimmingCharacters(in: .whitespacesAndNewlines)) == nil)
+                                                    .help("Save Changes")
+                                                }
+                                            }
+                                            .padding(.vertical, 8)
+                                        } else {
+                                            // View Mode
+                                            HStack {
+                                                VStack(alignment: .leading, spacing: 2) {
+                                                    Text(place.name)
+                                                        .font(.body)
+                                                        .fontWeight(.medium)
+                                                        .foregroundColor(.white)
+                                                    
+                                                    Text(String(format: "%.6f, %.6f", place.latitude, place.longitude))
+                                                        .font(.caption)
+                                                        .foregroundColor(.secondary)
+                                                }
+                                                Spacer()
+                                                
+                                                HStack(spacing: 16) {
+                                                    Button(action: {
+                                                        if idx > 0 {
+                                                            settings.favoritePlaces.swapAt(idx, idx - 1)
+                                                        }
+                                                    }) {
+                                                        Image(systemName: "chevron.up")
+                                                            .foregroundColor(.secondary)
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                    .disabled(idx == 0)
+                                                    .help("Move Up")
+                                                    
+                                                    Button(action: {
+                                                        if idx < settings.favoritePlaces.count - 1 {
+                                                            settings.favoritePlaces.swapAt(idx, idx + 1)
+                                                        }
+                                                    }) {
+                                                        Image(systemName: "chevron.down")
+                                                            .foregroundColor(.secondary)
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                    .disabled(idx == settings.favoritePlaces.count - 1)
+                                                    .help("Move Down")
+
+                                                    Button(action: {
+                                                        editingPlaceId = place.id
+                                                        editingName = place.name
+                                                        editingLatitudeString = String(format: "%.6f", place.latitude)
+                                                        editingLongitudeString = String(format: "%.6f", place.longitude)
+                                                    }) {
+                                                        Image(systemName: "pencil")
+                                                            .foregroundColor(.secondary)
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                    .help("Edit Place")
+                                                    
+                                                    Button(action: {
+                                                        settings.favoritePlaces.removeAll { $0.id == place.id }
+                                                    }) {
+                                                        Image(systemName: "trash")
+                                                            .foregroundColor(.red)
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                    .help("Delete Place")
+                                                }
+                                            }
+                                            .padding(.vertical, 6)
                                         }
-                                        Spacer()
-                                        Button(action: {
-                                            settings.favoritePlaces.removeAll { $0.id == place.id }
-                                        }) {
-                                            Image(systemName: "trash")
-                                                .foregroundColor(.red)
+                                        
+                                        if place != settings.favoritePlaces.last {
+                                            Divider().background(Color.white.opacity(0.05))
                                         }
-                                        .buttonStyle(.plain)
-                                    }
-                                    .padding(.vertical, 6)
-                                    
-                                    if place != settings.favoritePlaces.last {
-                                        Divider().background(Color.white.opacity(0.05))
                                     }
                                 }
                             }
