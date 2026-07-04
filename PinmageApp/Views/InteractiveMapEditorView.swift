@@ -208,6 +208,22 @@ struct InteractiveMapEditorView: View {
                         .help(isAlreadyFav ? "Remove from Favourites" : "Add to Favourites")
                     }
                     
+                    if coordinate != nil || item.latitude != nil || item.longitude != nil || item.existingLatitude != nil || item.existingLongitude != nil {
+                        Button(action: {
+                            removeLocationFromPhoto()
+                            dismiss()
+                        }) {
+                            HStack {
+                                Image(systemName: "mappin.slash")
+                                Text("Remove Location")
+                            }
+                            .foregroundColor(.red)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
+                        .help("Remove location metadata from this photo")
+                    }
+                    
                     Button("Cancel") {
                         dismiss()
                     }
@@ -316,6 +332,21 @@ struct InteractiveMapEditorView: View {
             latitude: coord.latitude,
             longitude: coord.longitude,
             geocodedPlace: resolvedPlaceName
+        )
+    }
+    
+    private func removeLocationFromPhoto() {
+        manager.updateItemMetadata(
+            id: item.id,
+            date: item.detectedDate,
+            saveDate: item.saveDate,
+            removeDate: item.removeDate,
+            place: nil,
+            saveLocation: false,
+            removeLocation: true,
+            latitude: nil,
+            longitude: nil,
+            geocodedPlace: nil
         )
     }
 }

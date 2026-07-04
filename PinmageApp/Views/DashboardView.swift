@@ -5,6 +5,9 @@ import AppKit
 
 struct DashboardView: View {
     @ObservedObject var manager: PinmageManager
+    @ObservedObject var settings: AppSettings
+    
+    @State private var selectedMapItem: ImageItem? = nil
     
     // Map state
     @State private var region = MKCoordinateRegion(
@@ -40,117 +43,6 @@ struct DashboardView: View {
                         StatCard(title: "Processed", value: "\(manager.totalProcessedCount)", icon: "arrow.triangle.2.circlepath", color: .orange)
                         StatCard(title: "Successful", value: "\(manager.successfulCount)", icon: "checkmark.circle", color: .emerald)
                         StatCard(title: "Geocoded", value: "\(geocodedCount)", icon: "mappin.and.ellipse", color: .purple)
-                    }
-                    
-                    HStack(alignment: .top, spacing: 16) {
-                        // Chronological Timeline Chart
-                        GlassCard {
-                            VStack(alignment: .leading, spacing: 12) {
-                                Text("Timeline Distribution")
-                                    .font(.headline)
-                                    .foregroundColor(.white)
-                                Text("Frequency of photos mapped across years")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                
-                                Divider().background(Color.white.opacity(0.1))
-                                
-                                if timelineData.isEmpty {
-                                    VStack {
-                                        Spacer()
-                                        Text("No date information available yet")
-                                            .foregroundColor(.secondary)
-                                        Spacer()
-                                    }
-                                    .frame(height: 200)
-                                    .frame(maxWidth: .infinity)
-                                } else {
-                                    Chart {
-                                        ForEach(timelineData) { data in
-                                            BarMark(
-                                                x: .value("Year", data.year),
-                                                y: .value("Count", data.count)
-                                            )
-                                            .foregroundStyle(LinearGradient(colors: [.indigo, .cyan], startPoint: .bottom, endPoint: .top))
-                                            .cornerRadius(4)
-                                        }
-                                    }
-                                    .frame(height: 200)
-                                    .chartXAxis {
-                                        AxisMarks(values: .automatic) { _ in
-                                            AxisGridLine().foregroundStyle(Color.white.opacity(0.05))
-                                            AxisTick().foregroundStyle(Color.white.opacity(0.1))
-                                            AxisValueLabel().foregroundStyle(.secondary)
-                                        }
-                                    }
-                                    .chartYAxis {
-                                        AxisMarks(values: .automatic) { _ in
-                                            AxisGridLine().foregroundStyle(Color.white.opacity(0.05))
-                                            AxisTick().foregroundStyle(Color.white.opacity(0.1))
-                                            AxisValueLabel().foregroundStyle(.secondary)
-                                        }
-                                    }
-                                }
-                            }
-                            .padding(20)
-                        }
-                        .glassCardHoverEffect()
-                        
-                        // Top Locations Table
-                        GlassCard {
-                            VStack(alignment: .leading, spacing: 12) {
-                                Text("Top Locations")
-                                    .font(.headline)
-                                    .foregroundColor(.white)
-                                Text("Most frequent places identified by Gemini")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                
-                                Divider().background(Color.white.opacity(0.1))
-                                
-                                if locationData.isEmpty {
-                                    VStack {
-                                        Spacer()
-                                        Text("No location information available yet")
-                                            .foregroundColor(.secondary)
-                                        Spacer()
-                                    }
-                                    .frame(height: 200)
-                                    .frame(maxWidth: .infinity)
-                                } else {
-                                    VStack(spacing: 8) {
-                                        ForEach(locationData.prefix(5)) { loc in
-                                            HStack {
-                                                Image(systemName: "mappin.circle.fill")
-                                                    .foregroundColor(.cyan)
-                                                let query = loc.place.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? loc.place
-                                                Button(loc.place) {
-                                                    NSWorkspace.shared.open(URL(string: "https://www.google.com/maps/search/?api=1&query=\(query)")!)
-                                                }
-                                                .buttonStyle(.plain)
-                                                .foregroundColor(.white)
-                                                .lineLimit(1)
-                                                .help("Open in Google Maps")
-                                                Spacer()
-                                                Text("\(loc.count) photos")
-                                                    .font(.caption)
-                                                    .foregroundColor(.secondary)
-                                                    .padding(.horizontal, 8)
-                                                    .padding(.vertical, 2)
-                                                    .background(Color.white.opacity(0.05))
-                                                    .cornerRadius(4)
-                                            }
-                                            Divider().background(Color.white.opacity(0.03))
-                                        }
-                                        Spacer()
-                                    }
-                                    .frame(height: 200)
-                                }
-                            }
-                            .padding(20)
-                        }
-                        .glassCardHoverEffect()
-                        .frame(width: 320)
                     }
                     
                     // Interactive Places Map
@@ -207,6 +99,9 @@ struct DashboardView: View {
                                                                 .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
                                                         )
                                                 }
+                                                .onTapGesture {
+                                                    selectedMapItem = item.item
+                                                }
                                             }
                                         }
                                     }
@@ -240,6 +135,9 @@ struct DashboardView: View {
                                                             .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
                                                     )
                                             }
+                                            .onTapGesture {
+                                                selectedMapItem = item.item
+                                            }
                                         }
                                     }
                                     .frame(height: 300)
@@ -257,9 +155,124 @@ struct DashboardView: View {
                         .padding(20)
                     }
                     .glassCardHoverEffect()
+                    
+                    HStack(alignment: .top, spacing: 16) {
+                        // Chronological Timeline Chart
+                        GlassCard {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("Timeline Distribution")
+                                    .font(.headline)
+                                    .foregroundColor(.white)
+                                Text("Frequency of photos mapped across years")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                
+                                Divider().background(Color.white.opacity(0.1))
+                                
+                                if timelineData.isEmpty {
+                                    VStack {
+                                        Spacer()
+                                        Text("No date information available yet")
+                                            .foregroundColor(.secondary)
+                                        Spacer()
+                                    }
+                                    .frame(height: 200)
+                                    .frame(maxWidth: .infinity)
+                                } else {
+                                    Chart {
+                                        ForEach(timelineData) { data in
+                                            BarMark(
+                                                x: .value("Year", data.year),
+                                                y: .value("Count", data.count)
+                                            )
+                                            .foregroundStyle(LinearGradient(colors: [.indigo, .cyan], startPoint: .bottom, endPoint: .top))
+                                            .cornerRadius(4)
+                                        }
+                                    }
+                                    .frame(height: 200)
+                                    .chartXAxis {
+                                        AxisMarks(values: .automatic) { _ in
+                                            AxisGridLine().foregroundStyle(Color.white.opacity(0.05))
+                                            AxisTick().foregroundStyle(Color.white.opacity(0.1))
+                                            AxisValueLabel().foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .chartYAxis {
+                                        AxisMarks(values: .automatic) { _ in
+                                            AxisGridLine().foregroundStyle(Color.white.opacity(0.05))
+                                            AxisTick().foregroundStyle(Color.white.opacity(0.1))
+                                            AxisValueLabel().foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
+                            }
+                            .padding(20)
+                        }
+                        .glassCardHoverEffect()
+                        .frame(maxWidth: .infinity)
+                        
+                        // Top Locations Table
+                        GlassCard {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("Top Locations")
+                                    .font(.headline)
+                                    .foregroundColor(.white)
+                                Text("Most frequent places identified by Gemini")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                
+                                Divider().background(Color.white.opacity(0.1))
+                                
+                                if locationData.isEmpty {
+                                    VStack {
+                                        Spacer()
+                                        Text("No location information available yet")
+                                            .foregroundColor(.secondary)
+                                        Spacer()
+                                    }
+                                    .frame(height: 200)
+                                    .frame(maxWidth: .infinity)
+                                } else {
+                                    VStack(spacing: 8) {
+                                        ForEach(locationData.prefix(5)) { loc in
+                                            HStack {
+                                                Image(systemName: "mappin.circle.fill")
+                                                    .foregroundColor(.cyan)
+                                                let query = loc.place.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? loc.place
+                                                Button(loc.place) {
+                                                    NSWorkspace.shared.open(URL(string: "https://www.google.com/maps/search/?api=1&query=\(query)")!)
+                                                }
+                                                .buttonStyle(.plain)
+                                                .foregroundColor(.white)
+                                                .lineLimit(1)
+                                                .help("Open in Google Maps")
+                                                Spacer()
+                                                Text("\(loc.count) photos")
+                                                    .font(.caption)
+                                                    .foregroundColor(.secondary)
+                                                    .padding(.horizontal, 8)
+                                                    .padding(.vertical, 2)
+                                                    .background(Color.white.opacity(0.05))
+                                                    .cornerRadius(4)
+                                            }
+                                            Divider().background(Color.white.opacity(0.03))
+                                        }
+                                        Spacer()
+                                    }
+                                    .frame(height: 200)
+                                }
+                            }
+                            .padding(20)
+                        }
+                        .glassCardHoverEffect()
+                        .frame(maxWidth: .infinity)
+                    }
                 }
             }
             .padding(24)
+        }
+        .sheet(item: $selectedMapItem) { item in
+            InteractiveMapEditorView(item: item, manager: manager, settings: settings)
         }
     }
     
@@ -310,17 +323,20 @@ struct DashboardView: View {
     }
     
     struct MapPinItem: Identifiable {
-        let id = UUID()
+        let id: UUID
         let coordinate: CLLocationCoordinate2D
         let title: String
+        let item: ImageItem
     }
     
     private var mapAnnotations: [MapPinItem] {
         manager.imageItems.compactMap { item in
             guard let lat = item.latitude, let lon = item.longitude else { return nil }
             return MapPinItem(
+                id: item.id,
                 coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon),
-                title: item.fileName
+                title: item.fileName,
+                item: item
             )
         }
     }

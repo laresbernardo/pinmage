@@ -137,10 +137,10 @@ struct MainView: View {
                 
                 switch activeTab {
                 case .dashboard:
-                    DashboardView(manager: manager)
+                    DashboardView(manager: manager, settings: settings)
                         .transition(.opacity)
                 case .processQueue:
-                    ProcessView(manager: manager, settings: settings)
+                    ProcessView(manager: manager, settings: settings, activeTab: $activeTab)
                         .transition(.opacity)
                 case .settings:
                     SettingsView(settings: settings)

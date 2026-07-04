@@ -4,6 +4,7 @@ import AppKit
 struct ProcessView: View {
     @ObservedObject var manager: PinmageManager
     @ObservedObject var settings: AppSettings
+    @Binding var activeTab: ActiveTab
     @State private var isDraggingOver = false
     @State private var showOverwriteAlert = false
     @State private var elapsedTime: TimeInterval = 0
@@ -55,9 +56,31 @@ struct ProcessView: View {
                         }
                     } else {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("\(manager.imageItems.count) files in queue | \(manager.successfulCount) completed, \(manager.failedCount) failed")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
+                            HStack(spacing: 12) {
+                                Text("\(manager.imageItems.count) files in queue | \(manager.successfulCount) completed, \(manager.failedCount) failed")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                                
+                                if manager.successfulCount > 0 || manager.imageItems.contains(where: { $0.status == .analyzed || $0.status == .completed }) {
+                                    Button(action: {
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                                            activeTab = .dashboard
+                                        }
+                                    }) {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "chart.bar.fill")
+                                            Text("Check Results")
+                                        }
+                                        .font(.system(size: 11, weight: .bold))
+                                        .foregroundColor(.cyan)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 3)
+                                        .background(Color.cyan.opacity(0.15))
+                                        .cornerRadius(4)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
                             
                             HStack(spacing: 12) {
                                 if !manager.imageItems.isEmpty {
