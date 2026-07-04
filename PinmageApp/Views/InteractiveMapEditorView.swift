@@ -177,6 +177,7 @@ struct InteractiveMapEditorView: View {
                         }
                     }
                 }
+                .frame(maxWidth: 240, alignment: .leading)
                 
                 Spacer()
                 
@@ -206,6 +207,7 @@ struct InteractiveMapEditorView: View {
                         .controlSize(.large)
                         .tint(isAlreadyFav ? .red : .secondary)
                         .help(isAlreadyFav ? "Remove from Favourites" : "Add to Favourites")
+                        .fixedSize(horizontal: true, vertical: false)
                     }
                     
                     if coordinate != nil || item.latitude != nil || item.longitude != nil || item.existingLatitude != nil || item.existingLongitude != nil {
@@ -221,6 +223,7 @@ struct InteractiveMapEditorView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.large)
+                        .fixedSize(horizontal: true, vertical: false)
                         .help("Remove location metadata from this photo")
                     }
                     
@@ -229,6 +232,7 @@ struct InteractiveMapEditorView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.large)
+                    .fixedSize(horizontal: true, vertical: false)
                     
                     Button("Save Location") {
                         saveLocation()
@@ -238,6 +242,7 @@ struct InteractiveMapEditorView: View {
                     .tint(.cyan)
                     .controlSize(.large)
                     .disabled(coordinate == nil)
+                    .fixedSize(horizontal: true, vertical: false)
                 }
             }
             .padding(20)
