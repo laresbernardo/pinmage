@@ -648,6 +648,15 @@ struct SettingsView: View {
                     Text("When enabled, images without a detected date will inherit the last known date from the previous image in the sorted list. You can re-apply this at any time from the Process view.")
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
+                    
+                    Toggle("Extrapolate coordinates forward for unknown locations", isOn: $settings.extrapolateCoordinates)
+                        .toggleStyle(.checkbox)
+                        .font(.body)
+                        .foregroundColor(.white)
+                    
+                    Text("When enabled, images without a detected location will inherit the last known coordinates and place name from the previous image. You can re-apply this at any time from the Process view.")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
                 }
             }
             .padding(20)

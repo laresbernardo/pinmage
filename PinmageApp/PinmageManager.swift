@@ -387,9 +387,12 @@ import MapKit
             }
         }
         
-        // Phase 1b: Chronological date extrapolation (off by default)
+        // Phase 1b: Chronological date and location extrapolation (off by default)
         if settings.extrapolateDates {
             applyDateExtrapolation(threshold: settings.certaintyThreshold)
+        }
+        if settings.extrapolateCoordinates {
+            applyLocationExtrapolation(threshold: settings.certaintyThreshold)
         }
         
         if let start = self.batchStartTime {
@@ -491,6 +494,78 @@ import MapKit
                         }
                     }
                 }
+            }
+        }
+    }
+    
+    func clearDateExtrapolation() {
+        for index in 0..<self.imageItems.count {
+            if self.imageItems[index].dateIsInherited {
+                self.imageItems[index].detectedDate = nil
+                self.imageItems[index].detectedDateString = nil
+                self.imageItems[index].dateCertainty = nil
+                self.imageItems[index].saveDate = false
+                self.imageItems[index].dateIsInherited = false
+            }
+        }
+    }
+    
+    func applyLocationExtrapolation(threshold: Int? = nil) {
+        var lastKnownLat: Double? = nil
+        var lastKnownLon: Double? = nil
+        var lastKnownPlace: String? = nil
+        var lastKnownGeocodedPlace: String? = nil
+        var lastKnownCertainty: Int? = nil
+        
+        for item in self.imageItems {
+            if (item.status == .analyzed || item.status == .completed) && !item.locationIsInherited {
+                if let lat = item.latitude, let lon = item.longitude {
+                    lastKnownLat = lat
+                    lastKnownLon = lon
+                    lastKnownPlace = item.detectedPlace
+                    lastKnownGeocodedPlace = item.geocodedPlace
+                    lastKnownCertainty = item.locationCertainty
+                }
+            }
+        }
+        
+        for index in 0..<self.imageItems.count {
+            let item = self.imageItems[index]
+            if item.status == .analyzed || item.status == .completed {
+                if let lat = item.latitude, let lon = item.longitude, !item.locationIsInherited {
+                    lastKnownLat = lat
+                    lastKnownLon = lon
+                    lastKnownPlace = item.detectedPlace
+                    lastKnownGeocodedPlace = item.geocodedPlace
+                    lastKnownCertainty = item.locationCertainty
+                } else if (item.latitude == nil && item.longitude == nil) || item.locationIsInherited {
+                    if let previousLat = lastKnownLat, let previousLon = lastKnownLon {
+                        self.imageItems[index].latitude = previousLat
+                        self.imageItems[index].longitude = previousLon
+                        self.imageItems[index].detectedPlace = lastKnownPlace
+                        self.imageItems[index].geocodedPlace = lastKnownGeocodedPlace
+                        self.imageItems[index].locationCertainty = lastKnownCertainty
+                        self.imageItems[index].locationIsInherited = true
+                        
+                        if let certainty = lastKnownCertainty, let threshold = threshold {
+                            self.imageItems[index].saveLocation = certainty >= threshold
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    func clearLocationExtrapolation() {
+        for index in 0..<self.imageItems.count {
+            if self.imageItems[index].locationIsInherited {
+                self.imageItems[index].latitude = nil
+                self.imageItems[index].longitude = nil
+                self.imageItems[index].detectedPlace = nil
+                self.imageItems[index].geocodedPlace = nil
+                self.imageItems[index].locationCertainty = nil
+                self.imageItems[index].saveLocation = false
+                self.imageItems[index].locationIsInherited = false
             }
         }
     }

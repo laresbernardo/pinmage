@@ -54,6 +54,7 @@ struct ImageItem: Identifiable, Equatable {
     var latitude: Double? = nil
     var longitude: Double? = nil
     var dateIsInherited: Bool = false
+    var locationIsInherited: Bool = false
     var outputURL: URL? = nil
     
     // Existing GPS from file metadata
@@ -189,6 +190,11 @@ struct FavoritePlace: Codable, Identifiable, Equatable {
             UserDefaults.standard.set(extrapolateDates, forKey: "pinmage_extrapolate_dates")
         }
     }
+    @Published var extrapolateCoordinates: Bool {
+        didSet {
+            UserDefaults.standard.set(extrapolateCoordinates, forKey: "pinmage_extrapolate_coordinates")
+        }
+    }
     @Published var locationHint: String {
         didSet {
             UserDefaults.standard.set(locationHint, forKey: "pinmage_location_hint")
@@ -240,6 +246,12 @@ struct FavoritePlace: Codable, Identifiable, Equatable {
             self.extrapolateDates = false
         } else {
             self.extrapolateDates = UserDefaults.standard.bool(forKey: "pinmage_extrapolate_dates")
+        }
+        
+        if UserDefaults.standard.object(forKey: "pinmage_extrapolate_coordinates") == nil {
+            self.extrapolateCoordinates = false
+        } else {
+            self.extrapolateCoordinates = UserDefaults.standard.bool(forKey: "pinmage_extrapolate_coordinates")
         }
         
         self.locationHint = UserDefaults.standard.string(forKey: "pinmage_location_hint") ?? ""

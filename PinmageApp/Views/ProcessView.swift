@@ -258,7 +258,7 @@ struct ProcessView: View {
                                 }
                             }
                             
-                            // Option 2: Date extrapolation controls
+                             // Option 2: Date extrapolation controls
                             if hasAnalyzedItems {
                                 HStack {
                                     Toggle("Extrapolate dates forward (repeat last known date for unknown dates)", isOn: $settings.extrapolateDates)
@@ -269,12 +269,42 @@ struct ProcessView: View {
                                         .onChange(of: settings.extrapolateDates) { _, newValue in
                                             if newValue {
                                                 manager.applyDateExtrapolation()
+                                            } else {
+                                                manager.clearDateExtrapolation()
                                             }
                                         }
                                     
                                     if settings.extrapolateDates {
                                         Button("Apply Now") {
                                             manager.applyDateExtrapolation()
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                    }
+                                    
+                                    Spacer()
+                                }
+                            }
+                            
+                            // Option 3: Coordinate extrapolation controls
+                            if hasAnalyzedItems {
+                                HStack {
+                                    Toggle("Extrapolate coordinates forward (repeat last known location for unknown locations)", isOn: $settings.extrapolateCoordinates)
+                                        .font(.caption)
+                                        .foregroundColor(.white)
+                                        .toggleStyle(.switch)
+                                        .controlSize(.small)
+                                        .onChange(of: settings.extrapolateCoordinates) { _, newValue in
+                                            if newValue {
+                                                manager.applyLocationExtrapolation()
+                                            } else {
+                                                manager.clearLocationExtrapolation()
+                                            }
+                                        }
+                                    
+                                    if settings.extrapolateCoordinates {
+                                        Button("Apply Now") {
+                                            manager.applyLocationExtrapolation()
                                         }
                                         .buttonStyle(.bordered)
                                         .controlSize(.small)
