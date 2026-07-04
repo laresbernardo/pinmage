@@ -766,15 +766,38 @@ import MapKit
             if let dateStr = result.date, !dateStr.isEmpty, dateStr.lowercased() != "null" {
                 if let parseResult = parseCleanDate(from: dateStr, explanationOut: &explanation) {
                     parsedDate = parseResult.date
+                    var isPartial = parseResult.isPartial
+                    
+                    if let exp = explanation, !exp.isEmpty {
+                        let calendar = Calendar.current
+                        let dayComponent = calendar.component(.day, from: parseResult.date)
+                        if isPartial || dayComponent == 1 {
+                            if let preciseResult = extractPreciseDate(from: exp) {
+                                parsedDate = preciseResult.date
+                                isPartial = preciseResult.isPartial
+                            }
+                        }
+                    }
                     
                     // Format back to YYYY-MM-DD always as a clean string representation for UI
                     let outFormatter = DateFormatter()
                     outFormatter.timeZone = TimeZone(secondsFromGMT: 0)
                     outFormatter.dateFormat = "yyyy-MM-dd"
-                    finalDateStr = outFormatter.string(from: parseResult.date)
+                    finalDateStr = outFormatter.string(from: parsedDate!)
                     
-                    if parseResult.isPartial {
+                    if isPartial {
                         // Cap certainty to 75% for partial dates (guessed days/months)
+                        dateCertainty = min(dateCertainty, 75)
+                    }
+                }
+            } else if let exp = explanation, !exp.isEmpty {
+                if let preciseResult = extractPreciseDate(from: exp) {
+                    parsedDate = preciseResult.date
+                    let outFormatter = DateFormatter()
+                    outFormatter.timeZone = TimeZone(secondsFromGMT: 0)
+                    outFormatter.dateFormat = "yyyy-MM-dd"
+                    finalDateStr = outFormatter.string(from: parsedDate!)
+                    if preciseResult.isPartial {
                         dateCertainty = min(dateCertainty, 75)
                     }
                 }
@@ -1047,6 +1070,106 @@ import MapKit
             if let match = detector.firstMatch(in: cleanStr, options: [], range: range),
                let date = match.date {
                 return DateParseResult(date: date, isPartial: false)
+            }
+        }
+        
+        return nil
+    }
+    
+    private func extractPreciseDate(from explanation: String) -> DateParseResult? {
+        let lowercaseExplanation = explanation.lowercased()
+        
+        let months = [
+            "january": 1, "jan": 1, "enero": 1, "ene": 1,
+            "february": 2, "feb": 2, "febrero": 2,
+            "march": 3, "mar": 3, "marzo": 3,
+            "april": 4, "apr": 4, "abril": 4, "abr": 4,
+            "may": 5, "mayo": 5,
+            "june": 6, "jun": 6, "junio": 6,
+            "july": 7, "jul": 7, "julio": 7,
+            "august": 8, "aug": 8, "agosto": 8, "ago": 8,
+            "september": 9, "sept": 9, "sep": 9, "septiembre": 9,
+            "october": 10, "oct": 10, "octubre": 10,
+            "november": 11, "nov": 11, "noviembre": 11,
+            "december": 12, "dec": 12, "diciembre": 12, "dic": 12
+        ]
+        
+        let dayMonthYearPattern = #"\b(\d{1,2})\s*(?:de|of|\-|\/)?\s*(january|jan|enero|ene|february|feb|febrero|march|mar|marzo|april|apr|abril|abr|may|mayo|june|jun|junio|july|jul|julio|august|aug|agosto|ago|september|sept|sep|septiembre|october|oct|octubre|november|nov|noviembre|december|dec|diciembre|dic)(?:st|nd|rd|th)?\s*(?:de|of|,|\s)?\s*(\d{4})\b"#
+        let monthDayYearPattern = #"\b(january|jan|enero|ene|february|feb|febrero|march|mar|marzo|april|apr|abril|abr|may|mayo|june|jun|junio|july|jul|julio|august|aug|agosto|ago|september|sept|sep|septiembre|october|oct|octubre|november|nov|noviembre|december|dec|diciembre|dic)\s*(\d{1,2})(?:st|nd|rd|th)?\s*(?:de|of|,|\s)?\s*(\d{4})\b"#
+        let yyyyMmDdPattern = #"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b"#
+        
+        if let regex = try? NSRegularExpression(pattern: dayMonthYearPattern, options: [.caseInsensitive]),
+           let match = regex.firstMatch(in: lowercaseExplanation, options: [], range: NSRange(lowercaseExplanation.startIndex..<lowercaseExplanation.endIndex, in: lowercaseExplanation)) {
+            if let dayRange = Range(match.range(at: 1), in: lowercaseExplanation),
+               let monthRange = Range(match.range(at: 2), in: lowercaseExplanation),
+               let yearRange = Range(match.range(at: 3), in: lowercaseExplanation) {
+                let dayStr = String(lowercaseExplanation[dayRange])
+                let monthStr = String(lowercaseExplanation[monthRange])
+                let yearStr = String(lowercaseExplanation[yearRange])
+                
+                if let day = Int(dayStr), let year = Int(yearStr), let month = months[monthStr] {
+                    var components = DateComponents()
+                    components.year = year
+                    components.month = month
+                    components.day = day
+                    components.hour = 12
+                    components.minute = 0
+                    components.second = 0
+                    components.timeZone = TimeZone(secondsFromGMT: 0)
+                    if let date = Calendar.current.date(from: components) {
+                        return DateParseResult(date: date, isPartial: false)
+                    }
+                }
+            }
+        }
+        
+        if let regex = try? NSRegularExpression(pattern: monthDayYearPattern, options: [.caseInsensitive]),
+           let match = regex.firstMatch(in: lowercaseExplanation, options: [], range: NSRange(lowercaseExplanation.startIndex..<lowercaseExplanation.endIndex, in: lowercaseExplanation)) {
+            if let monthRange = Range(match.range(at: 1), in: lowercaseExplanation),
+               let dayRange = Range(match.range(at: 2), in: lowercaseExplanation),
+               let yearRange = Range(match.range(at: 3), in: lowercaseExplanation) {
+                let monthStr = String(lowercaseExplanation[monthRange])
+                let dayStr = String(lowercaseExplanation[dayRange])
+                let yearStr = String(lowercaseExplanation[yearRange])
+                
+                if let day = Int(dayStr), let year = Int(yearStr), let month = months[monthStr] {
+                    var components = DateComponents()
+                    components.year = year
+                    components.month = month
+                    components.day = day
+                    components.hour = 12
+                    components.minute = 0
+                    components.second = 0
+                    components.timeZone = TimeZone(secondsFromGMT: 0)
+                    if let date = Calendar.current.date(from: components) {
+                        return DateParseResult(date: date, isPartial: false)
+                    }
+                }
+            }
+        }
+
+        if let regex = try? NSRegularExpression(pattern: yyyyMmDdPattern, options: []),
+           let match = regex.firstMatch(in: lowercaseExplanation, options: [], range: NSRange(lowercaseExplanation.startIndex..<lowercaseExplanation.endIndex, in: lowercaseExplanation)) {
+            if let yearRange = Range(match.range(at: 1), in: lowercaseExplanation),
+               let monthRange = Range(match.range(at: 2), in: lowercaseExplanation),
+               let dayRange = Range(match.range(at: 3), in: lowercaseExplanation) {
+                let yearStr = String(lowercaseExplanation[yearRange])
+                let monthStr = String(lowercaseExplanation[monthRange])
+                let dayStr = String(lowercaseExplanation[dayRange])
+                
+                if let year = Int(yearStr), let month = Int(monthStr), let day = Int(dayStr) {
+                    var components = DateComponents()
+                    components.year = year
+                    components.month = month
+                    components.day = day
+                    components.hour = 12
+                    components.minute = 0
+                    components.second = 0
+                    components.timeZone = TimeZone(secondsFromGMT: 0)
+                    if let date = Calendar.current.date(from: components) {
+                        return DateParseResult(date: date, isPartial: false)
+                    }
+                }
             }
         }
         
