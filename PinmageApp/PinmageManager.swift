@@ -190,8 +190,37 @@ import MapKit
                 imageItems[index].status = .analyzed
             }
             
-            // Invalidate cache since the user manually overwrote values
-            CacheManager.shared.invalidateCache(hash: imageItems[index].cacheHash)
+            // Update cache since the user manually overwrote values
+            var cachedResult = CacheManager.shared.get(hash: imageItems[index].cacheHash) ?? GeminiManager.GeminiResult()
+            
+            if removeDate {
+                cachedResult.date = nil
+                cachedResult.dateCertainty = nil
+            } else if saveDate {
+                if let date = date {
+                    let formatter = DateFormatter()
+                    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                    formatter.dateFormat = "yyyy-MM-dd"
+                    cachedResult.date = formatter.string(from: date)
+                } else {
+                    cachedResult.date = nil
+                }
+                cachedResult.dateCertainty = 100
+            }
+            
+            if removeLocation {
+                cachedResult.latitude = nil
+                cachedResult.longitude = nil
+                cachedResult.place = nil
+                cachedResult.locationCertainty = nil
+            } else if saveLocation {
+                cachedResult.latitude = latitude
+                cachedResult.longitude = longitude
+                cachedResult.place = place ?? geocodedPlace
+                cachedResult.locationCertainty = 100
+            }
+            
+            CacheManager.shared.set(hash: imageItems[index].cacheHash, result: cachedResult)
         }
     }
     
@@ -234,7 +263,37 @@ import MapKit
             if imageItems[index].status == .pending || imageItems[index].status == .failed || imageItems[index].status == .completed {
                 imageItems[index].status = .analyzed
             }
-            CacheManager.shared.invalidateCache(hash: imageItems[index].cacheHash)
+            // Update cache since the user manually overwrote values
+            var cachedResult = CacheManager.shared.get(hash: imageItems[index].cacheHash) ?? GeminiManager.GeminiResult()
+            
+            if removeDate {
+                cachedResult.date = nil
+                cachedResult.dateCertainty = nil
+            } else if saveDate {
+                if let date = date {
+                    let formatter = DateFormatter()
+                    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                    formatter.dateFormat = "yyyy-MM-dd"
+                    cachedResult.date = formatter.string(from: date)
+                } else {
+                    cachedResult.date = nil
+                }
+                cachedResult.dateCertainty = 100
+            }
+            
+            if removeLocation {
+                cachedResult.latitude = nil
+                cachedResult.longitude = nil
+                cachedResult.place = nil
+                cachedResult.locationCertainty = nil
+            } else if saveLocation {
+                cachedResult.latitude = latitude
+                cachedResult.longitude = longitude
+                cachedResult.place = imageItems[index].detectedPlace ?? imageItems[index].geocodedPlace
+                cachedResult.locationCertainty = 100
+            }
+            
+            CacheManager.shared.set(hash: imageItems[index].cacheHash, result: cachedResult)
         }
     }
     
