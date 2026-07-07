@@ -9,6 +9,9 @@
     "cleanUrls": true,
     "trailingSlash": false
   },
+  "firestore": {
+    "rules": "firestore.rules"
+  },
   "emulators": {
     "hosting": {
       "port": 2500

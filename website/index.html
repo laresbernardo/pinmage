@@ -82,7 +82,7 @@
                 </p>
 
                 <div class="cta-group">
-                    <a href="Pinmage.dmg"
+                    <a href="Pinmage.dmg" id="download-btn"
                         class="download-btn">
                         <svg class="download-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"
                             xmlns="http://www.w3.org/2000/svg">
@@ -283,25 +283,7 @@
     </footer>
 
     <!-- Script to load version dynamically -->
-    <script>
-        fetch('./version.json')
-            .then(response => {
-                if (!response.ok) throw new Error('Not found');
-                return response.json();
-            })
-            .then(data => {
-                const versionEl = document.querySelector('.version-tag');
-                if (versionEl && data.version) {
-                    versionEl.textContent = `v${data.version} (Build ${data.build}) • macOS 13+ • DMG`;
-                }
-            })
-            .catch(() => {
-                const versionEl = document.querySelector('.version-tag');
-                if (versionEl) {
-                    versionEl.textContent = `v1.0.0 • macOS 13+ • DMG`;
-                }
-            });
-    </script>
+    <script type="module" src="app.js"></script>
 </body>
 
 </html>

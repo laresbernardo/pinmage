@@ -1,0 +1,21 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Aggregate counter statistics document rules
+    match /stats/pinmage {
+      allow read: if true;
+      allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['download_count'])
+                   && request.resource.data.download_count == resource.data.download_count + 1;
+    }
+
+    // Historical analytics download logs collection rules (write-only, secure checks)
+    match /downloads/{logId} {
+      allow create: if request.resource.data.keys().hasAll(['ip', 'version', 'timestamp'])
+                   && request.resource.data.ip is string
+                   && request.resource.data.version is string
+                   && request.resource.data.timestamp == request.time;
+      allow read, update, delete: if false;
+    }
+  }
+}
