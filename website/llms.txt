@@ -1,0 +1,7 @@
+# Pinmage
+
+> AI-powered macOS app that analyzes scanned photo albums or individual photos to deduce dates and places, writing them directly into native EXIF & GPS image metadata.
+
+- [Website](https://pinmage.bervos.org/): Landing page and DMG download.
+- [GitHub](https://github.com/laresbernardo/pinmage): Source code and releases.
+- [BERVOS](https://bervos.org/): Part of the BERVOS ecosystem.
