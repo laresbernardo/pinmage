@@ -1,0 +1,82 @@
+name: Build DMG & Deploy to Firebase
+
+# Every merge to main builds Pinmage.dmg on macOS, bundles it into website/
+# and deploys the site + Firestore rules to Firebase (project pinmage-billio).
+# Pull requests run the same build (no deploy) so a broken build never lands.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-and-deploy:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Sync app version with website/version.json
+        run: |
+          VERSION=$(python3 -c "import json; print(json.load(open('website/version.json'))['version'])")
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" PinmageApp/Info.plist
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Building Pinmage $VERSION"
+
+      - name: Build macOS app & DMG
+        run: CI=true bash ./install.sh
+
+      - name: Check website bundle
+        run: |
+          test -s website/Pinmage.dmg || { echo "::error::website/Pinmage.dmg was not produced"; exit 1; }
+          ls -lh website/Pinmage.dmg
+          cat website/version.json
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pinmage-${{ env.VERSION }}-dmg
+          path: website/Pinmage.dmg
+          retention-days: 14
+
+      - name: Set up Node.js
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Write deploy credentials
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PINMAGE_BILLIO }}
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then
+            echo "::error::FIREBASE_SERVICE_ACCOUNT_PINMAGE_BILLIO secret is missing."
+            exit 1
+          fi
+          echo "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/firebase-sa.json"
+
+      - name: Deploy to Firebase Hosting & Firestore rules
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/firebase-sa.json
+        run: npx -y firebase-tools@latest deploy --only hosting,firestore:rules --project pinmage-billio --non-interactive --force
+
+      - name: Remove deploy credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/firebase-sa.json"
