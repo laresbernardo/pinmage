@@ -37,6 +37,18 @@ This will automatically compile Swift sources, generate app icons, sign the app 
 
 ---
 
+## 🌐 Website & Automatic Deploys
+
+The landing site lives in `website/` and is served at [pinmage.bervos.org](https://pinmage.bervos.org).
+
+Every merge to `main` runs [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) on a macOS runner: it builds `Pinmage.dmg`, puts it in `website/` for the download button, and deploys Firebase Hosting and Firestore rules. Pull requests run the same build without deploying, and the DMG is attached to the run so you can test it.
+
+- Version: bump `website/version.json` in each PR. CI stamps that version into the app before building.
+- Credentials: a deploy-only service account, stored as the `FIREBASE_SERVICE_ACCOUNT_PINMAGE_BILLIO` repo secret.
+- Manual fallback: `PINMAGE_DEPLOY=1 ./install.sh`.
+
+---
+
 ## Ollama (Local AI) Setup
 
 To use local AI models instead of the Gemini cloud API:
