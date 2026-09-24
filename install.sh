@@ -17,8 +17,15 @@ SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLIST_FILE="$SOURCE_DIR/PinmageApp/Info.plist"
 NEW_VERSION="Unknown"
 
-# Auto-increment version using PlistBuddy if it exists
-if [ -f "$PLIST_FILE" ] && [ -x /usr/libexec/PlistBuddy ]; then
+# Auto-increment version using PlistBuddy if it exists.
+# In CI the version comes from the repo as-is (see .github/workflows/deploy.yml),
+# so builds are reproducible and never bump a version that isn't committed.
+if [ "$CI" = "true" ]; then
+    if [ -f "$PLIST_FILE" ] && [ -x /usr/libexec/PlistBuddy ]; then
+        NEW_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST_FILE")
+    fi
+    echo -e "${GREEN}✓ CI detected. Building committed version $NEW_VERSION (no auto-increment).${NC}"
+elif [ -f "$PLIST_FILE" ] && [ -x /usr/libexec/PlistBuddy ]; then
     CURRENT_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST_FILE")
     IFS='.' read -r major minor patch <<< "$CURRENT_VERSION"
     NEXT_PATCH=$((patch + 1))
@@ -174,9 +181,13 @@ fi
 rm -rf "$BUILD_DIR"
 
 # Deploy to Firebase Hosting
-if command -v npx &> /dev/null; then
-    echo -e "${YELLOW}Deploying updated website to Firebase Hosting...${NC}"
+# The site (with a freshly built DMG) deploys automatically from GitHub Actions
+# on every merge to main. A local deploy is opt-in: PINMAGE_DEPLOY=1 ./install.sh
+if [ "$CI" != "true" ] && [ "$PINMAGE_DEPLOY" = "1" ] && command -v npx &> /dev/null; then
+    echo -e "${YELLOW}Deploying updated website to Firebase Hosting (manual override)...${NC}"
     (cd "$SOURCE_DIR" && npx -y firebase-tools@latest deploy --only hosting)
+else
+    echo -e "${GREEN}✓ Skipping local deploy. Merging to main deploys the site automatically.${NC}"
 fi
 
 # ─── LAUNCH ──────────────────────────────────────────────────────────────────
