@@ -47,27 +47,27 @@ struct MetadataWriterTests {
         }
         try require(!MetadataWriter.writeSafely(sourceURL: source, destinationURL: source,
             overwrite: true, encode: partialEncode), "Finalize failure must fail")
-        try require(Data(contentsOf: source) == original, "Finalize failure changed original")
+        try require(try Data(contentsOf: source) == original, "Finalize failure changed original")
         let validEncode: (URL) -> Bool = { url in try! original.write(to: url); return true }
         try require(!MetadataWriter.writeSafely(sourceURL: source, destinationURL: source,
             overwrite: true, encode: validEncode, validate: { _, _ in false }), "Validation failure must fail")
-        try require(Data(contentsOf: source) == original, "Validation failure changed original")
+        try require(try Data(contentsOf: source) == original, "Validation failure changed original")
         try require(!MetadataWriter.writeSafely(sourceURL: source, destinationURL: source,
             overwrite: true, encode: validEncode, publish: { _, _, _ in
                 throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOSPC))
             }), "Disk failure must fail")
-        try require(Data(contentsOf: source) == original, "Disk failure changed original")
+        try require(try Data(contentsOf: source) == original, "Disk failure changed original")
         let missing = root.appendingPathComponent("missing/output.png")
         try require(!MetadataWriter.writeSafely(sourceURL: source, destinationURL: missing,
             overwrite: false, encode: validEncode), "Staging failure must fail")
-        try require(Data(contentsOf: source) == original, "Staging failure changed original")
+        try require(try Data(contentsOf: source) == original, "Staging failure changed original")
 
         let copy = root.appendingPathComponent("copy.png")
         try require(update(source, copy), "Copy write failed")
-        try require(Data(contentsOf: source) == original, "Copy mode changed source")
+        try require(try Data(contentsOf: source) == original, "Copy mode changed source")
         let savedCopy = try Data(contentsOf: copy)
         try require(!update(source, copy), "Existing copy must not be overwritten")
-        try require(Data(contentsOf: copy) == savedCopy, "Collision changed existing copy")
+        try require(try Data(contentsOf: copy) == savedCopy, "Collision changed existing copy")
         // Simulate another writer creating the target after encoding but before publication.
         let racedCopy = root.appendingPathComponent("raced.png")
         try require(!MetadataWriter.writeSafely(sourceURL: source, destinationURL: racedCopy,
@@ -75,7 +75,7 @@ struct MetadataWriterTests {
                 try Data("other writer".utf8).write(to: target)
                 try MetadataWriter.publishImage(temp, target, overwrite)
             }), "Copy publication race must fail")
-        try require(Data(contentsOf: racedCopy) == Data("other writer".utf8), "Race clobbered copy")
+        try require(try Data(contentsOf: racedCopy) == Data("other writer".utf8), "Race clobbered copy")
 
         for (ext, uti) in [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")] {
             let photo = root.appendingPathComponent("format.\(ext)")
@@ -96,11 +96,11 @@ struct MetadataWriterTests {
         try fixture(at: multi, type: "public.tiff" as CFString, frames: 2)
         let multiData = try Data(contentsOf: multi)
         try require(!update(multi, multi), "Multi-frame original must not lose frames")
-        try require(Data(contentsOf: multi) == multiData, "Multi-frame original changed")
+        try require(try Data(contentsOf: multi) == multiData, "Multi-frame original changed")
         let alias = root.appendingPathComponent("alias.png")
         try fm.createSymbolicLink(at: alias, withDestinationURL: source)
         try require(update(alias, alias), "Symlink overwrite failed")
-        try require(fm.destinationOfSymbolicLink(atPath: alias.path) == source.path, "Symlink was replaced")
+        try require(try fm.destinationOfSymbolicLink(atPath: alias.path) == source.path, "Symlink was replaced")
         try require(!(try fm.contentsOfDirectory(atPath: root.path)).contains(where: { $0.hasPrefix(".pinmage-write-") }),
                     "Staging directories leaked")
         print("Metadata write safety tests passed (PNG, JPEG, TIFF, HEIC).")
