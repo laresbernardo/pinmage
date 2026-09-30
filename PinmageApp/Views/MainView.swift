@@ -17,6 +17,8 @@ enum ActiveTab: String, CaseIterable, Identifiable {
 }
 
 struct MainView: View {
+    @EnvironmentObject private var updates: UpdateChecker
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject var manager = PinmageManager()
     @StateObject var settings = AppSettings()
     @State private var activeTab: ActiveTab = .processQueue
@@ -132,7 +134,11 @@ struct MainView: View {
             .background(VisualEffectView(material: .sidebar, blendingMode: .behindWindow))
         } detail: {
             // Main Content Area
-            ZStack {
+            VStack(spacing: 0) {
+                if !manager.isProcessing {
+                    UpdateNoticeView(checker: updates)
+                }
+                ZStack {
                 VisualEffectView(material: .underWindowBackground, blendingMode: .withinWindow)
                 
                 switch activeTab {
@@ -146,8 +152,13 @@ struct MainView: View {
                     SettingsView(settings: settings)
                         .transition(.opacity)
                 }
+                }
             }
             .frame(minWidth: 600, minHeight: 500)
+        }
+        .task { await updates.checkOnLaunch() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { Task { await updates.check() } }
         }
         .preferredColorScheme(.dark)
     }

@@ -32,15 +32,7 @@ elif [ -f "$PLIST_FILE" ] && [ -x /usr/libexec/PlistBuddy ]; then
     NEW_VERSION="$major.$minor.$NEXT_PATCH"
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $NEW_VERSION" "$PLIST_FILE"
     
-    # Write updated details to website/version.json
-    WEBSITE_VERSION_FILE="$SOURCE_DIR/website/version.json"
-    if [ -d "$SOURCE_DIR/website" ]; then
-        TODAY=$(date +"%Y-%m-%d")
-        echo -e "{" > "$WEBSITE_VERSION_FILE"
-        echo -e "  \"version\": \"$NEW_VERSION\"," >> "$WEBSITE_VERSION_FILE"
-        echo -e "  \"date\": \"$TODAY\"" >> "$WEBSITE_VERSION_FILE"
-        echo -e "}" >> "$WEBSITE_VERSION_FILE"
-    fi
+
 else
     echo -e "${YELLOW}Warning: PlistBuddy not found. Skipping auto-incrementing version.${NC}"
 fi
@@ -99,7 +91,7 @@ while IFS= read -r file; do
     SWIFT_SOURCES+=("$file")
 done < <(find "$SRC_STAGING/PinmageApp" -name "*.swift")
 
-swiftc -O -sdk "$SDK_PATH" \
+swiftc -O -target arm64-apple-macosx14.0 -sdk "$SDK_PATH" \
     -o "$APP_BUNDLE/Contents/MacOS/Pinmage" \
     "${SWIFT_SOURCES[@]}"
 
@@ -176,6 +168,9 @@ if [ -d "$SOURCE_DIR/website" ]; then
     echo -e "${YELLOW}Copying Pinmage.dmg to website directory...${NC}"
     cp "$FINAL_DMG" "$SOURCE_DIR/website/Pinmage.dmg"
 fi
+
+# Publish metadata only after the app and DMG both built successfully.
+python3 "$SOURCE_DIR/scripts/stamp-release.py" "$APP_BUNDLE" "$SOURCE_DIR/website/version.json"
 
 # Clean up /tmp
 rm -rf "$BUILD_DIR"

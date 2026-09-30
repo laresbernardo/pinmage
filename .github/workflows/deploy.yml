@@ -34,7 +34,9 @@ jobs:
       - name: Sync app version with website/version.json
         run: |
           VERSION=$(python3 -c "import json; print(json.load(open('website/version.json'))['version'])")
+          BUILD=$(python3 -c "import json; print(json.load(open('website/version.json'))['build'])")
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" PinmageApp/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" PinmageApp/Info.plist
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "Building Pinmage $VERSION"
 
@@ -42,6 +44,11 @@ jobs:
         run: |
           swiftc PinmageApp/MetadataWriter.swift Tests/MetadataWriterTests.swift -o "$RUNNER_TEMP/metadata-writer-tests"
           "$RUNNER_TEMP/metadata-writer-tests"
+
+      - name: Test update manifest and scheduling
+        run: |
+          swiftc PinmageApp/UpdateManifest.swift Tests/UpdateManifestTests.swift -o "$RUNNER_TEMP/update-tests"
+          "$RUNNER_TEMP/update-tests"
 
       - name: Build macOS app & DMG
         run: CI=true bash ./install.sh

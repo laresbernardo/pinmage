@@ -90,3 +90,19 @@ To use local AI models instead of the Gemini cloud API:
 4. **In Pinmage Settings**, switch the *AI Provider* to **Ollama (Local)** and click **Refresh** to see your installed models.
 
 > Only multimodal models (llava, bakllava, moondream) support image analysis. Ensure the model you pull is vision-capable.
+
+## Free update checks
+
+Pinmage checks the official release manifest asynchronously once per launch, then at most
+once every 24 hours when reactivated. Offline checks are silent. There are no timers,
+analytics, photo uploads, cookies or credentials in update requests. Use **Pinmage > Check
+for Updates** to check immediately, including a release previously dismissed with Later.
+
+The compact notice waits until photo processing and metadata writes finish. Download free
+update opens the official DMG in your browser; quit Pinmage and drag the new app into
+Applications. This does not replace the running app automatically. Existing installs need
+one manual download to gain the checker. Releases remain ad-hoc signed, not notarized.
+
+CI publishes version/build/minimum-macOS metadata from the built app only after successful
+compilation and DMG packaging. A release must bump both its version and build number. The DMG targets Apple silicon
+and macOS 14 or later (the SwiftUI views already use macOS 14 APIs).
