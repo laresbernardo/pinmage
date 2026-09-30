@@ -37,6 +37,33 @@ This will automatically compile Swift sources, generate app icons, sign the app 
 
 ---
 
+## Metadata write safety
+
+Metadata is encoded in a private staging directory beside the target, then reopened
+and checked for format, dimensions and successful image decoding before publication.
+Overwrite mode flushes the completed file and atomically replaces the original path;
+encoder, validation and publication failures leave the original in place. Symlinks
+are followed rather than replaced. Multi-frame originals are refused because the
+current encoder writes one image. Existing output copies are never overwritten:
+choose a different output filename or folder if a copy already exists.
+
+The encoder and EXIF/GPS tag handling are unchanged. This does not make JPEG
+rewrites lossless, provide a backup, or guarantee recovery after sudden power loss.
+Original POSIX permissions are retained; other filesystem attributes (Finder tags,
+ACLs and creation timestamps) are not guaranteed by this write path. Close other
+editors before overwrite: the source is checked for changes before publication,
+but this is not a lock against another process writing at the same instant.
+
+Run the standalone safety tests on macOS:
+
+```bash
+swiftc PinmageApp/MetadataWriter.swift Tests/MetadataWriterTests.swift -o /tmp/pinmage-metadata-tests
+/tmp/pinmage-metadata-tests
+```
+
+PR CI runs these tests before building the app and DMG. They use synthetic images
+and injected failures, not real disk exhaustion or user photos.
+
 ## 🌐 Website & Automatic Deploys
 
 The landing site lives in `website/` and is served at [pinmage.bervos.org](https://pinmage.bervos.org).
