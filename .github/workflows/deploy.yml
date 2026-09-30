@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode.app
@@ -53,7 +53,7 @@ jobs:
           cat website/version.json
 
       - name: Upload DMG artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: Pinmage-${{ env.VERSION }}-dmg
           path: website/Pinmage.dmg
@@ -61,7 +61,7 @@ jobs:
 
       - name: Set up Node.js
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
