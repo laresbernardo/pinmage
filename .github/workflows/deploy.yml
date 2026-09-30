@@ -38,6 +38,11 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "Building Pinmage $VERSION"
 
+      - name: Test metadata write safety
+        run: |
+          swiftc PinmageApp/MetadataWriter.swift Tests/MetadataWriterTests.swift -o "$RUNNER_TEMP/metadata-writer-tests"
+          "$RUNNER_TEMP/metadata-writer-tests"
+
       - name: Build macOS app & DMG
         run: CI=true bash ./install.sh
 

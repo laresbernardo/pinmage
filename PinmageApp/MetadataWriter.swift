@@ -1,11 +1,106 @@
 import Foundation
 import ImageIO
 import CoreServices
+import Darwin
 
 struct MetadataWriter {
     /// Copies image from sourceURL to destinationURL while embedding date and coordinates.
     /// Returns true on success.
     static func updateImageMetadata(sourceURL: URL, destinationURL: URL, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool) -> Bool {
+        let isOverwrite = sourceURL.resolvingSymlinksInPath().standardizedFileURL == destinationURL.resolvingSymlinksInPath().standardizedFileURL
+        let targetURL = isOverwrite ? sourceURL.resolvingSymlinksInPath() : destinationURL
+        return writeSafely(sourceURL: sourceURL, destinationURL: targetURL, overwrite: isOverwrite, encode: { temporaryURL in
+            encodeImageMetadata(sourceURL: sourceURL, destinationURL: temporaryURL, date: date, removeDate: removeDate, latitude: latitude, longitude: longitude, removeLocation: removeLocation)
+        })
+    }
+
+    /// The injected operations let tests simulate encoder, validation and disk failures.
+    /// No operation writes to the target until the verified staging file is published.
+    static func writeSafely(
+        sourceURL: URL,
+        destinationURL: URL,
+        overwrite: Bool,
+        encode: (URL) -> Bool,
+        validate: (URL, URL) -> Bool = validateImage,
+        publish: (URL, URL, Bool) throws -> Void = publishImage
+    ) -> Bool {
+        let fileManager = FileManager.default
+        // mkdtemp reserves a private sibling directory exclusively, on the target volume.
+        var template = Array(destinationURL.deletingLastPathComponent()
+            .appendingPathComponent(".pinmage-write-XXXXXX").path.utf8CString)
+        guard let directoryPath = mkdtemp(&template) else {
+            print("Failed to create metadata staging directory: \(errno)")
+            return false
+        }
+        let stagingDirectory = URL(fileURLWithPath: String(cString: directoryPath), isDirectory: true)
+        defer { try? fileManager.removeItem(at: stagingDirectory) }
+        let temporaryURL = stagingDirectory.appendingPathComponent(destinationURL.lastPathComponent)
+        do {
+            // Snapshot allows refusing an original changed during encoding.
+            let originalData = overwrite ? try Data(contentsOf: sourceURL) : nil
+            if overwrite {
+                guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+                      CGImageSourceGetCount(source) == 1 else { return false }
+            }
+            guard encode(temporaryURL), validate(sourceURL, temporaryURL) else { return false }
+            if overwrite {
+                guard try Data(contentsOf: sourceURL) == originalData else { return false }
+                let attributes = try fileManager.attributesOfItem(atPath: sourceURL.path)
+                if let permissions = attributes[.posixPermissions] {
+                    try fileManager.setAttributes([.posixPermissions: permissions], ofItemAtPath: temporaryURL.path)
+                }
+            }
+            // Flush the completed file before making it visible at the target path.
+            let handle = try FileHandle(forWritingTo: temporaryURL)
+            defer { try? handle.close() }
+            try handle.synchronize()
+            try publish(temporaryURL, destinationURL, overwrite)
+            return true
+        } catch {
+            print("Failed to publish metadata image: \(error)")
+            return false
+        }
+    }
+
+    static func publishImage(_ temporaryURL: URL, _ destinationURL: URL, _ overwrite: Bool) throws {
+        let result = temporaryURL.withUnsafeFileSystemRepresentation { sourcePath in
+            destinationURL.withUnsafeFileSystemRepresentation { targetPath in
+                if overwrite {
+                    // Same-volume POSIX rename atomically replaces the directory entry.
+                    return Darwin.rename(sourcePath!, targetPath!)
+                }
+                // Exclusive rename closes the race between checking and publishing a copy.
+                return Darwin.renamex_np(sourcePath!, targetPath!, UInt32(RENAME_EXCL))
+            }
+        }
+        if result != 0 {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+    }
+
+    static func validateImage(_ sourceURL: URL, _ outputURL: URL) -> Bool {
+        guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+              let output = CGImageSourceCreateWithURL(outputURL as CFURL, nil),
+              CGImageSourceGetCount(source) >= 1,
+              CGImageSourceGetCount(output) == 1,
+              CGImageSourceGetStatus(output) == .statusComplete,
+              let sourceType = CGImageSourceGetType(source),
+              let outputType = CGImageSourceGetType(output),
+              CFEqual(sourceType, outputType),
+              let original = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let written = CGImageSourceCopyPropertiesAtIndex(output, 0, nil) as? [CFString: Any],
+              let sourceWidth = original[kCGImagePropertyPixelWidth] as? NSNumber,
+              let sourceHeight = original[kCGImagePropertyPixelHeight] as? NSNumber,
+              sourceWidth == (written[kCGImagePropertyPixelWidth] as? NSNumber),
+              sourceHeight == (written[kCGImagePropertyPixelHeight] as? NSNumber),
+              CGImageSourceCreateImageAtIndex(output, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) != nil else {
+            print("Metadata output failed format, frame, dimensions or decode validation")
+            return false
+        }
+        return true
+    }
+
+    private static func encodeImageMetadata(sourceURL: URL, destinationURL: URL, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool) -> Bool {
         // Read file data
         guard let sourceData = try? Data(contentsOf: sourceURL),
               let imageSource = CGImageSourceCreateWithData(sourceData as CFData, nil) else {
