@@ -1406,7 +1406,7 @@ class GeocodingManager {
         await nominatimRateLimiter.throttle()
         
         var request = URLRequest(url: url)
-        request.setValue("PinmageApp/1.0 (hello@bervos.org)", forHTTPHeaderField: "User-Agent")
+        request.setValue("PinmageApp/1.0 (pinmage@bervos.org)", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 10
         
         do {
