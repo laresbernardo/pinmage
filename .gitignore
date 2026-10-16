@@ -3,6 +3,17 @@
 .AppleDouble
 .LSOverride
 
+# Environment
+.env
+.env.*
+!.env.example
+*.local
+
+# Dependencies
+node_modules/
+.tmp/
+
+
 # Build and Distribution Artifacts
 *.dmg
 *.app

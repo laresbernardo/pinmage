@@ -13,7 +13,9 @@ service cloud.firestore {
     match /downloads/{logId} {
       allow create: if request.resource.data.keys().hasAll(['ip', 'version', 'timestamp'])
                    && request.resource.data.ip is string
+                   && request.resource.data.ip.size() <= 45
                    && request.resource.data.version is string
+                   && request.resource.data.version.size() <= 20
                    && request.resource.data.timestamp == request.time;
       allow read, update, delete: if false;
     }
