@@ -123,18 +123,62 @@ struct MetadataWriter {
             return false
         }
         
-        // Two write paths, chosen by CI evidence:
-        // - Removals and HEIC go through CGImageDestinationCopyImageSource with
-        //   a CGImageMetadataRef (merging disabled): removals because
-        //   AddImageFromSource MERGES and removed keys survive (M17), HEIC
-        //   because AddImageFromSource re-encodes its pixels (M15, CI-proven
-        //   "Pixels changed during write in heic").
+        // Three write paths, chosen by CI evidence:
+        // - PNG/TIFF removal decodes and re-encodes with an explicit
+        //   dictionary (below): CI proved CopyImageSource transports the
+        //   source's native eXIf chunk untouched, so capture dates survived
+        //   an XMP-only removal.
+        // - JPEG/HEIC removal and all HEIC writes go through
+        //   CGImageDestinationCopyImageSource with a CGImageMetadataRef
+        //   (merging disabled): HEIC because AddImageFromSource re-encodes
+        //   its pixels (M15, CI "Pixels changed during write in heic");
+        //   JPEG/HEIC removal because a lossy re-encode would violate pixel
+        //   fidelity. UNVERIFIED: whether CopyImageSource regenerates those
+        //   formats' native EXIF containers from the provided metadata or
+        //   transports the source's - see verification gaps in the PR notes.
         // - Plain sets on PNG/JPEG/TIFF keep the dictionary path: the app
         //   verifies writes through CGImageSourceCopyPropertiesAtIndex, and
         //   only the dictionary path maps date values back into the native
         //   metadata chunks (CI: XMP-only PNG write fails "Date missing").
         let utiString = uti as String
-        let useCopyWrite = removeDate || removeLocation || utiString == "public.heic" || utiString == "public.heif"
+        let isRemoval = removeDate || removeLocation
+        
+        if isRemoval && (utiString == "public.png" || utiString == "public.tiff") {
+            // Decode + re-encode removal for losslessly re-encodable formats:
+            // the output carries only the metadata in this dictionary.
+            // CAVEAT (unverified): raw pixels are expected to round-trip
+            // exactly for PNG/TIFF (the suite asserts raw RGBA equality), but
+            // source data not represented in the properties dictionary -
+            // custom ancillary chunks, embedded profiles handled outside the
+            // image's color space, or auxiliary images - is not carried over.
+            // Multi-frame TIFFs are refused upstream of this function.
+            guard let decodedImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
+                FileHandle.standardError.write(Data("Failed to decode image for removal write\n".utf8))
+                return false
+            }
+            var removalDict = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any] ?? [:]
+            removalDict.removeValue(forKey: kCGImageDestinationLossyCompressionQuality)
+            if removeDate {
+                var exifDict = removalDict[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+                exifDict.removeValue(forKey: kCGImagePropertyExifDateTimeOriginal)
+                exifDict.removeValue(forKey: kCGImagePropertyExifDateTimeDigitized)
+                removalDict[kCGImagePropertyExifDictionary] = exifDict
+                var tiffDict = removalDict[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+                tiffDict.removeValue(forKey: kCGImagePropertyTIFFDateTime)
+                removalDict[kCGImagePropertyTIFFDictionary] = tiffDict
+            }
+            if removeLocation {
+                removalDict.removeValue(forKey: kCGImagePropertyGPSDictionary)
+            }
+            CGImageDestinationAddImage(imageDestination, decodedImage, removalDict as CFDictionary)
+            guard CGImageDestinationFinalize(imageDestination) else {
+                FileHandle.standardError.write(Data("Failed to finalize image destination\n".utf8))
+                return false
+            }
+            return true
+        }
+        
+        let useCopyWrite = isRemoval || utiString == "public.heic" || utiString == "public.heif"
         
         if !useCopyWrite {
             // Dictionary path (no removal requested): copy source properties,
@@ -197,26 +241,22 @@ struct MetadataWriter {
         if removeDate || removeLocation {
             var pathsToRemove: [String] = []
             let enumerateOptions = [kCGImageMetadataEnumerateRecursively: true] as CFDictionary
-            // CI diagnostic: dump the real XMP inventory seen during removal.
-            FileHandle.standardError.write(Data("[removal-diag] sourceMetadata present: \(CGImageSourceCopyMetadataAtIndex(imageSource, 0, nil) != nil)\n".utf8))
             CGImageMetadataEnumerateTagsUsingBlock(mutableMetadata, nil, enumerateOptions) { path, _ in
-                FileHandle.standardError.write(Data("[removal-diag] tag: \(path as String)\n".utf8))
                 let fullPath = path as String
                 let leaf = fullPath.components(separatedBy: "/").last ?? fullPath
                 let tagName = leaf.components(separatedBy: ":").last ?? leaf
-                if (removeDate && ["DateTimeOriginal", "DateTimeDigitized", "DateTime", "DateCreated", "CreateDate", "ModifyDate"].contains(tagName))
+                if (removeDate && ["DateTimeOriginal", "DateTimeDigitized", "DateTime", "DateCreated", "CreateDate"].contains(tagName))
                     || (removeLocation && tagName.hasPrefix("GPS")) {
                     pathsToRemove.append(fullPath)
                 }
                 return true
             }
             for removePath in pathsToRemove {
-                let ok = CGImageMetadataRemoveTagWithPath(mutableMetadata, nil, removePath as CFString)
-                FileHandle.standardError.write(Data("[removal-diag] removed \(removePath): \(ok)\n".utf8))
-            }
-            CGImageMetadataEnumerateTagsUsingBlock(mutableMetadata, nil, enumerateOptions) { path, _ in
-                FileHandle.standardError.write(Data("[removal-diag] post: \(path as String)\n".utf8))
-                return true
+                // Fail closed: a tag that cannot be removed must not publish.
+                guard CGImageMetadataRemoveTagWithPath(mutableMetadata, nil, removePath as CFString) else {
+                    FileHandle.standardError.write(Data("Failed to remove metadata tag: \(removePath)\n".utf8))
+                    return false
+                }
             }
         }
         
