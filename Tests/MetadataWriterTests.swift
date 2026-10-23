@@ -27,6 +27,123 @@ struct MetadataWriterTests {
         try require(CGImageDestinationFinalize(writer), "Fixture finalize failed")
     }
 
+    /// Fixture carrying EXIF/TIFF capture dates and GPS coordinates, so removal
+    /// has something real to remove in every supported format.
+    static func fixtureWithMetadata(at url: URL, type: CFString) throws {
+        let context = CGContext(data: nil, width: 8, height: 6, bitsPerComponent: 8,
+                                bytesPerRow: 32, space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 8, height: 6))
+        let image = context.makeImage()!
+        guard let writer = CGImageDestinationCreateWithURL(url as CFURL, type, 1, nil) else {
+            throw NSError(domain: "Fixtures", code: 1)
+        }
+        let exif: [CFString: Any] = [
+            kCGImagePropertyExifDateTimeOriginal: "2001:02:03 04:05:06",
+            kCGImagePropertyExifDateTimeDigitized: "2001:02:03 04:05:06",
+        ]
+        let tiff: [CFString: Any] = [
+            kCGImagePropertyTIFFDateTime: "2001:02:03 04:05:06",
+        ]
+        let gps: [CFString: Any] = [
+            kCGImagePropertyGPSLatitude: 40.4,
+            kCGImagePropertyGPSLatitudeRef: "N",
+            kCGImagePropertyGPSLongitude: 3.7,
+            kCGImagePropertyGPSLongitudeRef: "E",
+        ]
+        let properties: [CFString: Any] = [
+            kCGImagePropertyExifDictionary: exif,
+            kCGImagePropertyTIFFDictionary: tiff,
+            kCGImagePropertyGPSDictionary: gps,
+        ]
+        CGImageDestinationAddImage(writer, image, properties as CFDictionary)
+        try require(CGImageDestinationFinalize(writer), "Metadata fixture finalize failed")
+    }
+
+    /// Fixture with non-default orientation, DPI and a Display P3 color profile,
+    /// plus removable date/GPS metadata: preservation through a removal rewrite
+    /// is only meaningful when the source actually carries those values.
+    static func fixturePreservation(at url: URL, type: CFString) throws {
+        guard let p3 = CGColorSpace(name: CGColorSpace.displayP3) else {
+            throw NSError(domain: "Fixtures", code: 2)
+        }
+        let context = CGContext(data: nil, width: 8, height: 6, bitsPerComponent: 8,
+                                bytesPerRow: 32, space: p3,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(red: 0.8, green: 0.3, blue: 0.15, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 8, height: 6))
+        let image = context.makeImage()!
+        guard let writer = CGImageDestinationCreateWithURL(url as CFURL, type, 1, nil) else {
+            throw NSError(domain: "Fixtures", code: 1)
+        }
+        let exif: [CFString: Any] = [
+            kCGImagePropertyExifDateTimeOriginal: "2001:02:03 04:05:06",
+            kCGImagePropertyExifDateTimeDigitized: "2001:02:03 04:05:06",
+        ]
+        // Orientation goes through the top-level kCGImagePropertyOrientation
+        // convenience key (ImageIO places it in the format-native location);
+        // the TIFF-dict copy stays because PNG evidence shows that route lands
+        // in the eXIf chunk and exercises the writer's TIFF-dict copy path.
+        let tiff: [CFString: Any] = [
+            kCGImagePropertyTIFFDateTime: "2001:02:03 04:05:06",
+            kCGImagePropertyTIFFOrientation: 6,
+        ]
+        let gps: [CFString: Any] = [
+            kCGImagePropertyGPSLatitude: 40.4,
+            kCGImagePropertyGPSLatitudeRef: "N",
+            kCGImagePropertyGPSLongitude: 3.7,
+            kCGImagePropertyGPSLongitudeRef: "E",
+        ]
+        let properties: [CFString: Any] = [
+            kCGImagePropertyOrientation: 6,
+            kCGImagePropertyExifDictionary: exif,
+            kCGImagePropertyTIFFDictionary: tiff,
+            kCGImagePropertyGPSDictionary: gps,
+            kCGImagePropertyDPIWidth: 300.0,
+            kCGImagePropertyDPIHeight: 300.0,
+        ]
+        CGImageDestinationAddImage(writer, image, properties as CFDictionary)
+        try require(CGImageDestinationFinalize(writer), "Preservation fixture finalize failed")
+    }
+
+    /// Property snapshot used to prove preservation through a removal rewrite.
+    static func propertySnapshot(_ url: URL) throws -> (orientation: Int?, tiffOrientation: Int?, dpiWidth: Double?, dpiHeight: Double?, colorSpaceName: String?, gpsPresent: Bool, datePresent: Bool) {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            throw NSError(domain: "Fixtures", code: 3)
+        }
+        let orientation = props[kCGImagePropertyOrientation] as? Int
+        let dpiWidth = props[kCGImagePropertyDPIWidth] as? Double
+        let dpiHeight = props[kCGImagePropertyDPIHeight] as? Double
+        var colorSpaceName: String? = nil
+        if let image = CGImageSourceCreateImageAtIndex(source, 0, nil), let name = image.colorSpace?.name {
+            colorSpaceName = name as String
+        }
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        let tiffOrientation = tiff?[kCGImagePropertyTIFFOrientation] as? Int
+        let gpsPresent = props[kCGImagePropertyGPSDictionary] != nil
+        let datePresent = exif?[kCGImagePropertyExifDateTimeOriginal] != nil
+            || tiff?[kCGImagePropertyTIFFDateTime] != nil
+        return (orientation, tiffOrientation, dpiWidth, dpiHeight, colorSpaceName, gpsPresent, datePresent)
+    }
+
+    /// Renders an image file to raw RGBA bytes so tests can prove re-encoding
+    /// never changed a single pixel, independent of container bytes.
+    static func pixelData(_ url: URL) throws -> [UInt8]? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        let width = image.width, height = image.height
+        var data = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(data: &data, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return data
+    }
+
     static func update(_ source: URL, _ target: URL, remove: Bool = false) -> Bool {
         MetadataWriter.updateImageMetadata(sourceURL: source, destinationURL: target,
             date: remove ? nil : Date(timeIntervalSince1970: 1_700_000_000), removeDate: remove,
@@ -80,7 +197,9 @@ struct MetadataWriterTests {
         for (ext, uti) in [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")] {
             let photo = root.appendingPathComponent("format.\(ext)")
             try fixture(at: photo, type: uti as CFString)
+            let pixelsBeforeWrite = try pixelData(photo)
             try require(update(photo, photo), "Overwrite failed for \(ext)")
+            try require(try pixelData(photo) == pixelsBeforeWrite, "Pixels changed during write in \(ext)")
             try require(MetadataWriter.validateImage(photo, photo), "Invalid \(ext) output")
             let coords = MetadataWriter.readExistingCoordinates(from: photo)
             try require(coords != nil && abs(coords!.latitude - 40.4) < 0.001 && abs(coords!.longitude + 3.7) < 0.001,
@@ -89,12 +208,76 @@ struct MetadataWriterTests {
             let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
             let exif = props?[kCGImagePropertyExifDictionary] as? [CFString: Any]
             try require(exif?[kCGImagePropertyExifDateTimeOriginal] != nil, "Date missing in \(ext)")
-            // KNOWN ISSUE (M17): PNG keeps inherited source GPS when the encoder
-            // drops the GPS dictionary. Removal semantics are outside this atomic-write
-            // PR. Do not turn this into a passing removal assertion: test/fix it in M17.
-            // Metadata removal is deliberately not covered by this scoped gating suite.
-
         }
+
+        // M17: honest removal semantics. Removing date/location must produce a
+        // file that no longer carries those tags in ANY supported format
+        // (the PNG encoder previously inherited the source GPS dictionary).
+        for (ext, uti) in [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")] {
+            let photo = root.appendingPathComponent("removal.\(ext)")
+            try fixtureWithMetadata(at: photo, type: uti as CFString)
+            try require(MetadataWriter.readExistingCoordinates(from: photo) != nil, "Fixture GPS missing in \(ext)")
+            let pixelsBeforeRemoval = try pixelData(photo)
+            try require(update(photo, photo, remove: true), "Removal overwrite failed for \(ext)")
+            try require(MetadataWriter.validateImage(photo, photo), "Invalid \(ext) after removal")
+            try require(try pixelData(photo) == pixelsBeforeRemoval, "Pixels changed during removal in \(ext)")
+            try require(MetadataWriter.readExistingCoordinates(from: photo) == nil, "GPS survived removal in \(ext)")
+            let imageSource = CGImageSourceCreateWithURL(photo as CFURL, nil)!
+            let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
+            let exif = props?[kCGImagePropertyExifDictionary] as? [CFString: Any]
+            try require(exif?[kCGImagePropertyExifDateTimeOriginal] == nil, "DateTimeOriginal survived removal in \(ext)")
+            try require(exif?[kCGImagePropertyExifDateTimeDigitized] == nil, "DateTimeDigitized survived removal in \(ext)")
+            let tiff = props?[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+            try require(tiff?[kCGImagePropertyTIFFDateTime] == nil, "TIFF DateTime survived removal in \(ext)")
+            try require(props?[kCGImagePropertyGPSDictionary] == nil, "GPS dictionary survived removal in \(ext)")
+        }
+        // Preservation through the PNG/TIFF removal rewrite: orientation, DPI
+        // and color profile must survive; date/GPS must not. When an artifact
+        // directory is provided (CI), before/after files and a property dump
+        // land there for human inspection of the actual outputs.
+        let artifactDir = ProcessInfo.processInfo.environment["PRESERVATION_ARTIFACT_DIR"]
+        var dump = ""
+        func flushDump() {
+            guard let dir = artifactDir else { return }
+            try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try? dump.write(to: URL(fileURLWithPath: dir).appendingPathComponent("preservation-dump.txt"), atomically: true, encoding: .utf8)
+        }
+        func snapshotLine(_ label: String, _ ext: String, _ s: (orientation: Int?, tiffOrientation: Int?, dpiWidth: Double?, dpiHeight: Double?, colorSpaceName: String?, gpsPresent: Bool, datePresent: Bool)) -> String {
+            "\(ext) \(label): orientation \(String(describing: s.orientation)) tiffOrientation \(String(describing: s.tiffOrientation)) dpi \(String(describing: s.dpiWidth))x\(String(describing: s.dpiHeight)) profile \(String(describing: s.colorSpaceName)) gps \(s.gpsPresent) date \(s.datePresent)\n"
+        }
+        for (ext, uti) in [("png", "public.png"), ("tiff", "public.tiff")] {
+            let photo = root.appendingPathComponent("preserve.\(ext)")
+            try fixturePreservation(at: photo, type: uti as CFString)
+            if let dir = artifactDir {
+                try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+                let copy = URL(fileURLWithPath: dir).appendingPathComponent("before.\(ext)")
+                try? fm.removeItem(at: copy)
+                try? fm.copyItem(at: photo, to: copy)
+            }
+            let before = try propertySnapshot(photo)
+            dump += snapshotLine("before", ext, before)
+            flushDump()
+            let sRGBName = CGColorSpace(name: CGColorSpace.sRGB)?.name as String?
+            try require(before.orientation == 6, "Fixture orientation not non-default in \(ext)")
+            try require(before.dpiWidth == 300 && before.dpiHeight == 300, "Fixture DPI not non-default in \(ext)")
+            try require(before.colorSpaceName != nil && before.colorSpaceName != sRGBName, "Fixture profile not non-default in \(ext)")
+            let pixelsBefore = try pixelData(photo)
+            try require(update(photo, photo, remove: true), "Preservation removal failed for \(ext)")
+            try require(try pixelData(photo) == pixelsBefore, "Pixels changed during preservation removal in \(ext)")
+            let after = try propertySnapshot(photo)
+            if let dir = artifactDir {
+                let copy = URL(fileURLWithPath: dir).appendingPathComponent("after.\(ext)")
+                try? fm.removeItem(at: copy)
+                try? fm.copyItem(at: photo, to: copy)
+            }
+            dump += snapshotLine("after", ext, after)
+            flushDump()
+            try require(after.orientation == before.orientation, "Orientation lost in \(ext) removal rewrite (before \(String(describing: before.orientation)) after \(String(describing: after.orientation)))")
+            try require(after.dpiWidth == before.dpiWidth && after.dpiHeight == before.dpiHeight, "DPI lost in \(ext) removal rewrite")
+            try require(after.colorSpaceName == before.colorSpaceName, "Color profile lost in \(ext) removal rewrite (before \(String(describing: before.colorSpaceName)) after \(String(describing: after.colorSpaceName)))")
+            try require(!after.gpsPresent && !after.datePresent, "Removal incomplete in \(ext) preservation pass")
+        }
+
         let multi = root.appendingPathComponent("multipage.tiff")
         try fixture(at: multi, type: "public.tiff" as CFString, frames: 2)
         let multiData = try Data(contentsOf: multi)
