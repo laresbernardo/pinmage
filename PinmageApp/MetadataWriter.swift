@@ -197,7 +197,10 @@ struct MetadataWriter {
         if removeDate || removeLocation {
             var pathsToRemove: [String] = []
             let enumerateOptions = [kCGImageMetadataEnumerateRecursively: true] as CFDictionary
+            // CI diagnostic: dump the real XMP inventory seen during removal.
+            FileHandle.standardError.write(Data("[removal-diag] sourceMetadata present: \(CGImageSourceCopyMetadataAtIndex(imageSource, 0, nil) != nil)\n".utf8))
             CGImageMetadataEnumerateTagsUsingBlock(mutableMetadata, nil, enumerateOptions) { path, _ in
+                FileHandle.standardError.write(Data("[removal-diag] tag: \(path as String)\n".utf8))
                 let fullPath = path as String
                 let leaf = fullPath.components(separatedBy: "/").last ?? fullPath
                 let tagName = leaf.components(separatedBy: ":").last ?? leaf
