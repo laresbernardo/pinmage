@@ -169,20 +169,26 @@ struct MetadataWriter {
         // Add image with the updated metadata properties dictionary.
         // Using the same UTI as the source preserves the original format.
         //
-        // M17 (honest removal semantics): when a removal is requested, some
-        // encoders (observed: PNG) still copy source metadata chunks into the
-        // output even though the key was deleted from the properties passed to
-        // CGImageDestinationAddImageFromSource, silently keeping the GPS/date
-        // the user asked to remove. For formats that re-encode losslessly
-        // (PNG, TIFF) decode the image and add it with only the explicit
-        // metadata dictionary, so nothing is inherited from the source. Lossy
-        // formats (JPEG, HEIC) keep the no-recompression source path, where
-        // the passed properties replace the source metadata.
+        // M17 (honest removal semantics): CGImageDestinationAddImageFromSource
+        // merges the passed properties over the source metadata instead of
+        // replacing them, so deleted GPS/date keys survive in the output
+        // (observed on CI in PNG and JPEG): the file kept exactly what the user
+        // asked to remove. For removal requests, copy the source with an
+        // explicit metadata set and merging disabled, which transports the
+        // compressed image data untouched and writes only intended metadata.
+        // If the destination cannot honor that, fail closed: never publish a
+        // file that kept metadata marked for removal.
         let removalRequested = removeDate || removeLocation
-        let losslessEncode = (uti == "public.png" as CFString) || (uti == "public.tiff" as CFString)
-        if removalRequested && losslessEncode,
-           let decodedImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) {
-            CGImageDestinationAddImage(imageDestination, decodedImage, metadataDict as CFDictionary)
+        if removalRequested {
+            let copyOptions: [CFString: Any] = [
+                kCGImageDestinationMetadata: metadataDict,
+                kCGImageDestinationMergeMetadata: kCFBooleanFalse as Any,
+            ]
+            var copyError: Unmanaged<CFError>?
+            guard CGImageDestinationCopyImageSource(imageDestination, imageSource, copyOptions as CFDictionary, &copyError) else {
+                print("Failed to copy image without removed metadata: \(String(describing: copyError?.takeRetainedValue()))")
+                return false
+            }
         } else {
             CGImageDestinationAddImageFromSource(imageDestination, imageSource, 0, metadataDict as CFDictionary)
         }
