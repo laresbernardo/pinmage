@@ -190,7 +190,10 @@ struct MetadataWriter {
         // (ImageIO header contract) - the extra call fails and would discard
         // an otherwise successful write.
         guard CGImageDestinationCopyImageSource(imageDestination, imageSource, copyOptions as CFDictionary, &copyError) else {
-            print("Failed to write image with updated metadata: \(String(describing: copyError?.takeRetainedValue()))")
+            // stderr: print() output is block-buffered and lost when the test
+            // harness aborts; the CI log needs the real CFError to diagnose.
+            let errDesc = copyError?.takeRetainedValue().localizedDescription ?? "unknown"
+            FileHandle.standardError.write(Data("Failed to write image with updated metadata: \(errDesc)\n".utf8))
             return false
         }
         
