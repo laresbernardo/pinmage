@@ -81,8 +81,10 @@ struct MetadataWriterTests {
             kCGImagePropertyExifDateTimeOriginal: "2001:02:03 04:05:06",
             kCGImagePropertyExifDateTimeDigitized: "2001:02:03 04:05:06",
         ]
-        // EXIF Orientation is an IFD0 tag: it belongs in the TIFF dictionary,
-        // which is also where ImageIO maps it for PNG's eXIf chunk.
+        // Orientation goes through the top-level kCGImagePropertyOrientation
+        // convenience key (ImageIO places it in the format-native location);
+        // the TIFF-dict copy stays because PNG evidence shows that route lands
+        // in the eXIf chunk and exercises the writer's TIFF-dict copy path.
         let tiff: [CFString: Any] = [
             kCGImagePropertyTIFFDateTime: "2001:02:03 04:05:06",
             kCGImagePropertyTIFFOrientation: 6,
@@ -94,6 +96,7 @@ struct MetadataWriterTests {
             kCGImagePropertyGPSLongitudeRef: "E",
         ]
         let properties: [CFString: Any] = [
+            kCGImagePropertyOrientation: 6,
             kCGImagePropertyExifDictionary: exif,
             kCGImagePropertyTIFFDictionary: tiff,
             kCGImagePropertyGPSDictionary: gps,
@@ -105,7 +108,7 @@ struct MetadataWriterTests {
     }
 
     /// Property snapshot used to prove preservation through a removal rewrite.
-    static func propertySnapshot(_ url: URL) throws -> (orientation: Int?, dpiWidth: Double?, dpiHeight: Double?, colorSpaceName: String?, gpsPresent: Bool, datePresent: Bool) {
+    static func propertySnapshot(_ url: URL) throws -> (orientation: Int?, tiffOrientation: Int?, dpiWidth: Double?, dpiHeight: Double?, colorSpaceName: String?, gpsPresent: Bool, datePresent: Bool) {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
             throw NSError(domain: "Fixtures", code: 3)
@@ -118,9 +121,12 @@ struct MetadataWriterTests {
             colorSpaceName = name as String
         }
         let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        let tiffOrientation = tiff?[kCGImagePropertyTIFFOrientation] as? Int
         let gpsPresent = props[kCGImagePropertyGPSDictionary] != nil
         let datePresent = exif?[kCGImagePropertyExifDateTimeOriginal] != nil
-        return (orientation, dpiWidth, dpiHeight, colorSpaceName, gpsPresent, datePresent)
+            || tiff?[kCGImagePropertyTIFFDateTime] != nil
+        return (orientation, tiffOrientation, dpiWidth, dpiHeight, colorSpaceName, gpsPresent, datePresent)
     }
 
     /// Renders an image file to raw RGBA bytes so tests can prove re-encoding
@@ -231,37 +237,45 @@ struct MetadataWriterTests {
         // land there for human inspection of the actual outputs.
         let artifactDir = ProcessInfo.processInfo.environment["PRESERVATION_ARTIFACT_DIR"]
         var dump = ""
+        func flushDump() {
+            guard let dir = artifactDir else { return }
+            try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try? dump.write(to: URL(fileURLWithPath: dir).appendingPathComponent("preservation-dump.txt"), atomically: true, encoding: .utf8)
+        }
+        func snapshotLine(_ label: String, _ ext: String, _ s: (orientation: Int?, tiffOrientation: Int?, dpiWidth: Double?, dpiHeight: Double?, colorSpaceName: String?, gpsPresent: Bool, datePresent: Bool)) -> String {
+            "\(ext) \(label): orientation \(String(describing: s.orientation)) tiffOrientation \(String(describing: s.tiffOrientation)) dpi \(String(describing: s.dpiWidth))x\(String(describing: s.dpiHeight)) profile \(String(describing: s.colorSpaceName)) gps \(s.gpsPresent) date \(s.datePresent)\n"
+        }
         for (ext, uti) in [("png", "public.png"), ("tiff", "public.tiff")] {
             let photo = root.appendingPathComponent("preserve.\(ext)")
             try fixturePreservation(at: photo, type: uti as CFString)
-            let before = try propertySnapshot(photo)
-            let sRGBName = CGColorSpace(name: CGColorSpace.sRGB)?.name as String?
-            try require(before.orientation == 6, "Fixture orientation not non-default in \(ext)")
-            try require(before.dpiWidth == 300 && before.dpiHeight == 300, "Fixture DPI not non-default in \(ext)")
-            try require(before.colorSpaceName != nil && before.colorSpaceName != sRGBName, "Fixture profile not non-default in \(ext)")
-            let pixelsBefore = try pixelData(photo)
             if let dir = artifactDir {
                 try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
                 let copy = URL(fileURLWithPath: dir).appendingPathComponent("before.\(ext)")
                 try? fm.removeItem(at: copy)
                 try? fm.copyItem(at: photo, to: copy)
             }
+            let before = try propertySnapshot(photo)
+            dump += snapshotLine("before", ext, before)
+            flushDump()
+            let sRGBName = CGColorSpace(name: CGColorSpace.sRGB)?.name as String?
+            try require(before.orientation == 6, "Fixture orientation not non-default in \(ext)")
+            try require(before.dpiWidth == 300 && before.dpiHeight == 300, "Fixture DPI not non-default in \(ext)")
+            try require(before.colorSpaceName != nil && before.colorSpaceName != sRGBName, "Fixture profile not non-default in \(ext)")
+            let pixelsBefore = try pixelData(photo)
             try require(update(photo, photo, remove: true), "Preservation removal failed for \(ext)")
             try require(try pixelData(photo) == pixelsBefore, "Pixels changed during preservation removal in \(ext)")
             let after = try propertySnapshot(photo)
-            try require(after.orientation == before.orientation, "Orientation lost in \(ext) removal rewrite (before \(String(describing: before.orientation)) after \(String(describing: after.orientation)))")
-            try require(after.dpiWidth == before.dpiWidth && after.dpiHeight == before.dpiHeight, "DPI lost in \(ext) removal rewrite")
-            try require(after.colorSpaceName == before.colorSpaceName, "Color profile lost in \(ext) removal rewrite (before \(String(describing: before.colorSpaceName)) after \(String(describing: after.colorSpaceName)))")
-            try require(!after.gpsPresent && !after.datePresent, "Removal incomplete in \(ext) preservation pass")
             if let dir = artifactDir {
                 let copy = URL(fileURLWithPath: dir).appendingPathComponent("after.\(ext)")
                 try? fm.removeItem(at: copy)
                 try? fm.copyItem(at: photo, to: copy)
-                dump += "\(ext): orientation \(String(describing: before.orientation)) -> \(String(describing: after.orientation)); dpi \(String(describing: before.dpiWidth))x\(String(describing: before.dpiHeight)) -> \(String(describing: after.dpiWidth))x\(String(describing: after.dpiHeight)); profile \(String(describing: before.colorSpaceName)) -> \(String(describing: after.colorSpaceName)); gps \(before.gpsPresent)->\(after.gpsPresent); date \(before.datePresent)->\(after.datePresent)\n"
             }
-        }
-        if let dir = artifactDir {
-            try? dump.write(to: URL(fileURLWithPath: dir).appendingPathComponent("preservation-dump.txt"), atomically: true, encoding: .utf8)
+            dump += snapshotLine("after", ext, after)
+            flushDump()
+            try require(after.orientation == before.orientation, "Orientation lost in \(ext) removal rewrite (before \(String(describing: before.orientation)) after \(String(describing: after.orientation)))")
+            try require(after.dpiWidth == before.dpiWidth && after.dpiHeight == before.dpiHeight, "DPI lost in \(ext) removal rewrite")
+            try require(after.colorSpaceName == before.colorSpaceName, "Color profile lost in \(ext) removal rewrite (before \(String(describing: before.colorSpaceName)) after \(String(describing: after.colorSpaceName)))")
+            try require(!after.gpsPresent && !after.datePresent, "Removal incomplete in \(ext) preservation pass")
         }
 
         let multi = root.appendingPathComponent("multipage.tiff")
