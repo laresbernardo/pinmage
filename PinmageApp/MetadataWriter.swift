@@ -245,7 +245,11 @@ struct MetadataWriter {
                 let fullPath = path as String
                 let leaf = fullPath.components(separatedBy: "/").last ?? fullPath
                 let tagName = leaf.components(separatedBy: ":").last ?? leaf
-                if (removeDate && ["DateTimeOriginal", "DateTimeDigitized", "DateTime", "DateCreated", "CreateDate"].contains(tagName))
+                // MWG mapping (ImageIO header guidance): TIFF/EXIF DateTime
+                // (tag 0x0132) lives in XMP as xmp:ModifyDate - removing the
+                // approved TIFF DateTime criterion requires removing it here
+                // (CI: "TIFF DateTime survived removal in heic" without it).
+                if (removeDate && ["DateTimeOriginal", "DateTimeDigitized", "DateTime", "DateCreated", "CreateDate", "ModifyDate"].contains(tagName))
                     || (removeLocation && tagName.hasPrefix("GPS")) {
                     pathsToRemove.append(fullPath)
                 }
