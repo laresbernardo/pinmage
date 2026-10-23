@@ -137,41 +137,57 @@ struct MetadataWriter {
             mutableMetadata = CGImageMetadataCreateMutable()
         }
         
-        // Update EXIF/TIFF dates:
-        //   DateTimeOriginal - the date/time the photo was taken
-        //   DateTimeDigitized - the date/time the image was digitized (scans)
-        if removeDate {
-            CGImageMetadataRemoveValueWithPath(mutableMetadata, nil, "exif:DateTimeOriginal" as CFString)
-            CGImageMetadataRemoveValueWithPath(mutableMetadata, nil, "exif:DateTimeDigitized" as CFString)
-            CGImageMetadataRemoveValueWithPath(mutableMetadata, nil, "tiff:DateTime" as CFString)
-        } else if let date = date {
+        // Removal: ImageIO has no remove-by-image-property API, so the real
+        // XMP paths are discovered by recursive enumeration (no namespace
+        // guessing) and then deleted. A date removal deletes every capture-date
+        // representation (EXIF DateTimeOriginal/Digitized, TIFF DateTime); a
+        // location removal deletes every GPS tag (exif:GPS* and nested members).
+        // Metadata must not be modified during enumeration, so paths are
+        // collected first and removed afterwards.
+        if removeDate || removeLocation {
+            var pathsToRemove: [String] = []
+            let enumerateOptions = [kCGImageMetadataEnumerateRecursively: true] as CFDictionary
+            CGImageMetadataEnumerateTagsUsingBlock(mutableMetadata, nil, enumerateOptions) { path, _ in
+                let fullPath = path as String
+                let leaf = fullPath.components(separatedBy: "/").last ?? fullPath
+                let tagName = leaf.components(separatedBy: ":").last ?? leaf
+                if (removeDate && ["DateTimeOriginal", "DateTimeDigitized", "DateTime"].contains(tagName))
+                    || (removeLocation && tagName.hasPrefix("GPS")) {
+                    pathsToRemove.append(fullPath)
+                }
+                return true
+            }
+            for removePath in pathsToRemove {
+                CGImageMetadataRemoveTagWithPath(mutableMetadata, nil, removePath as CFString)
+            }
+        }
+        
+        // Date set: writes the standard EXIF/TIFF XMP tags (registered
+        // prefixes), which read back into the EXIF/TIFF property dictionaries.
+        // Fail closed if any write cannot be created.
+        if !removeDate, let date = date {
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
             let dateString = formatter.string(from: date)
-            CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeOriginal" as CFString, dateString as CFString)
-            CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeDigitized" as CFString, dateString as CFString)
-            // Also write the TIFF tag as a fallback
-            CGImageMetadataSetValueWithPath(mutableMetadata, nil, "tiff:DateTime" as CFString, dateString as CFString)
+            guard CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeOriginal" as CFString, dateString as CFString),
+                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeDigitized" as CFString, dateString as CFString),
+                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "tiff:DateTime" as CFString, dateString as CFString) else {
+                FileHandle.standardError.write(Data("Failed to set date metadata\n".utf8))
+                return false
+            }
         }
         
-        // Update GPS. Removal deletes every existing gps tag; with merging
-        // disabled, absent tags cannot survive in the output. A set request
-        // writes the four core tags.
-        if removeLocation {
-            if let tags = CGImageMetadataCopyTags(mutableMetadata) as? [CGImageMetadataTag] {
-                for tag in tags {
-                    let prefix = (CGImageMetadataTagCopyPrefix(tag) as String?) ?? ""
-                    let name = (CGImageMetadataTagCopyName(tag) as String?) ?? ""
-                    if prefix.lowercased() == "gps", !name.isEmpty {
-                        CGImageMetadataRemoveValueWithPath(mutableMetadata, nil, "\(prefix):\(name)" as CFString)
-                    }
-                }
+        // GPS set: EXIF GPS tags in XMP live in the exif namespace as
+        // exif:GPS*; "gps:" is not a registered XMP prefix, so
+        // SetValueWithPath would fail to create it.
+        if !removeLocation, let lat = latitude, let lon = longitude {
+            guard CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:GPSLatitude" as CFString, abs(lat) as CFNumber),
+                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:GPSLatitudeRef" as CFString, (lat >= 0 ? "N" : "S") as CFString),
+                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:GPSLongitude" as CFString, abs(lon) as CFNumber),
+                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:GPSLongitudeRef" as CFString, (lon >= 0 ? "E" : "W") as CFString) else {
+                FileHandle.standardError.write(Data("Failed to set GPS metadata\n".utf8))
+                return false
             }
-        } else if let lat = latitude, let lon = longitude {
-            CGImageMetadataSetValueWithPath(mutableMetadata, nil, "gps:Latitude" as CFString, abs(lat) as CFNumber)
-            CGImageMetadataSetValueWithPath(mutableMetadata, nil, "gps:LatitudeRef" as CFString, (lat >= 0 ? "N" : "S") as CFString)
-            CGImageMetadataSetValueWithPath(mutableMetadata, nil, "gps:Longitude" as CFString, abs(lon) as CFNumber)
-            CGImageMetadataSetValueWithPath(mutableMetadata, nil, "gps:LongitudeRef" as CFString, (lon >= 0 ? "E" : "W") as CFString)
         }
         
         // Write the image with the updated metadata properties dictionary.
