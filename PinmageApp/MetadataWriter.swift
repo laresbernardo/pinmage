@@ -123,47 +123,55 @@ struct MetadataWriter {
             return false
         }
         
-        // Copy original metadata properties (stripping any non-metadata keys)
-        var metadataDict = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any] ?? [:]
-        metadataDict.removeValue(forKey: kCGImageDestinationLossyCompressionQuality)
+        // Build the metadata object for the copy write.
+        // CGImageDestinationCopyImageSource requires kCGImageDestinationMetadata
+        // to hold a CGImageMetadataRef - a plain properties dictionary fails
+        // with kCFErrorDomainCGImageMetadata error 2 ("Invalid type"). Start
+        // from the source's own metadata so every untouched tag survives;
+        // removed keys cannot come back because merging is disabled below.
+        let mutableMetadata: CGMutableImageMetadata
+        if let sourceMetadata = CGImageSourceCopyMetadataAtIndex(imageSource, 0, nil),
+           let metadataCopy = CGImageMetadataCreateMutableCopy(sourceMetadata) {
+            mutableMetadata = metadataCopy
+        } else {
+            mutableMetadata = CGImageMetadataCreateMutable()
+        }
         
-        // Update EXIF:
-        //   DateTimeOriginal — the date/time the photo was taken (original creation date)
-        //   DateTimeDigitized — the date/time the image was digitized (relevant for scans)
+        // Update EXIF/TIFF dates:
+        //   DateTimeOriginal - the date/time the photo was taken
+        //   DateTimeDigitized - the date/time the image was digitized (scans)
         if removeDate {
-            var exifDict = metadataDict[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
-            exifDict.removeValue(forKey: kCGImagePropertyExifDateTimeOriginal)
-            exifDict.removeValue(forKey: kCGImagePropertyExifDateTimeDigitized)
-            metadataDict[kCGImagePropertyExifDictionary] = exifDict
-            
-            var tiffDict = metadataDict[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
-            tiffDict.removeValue(forKey: kCGImagePropertyTIFFDateTime)
-            metadataDict[kCGImagePropertyTIFFDictionary] = tiffDict
+            CGImageMetadataRemoveValueWithPath(mutableMetadata, nil, "exif:DateTimeOriginal" as CFString)
+            CGImageMetadataRemoveValueWithPath(mutableMetadata, nil, "exif:DateTimeDigitized" as CFString)
+            CGImageMetadataRemoveValueWithPath(mutableMetadata, nil, "tiff:DateTime" as CFString)
         } else if let date = date {
-            var exifDict = metadataDict[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
             let dateString = formatter.string(from: date)
-            exifDict[kCGImagePropertyExifDateTimeOriginal] = dateString
-            exifDict[kCGImagePropertyExifDateTimeDigitized] = dateString
-            metadataDict[kCGImagePropertyExifDictionary] = exifDict
-            
-            // Also write to TIFF dictionary as a fallback
-            var tiffDict = metadataDict[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
-            tiffDict[kCGImagePropertyTIFFDateTime] = dateString
-            metadataDict[kCGImagePropertyTIFFDictionary] = tiffDict
+            CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeOriginal" as CFString, dateString as CFString)
+            CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeDigitized" as CFString, dateString as CFString)
+            // Also write the TIFF tag as a fallback
+            CGImageMetadataSetValueWithPath(mutableMetadata, nil, "tiff:DateTime" as CFString, dateString as CFString)
         }
         
-        // Update GPS
+        // Update GPS. Removal deletes every existing gps tag; with merging
+        // disabled, absent tags cannot survive in the output. A set request
+        // writes the four core tags.
         if removeLocation {
-            metadataDict.removeValue(forKey: kCGImagePropertyGPSDictionary)
+            if let tags = CGImageMetadataCopyTags(mutableMetadata) as? [CGImageMetadataTag] {
+                for tag in tags {
+                    let prefix = (CGImageMetadataTagCopyPrefix(tag) as String?) ?? ""
+                    let name = (CGImageMetadataTagCopyName(tag) as String?) ?? ""
+                    if prefix.lowercased() == "gps", !name.isEmpty {
+                        CGImageMetadataRemoveValueWithPath(mutableMetadata, nil, "\(prefix):\(name)" as CFString)
+                    }
+                }
+            }
         } else if let lat = latitude, let lon = longitude {
-            var gpsDict = metadataDict[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
-            gpsDict[kCGImagePropertyGPSLatitude] = abs(lat)
-            gpsDict[kCGImagePropertyGPSLatitudeRef] = lat >= 0 ? "N" : "S"
-            gpsDict[kCGImagePropertyGPSLongitude] = abs(lon)
-            gpsDict[kCGImagePropertyGPSLongitudeRef] = lon >= 0 ? "E" : "W"
-            metadataDict[kCGImagePropertyGPSDictionary] = gpsDict
+            CGImageMetadataSetValueWithPath(mutableMetadata, nil, "gps:Latitude" as CFString, abs(lat) as CFNumber)
+            CGImageMetadataSetValueWithPath(mutableMetadata, nil, "gps:LatitudeRef" as CFString, (lat >= 0 ? "N" : "S") as CFString)
+            CGImageMetadataSetValueWithPath(mutableMetadata, nil, "gps:Longitude" as CFString, abs(lon) as CFNumber)
+            CGImageMetadataSetValueWithPath(mutableMetadata, nil, "gps:LongitudeRef" as CFString, (lon >= 0 ? "E" : "W") as CFString)
         }
         
         // Write the image with the updated metadata properties dictionary.
@@ -181,7 +189,7 @@ struct MetadataWriter {
         // Fail closed: if the destination cannot honor the copy, publish
         // nothing rather than a file with surviving or re-encoded content.
         let copyOptions: [CFString: Any] = [
-            kCGImageDestinationMetadata: metadataDict,
+            kCGImageDestinationMetadata: mutableMetadata,
             kCGImageDestinationMergeMetadata: kCFBooleanFalse as Any,
         ]
         var copyError: Unmanaged<CFError>?
