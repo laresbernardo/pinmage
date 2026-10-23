@@ -204,14 +204,19 @@ struct MetadataWriter {
                 let fullPath = path as String
                 let leaf = fullPath.components(separatedBy: "/").last ?? fullPath
                 let tagName = leaf.components(separatedBy: ":").last ?? leaf
-                if (removeDate && ["DateTimeOriginal", "DateTimeDigitized", "DateTime", "DateCreated", "CreateDate"].contains(tagName))
+                if (removeDate && ["DateTimeOriginal", "DateTimeDigitized", "DateTime", "DateCreated", "CreateDate", "ModifyDate"].contains(tagName))
                     || (removeLocation && tagName.hasPrefix("GPS")) {
                     pathsToRemove.append(fullPath)
                 }
                 return true
             }
             for removePath in pathsToRemove {
-                CGImageMetadataRemoveTagWithPath(mutableMetadata, nil, removePath as CFString)
+                let ok = CGImageMetadataRemoveTagWithPath(mutableMetadata, nil, removePath as CFString)
+                FileHandle.standardError.write(Data("[removal-diag] removed \(removePath): \(ok)\n".utf8))
+            }
+            CGImageMetadataEnumerateTagsUsingBlock(mutableMetadata, nil, enumerateOptions) { path, _ in
+                FileHandle.standardError.write(Data("[removal-diag] post: \(path as String)\n".utf8))
+                return true
             }
         }
         
