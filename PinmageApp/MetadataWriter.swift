@@ -167,7 +167,11 @@ struct MetadataWriter {
         // Fail closed if any write cannot be created.
         if !removeDate, let date = date {
             let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+            // XMP date values must be in XMP form (YYYY-MM-DDThh:mm:ss); the
+            // EXIF layout "yyyy:MM:dd HH:mm:ss" is not parseable as XMP and the
+            // tag is dropped on readback (CI: "Date missing in png", while
+            // numeric GPS tags mapped fine).
+            formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
             let dateString = formatter.string(from: date)
             guard CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeOriginal" as CFString, dateString as CFString),
                   CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeDigitized" as CFString, dateString as CFString),
