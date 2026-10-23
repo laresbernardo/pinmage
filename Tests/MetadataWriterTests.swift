@@ -61,6 +61,21 @@ struct MetadataWriterTests {
         try require(CGImageDestinationFinalize(writer), "Metadata fixture finalize failed")
     }
 
+    /// Renders an image file to raw RGBA bytes so tests can prove re-encoding
+    /// never changed a single pixel, independent of container bytes.
+    static func pixelData(_ url: URL) throws -> [UInt8]? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        let width = image.width, height = image.height
+        var data = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(data: &data, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return data
+    }
+
     static func update(_ source: URL, _ target: URL, remove: Bool = false) -> Bool {
         MetadataWriter.updateImageMetadata(sourceURL: source, destinationURL: target,
             date: remove ? nil : Date(timeIntervalSince1970: 1_700_000_000), removeDate: remove,
@@ -114,7 +129,9 @@ struct MetadataWriterTests {
         for (ext, uti) in [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")] {
             let photo = root.appendingPathComponent("format.\(ext)")
             try fixture(at: photo, type: uti as CFString)
+            let pixelsBeforeWrite = try pixelData(photo)
             try require(update(photo, photo), "Overwrite failed for \(ext)")
+            try require(try pixelData(photo) == pixelsBeforeWrite, "Pixels changed during write in \(ext)")
             try require(MetadataWriter.validateImage(photo, photo), "Invalid \(ext) output")
             let coords = MetadataWriter.readExistingCoordinates(from: photo)
             try require(coords != nil && abs(coords!.latitude - 40.4) < 0.001 && abs(coords!.longitude + 3.7) < 0.001,
@@ -132,8 +149,10 @@ struct MetadataWriterTests {
             let photo = root.appendingPathComponent("removal.\(ext)")
             try fixtureWithMetadata(at: photo, type: uti as CFString)
             try require(MetadataWriter.readExistingCoordinates(from: photo) != nil, "Fixture GPS missing in \(ext)")
+            let pixelsBeforeRemoval = try pixelData(photo)
             try require(update(photo, photo, remove: true), "Removal overwrite failed for \(ext)")
             try require(MetadataWriter.validateImage(photo, photo), "Invalid \(ext) after removal")
+            try require(try pixelData(photo) == pixelsBeforeRemoval, "Pixels changed during removal in \(ext)")
             try require(MetadataWriter.readExistingCoordinates(from: photo) == nil, "GPS survived removal in \(ext)")
             let imageSource = CGImageSourceCreateWithURL(photo as CFURL, nil)!
             let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
