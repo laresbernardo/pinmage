@@ -185,14 +185,12 @@ struct MetadataWriter {
             kCGImageDestinationMergeMetadata: kCFBooleanFalse as Any,
         ]
         var copyError: Unmanaged<CFError>?
+        // CopyImageSource saves the result to the destination itself when it
+        // returns; CGImageDestinationFinalize must NOT be called afterward
+        // (ImageIO header contract) - the extra call fails and would discard
+        // an otherwise successful write.
         guard CGImageDestinationCopyImageSource(imageDestination, imageSource, copyOptions as CFDictionary, &copyError) else {
             print("Failed to write image with updated metadata: \(String(describing: copyError?.takeRetainedValue()))")
-            return false
-        }
-        
-        // Finalize (writes target output file to disk)
-        guard CGImageDestinationFinalize(imageDestination) else {
-            print("Failed to finalize image destination")
             return false
         }
         
