@@ -1,7 +1,7 @@
 {
-  "version": "1.2.0",
-  "build": "16",
-  "date": "2026-09-30",
+  "version": "1.2.1",
+  "build": "17",
+  "date": "2026-10-23",
   "appID": "com.pinmage.AIInjector",
   "minimumMacOS": "14.0",
   "downloadURL": "https://pinmage.bervos.org/Pinmage.dmg",

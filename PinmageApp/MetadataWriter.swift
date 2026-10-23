@@ -166,9 +166,26 @@ struct MetadataWriter {
             metadataDict[kCGImagePropertyGPSDictionary] = gpsDict
         }
         
-        // Add image with the updated metadata properties dictionary
-        // Using the same UTI as the source preserves the original format
-        CGImageDestinationAddImageFromSource(imageDestination, imageSource, 0, metadataDict as CFDictionary)
+        // Add image with the updated metadata properties dictionary.
+        // Using the same UTI as the source preserves the original format.
+        //
+        // M17 (honest removal semantics): when a removal is requested, some
+        // encoders (observed: PNG) still copy source metadata chunks into the
+        // output even though the key was deleted from the properties passed to
+        // CGImageDestinationAddImageFromSource, silently keeping the GPS/date
+        // the user asked to remove. For formats that re-encode losslessly
+        // (PNG, TIFF) decode the image and add it with only the explicit
+        // metadata dictionary, so nothing is inherited from the source. Lossy
+        // formats (JPEG, HEIC) keep the no-recompression source path, where
+        // the passed properties replace the source metadata.
+        let removalRequested = removeDate || removeLocation
+        let losslessEncode = (uti == "public.png" as CFString) || (uti == "public.tiff" as CFString)
+        if removalRequested && losslessEncode,
+           let decodedImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) {
+            CGImageDestinationAddImage(imageDestination, decodedImage, metadataDict as CFDictionary)
+        } else {
+            CGImageDestinationAddImageFromSource(imageDestination, imageSource, 0, metadataDict as CFDictionary)
+        }
         
         // Finalize (writes target output file to disk)
         guard CGImageDestinationFinalize(imageDestination) else {
