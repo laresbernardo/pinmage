@@ -41,9 +41,20 @@ jobs:
           echo "Building Pinmage $VERSION"
 
       - name: Test metadata write safety
+        env:
+          PRESERVATION_ARTIFACT_DIR: ${{ runner.temp }}/preservation-artifacts
         run: |
           swiftc PinmageApp/MetadataWriter.swift Tests/MetadataWriterTests.swift -o "$RUNNER_TEMP/metadata-writer-tests"
           "$RUNNER_TEMP/metadata-writer-tests"
+
+      - name: Upload preservation evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: preservation-evidence
+          path: ${{ runner.temp }}/preservation-artifacts
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Test update manifest and scheduling
         run: |
