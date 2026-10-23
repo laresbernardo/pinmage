@@ -123,6 +123,56 @@ struct MetadataWriter {
             return false
         }
         
+        // Two write paths, chosen by CI evidence:
+        // - Removals and HEIC go through CGImageDestinationCopyImageSource with
+        //   a CGImageMetadataRef (merging disabled): removals because
+        //   AddImageFromSource MERGES and removed keys survive (M17), HEIC
+        //   because AddImageFromSource re-encodes its pixels (M15, CI-proven
+        //   "Pixels changed during write in heic").
+        // - Plain sets on PNG/JPEG/TIFF keep the dictionary path: the app
+        //   verifies writes through CGImageSourceCopyPropertiesAtIndex, and
+        //   only the dictionary path maps date values back into the native
+        //   metadata chunks (CI: XMP-only PNG write fails "Date missing").
+        let utiString = uti as String
+        let useCopyWrite = removeDate || removeLocation || utiString == "public.heic" || utiString == "public.heif"
+        
+        if !useCopyWrite {
+            // Dictionary path (no removal requested): copy source properties,
+            // apply the date/GPS edits in EXIF string form, write with
+            // AddImageFromSource which transports compressed data untouched
+            // for PNG/JPEG/TIFF and maps values into native chunks.
+            var metadataDict = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any] ?? [:]
+            metadataDict.removeValue(forKey: kCGImageDestinationLossyCompressionQuality)
+            
+            if let date = date {
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+                let dateString = formatter.string(from: date)
+                var exifDict = metadataDict[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+                exifDict[kCGImagePropertyExifDateTimeOriginal] = dateString
+                exifDict[kCGImagePropertyExifDateTimeDigitized] = dateString
+                metadataDict[kCGImagePropertyExifDictionary] = exifDict
+                var tiffDict = metadataDict[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+                tiffDict[kCGImagePropertyTIFFDateTime] = dateString
+                metadataDict[kCGImagePropertyTIFFDictionary] = tiffDict
+            }
+            if let lat = latitude, let lon = longitude {
+                var gpsDict = metadataDict[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
+                gpsDict[kCGImagePropertyGPSLatitude] = abs(lat)
+                gpsDict[kCGImagePropertyGPSLatitudeRef] = lat >= 0 ? "N" : "S"
+                gpsDict[kCGImagePropertyGPSLongitude] = abs(lon)
+                gpsDict[kCGImagePropertyGPSLongitudeRef] = lon >= 0 ? "E" : "W"
+                metadataDict[kCGImagePropertyGPSDictionary] = gpsDict
+            }
+            
+            CGImageDestinationAddImageFromSource(imageDestination, imageSource, 0, metadataDict as CFDictionary)
+            guard CGImageDestinationFinalize(imageDestination) else {
+                FileHandle.standardError.write(Data("Failed to finalize image destination\n".utf8))
+                return false
+            }
+            return true
+        }
+        
         // Build the metadata object for the copy write.
         // CGImageDestinationCopyImageSource requires kCGImageDestinationMetadata
         // to hold a CGImageMetadataRef - a plain properties dictionary fails
