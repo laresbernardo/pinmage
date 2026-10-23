@@ -201,7 +201,7 @@ struct MetadataWriter {
                 let fullPath = path as String
                 let leaf = fullPath.components(separatedBy: "/").last ?? fullPath
                 let tagName = leaf.components(separatedBy: ":").last ?? leaf
-                if (removeDate && ["DateTimeOriginal", "DateTimeDigitized", "DateTime"].contains(tagName))
+                if (removeDate && ["DateTimeOriginal", "DateTimeDigitized", "DateTime", "DateCreated", "CreateDate"].contains(tagName))
                     || (removeLocation && tagName.hasPrefix("GPS")) {
                     pathsToRemove.append(fullPath)
                 }
@@ -223,7 +223,15 @@ struct MetadataWriter {
             // numeric GPS tags mapped fine).
             formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
             let dateString = formatter.string(from: date)
-            guard CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeOriginal" as CFString, dateString as CFString),
+            // MWG mappings (ImageIO header guidance): EXIF DateTimeOriginal
+            // lives in XMP as photoshop:DateCreated, DateTimeDigitized as
+            // xmp:CreateDate, TIFF DateTime as xmp:ModifyDate. The exif:/tiff:
+            // XMP tags are written too for readers that consume them, but
+            // ImageIO's own property-dictionary readback follows the MWG
+            // mapping (CI: exif:DateTimeOriginal alone read back as missing).
+            guard CGImageMetadataSetValueWithPath(mutableMetadata, nil, "photoshop:DateCreated" as CFString, dateString as CFString),
+                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "xmp:CreateDate" as CFString, dateString as CFString),
+                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeOriginal" as CFString, dateString as CFString),
                   CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeDigitized" as CFString, dateString as CFString),
                   CGImageMetadataSetValueWithPath(mutableMetadata, nil, "tiff:DateTime" as CFString, dateString as CFString) else {
                 FileHandle.standardError.write(Data("Failed to set date metadata\n".utf8))
