@@ -166,31 +166,28 @@ struct MetadataWriter {
             metadataDict[kCGImagePropertyGPSDictionary] = gpsDict
         }
         
-        // Add image with the updated metadata properties dictionary.
+        // Write the image with the updated metadata properties dictionary.
         // Using the same UTI as the source preserves the original format.
         //
-        // M17 (honest removal semantics): CGImageDestinationAddImageFromSource
-        // merges the passed properties over the source metadata instead of
-        // replacing them, so deleted GPS/date keys survive in the output
-        // (observed on CI in PNG and JPEG): the file kept exactly what the user
-        // asked to remove. For removal requests, copy the source with an
-        // explicit metadata set and merging disabled, which transports the
-        // compressed image data untouched and writes only intended metadata.
-        // If the destination cannot honor that, fail closed: never publish a
-        // file that kept metadata marked for removal.
-        let removalRequested = removeDate || removeLocation
-        if removalRequested {
-            let copyOptions: [CFString: Any] = [
-                kCGImageDestinationMetadata: metadataDict,
-                kCGImageDestinationMergeMetadata: kCFBooleanFalse as Any,
-            ]
-            var copyError: Unmanaged<CFError>?
-            guard CGImageDestinationCopyImageSource(imageDestination, imageSource, copyOptions as CFDictionary, &copyError) else {
-                print("Failed to copy image without removed metadata: \(String(describing: copyError?.takeRetainedValue()))")
-                return false
-            }
-        } else {
-            CGImageDestinationAddImageFromSource(imageDestination, imageSource, 0, metadataDict as CFDictionary)
+        // CGImageDestinationCopyImageSource transports the source's compressed
+        // image data untouched and writes only the provided metadata (merging
+        // disabled). This is required twice over:
+        // - M17 (honest removal semantics): AddImageFromSource merges the
+        //   passed properties over the source metadata instead of replacing
+        //   them, so deleted GPS/date keys survived in PNG and JPEG output -
+        //   the file kept exactly what the user asked to remove.
+        // - M15 (fidelity): the AddImageFromSource path re-encodes HEIC,
+        //   silently altering pixels on a plain metadata write.
+        // Fail closed: if the destination cannot honor the copy, publish
+        // nothing rather than a file with surviving or re-encoded content.
+        let copyOptions: [CFString: Any] = [
+            kCGImageDestinationMetadata: metadataDict,
+            kCGImageDestinationMergeMetadata: kCFBooleanFalse as Any,
+        ]
+        var copyError: Unmanaged<CFError>?
+        guard CGImageDestinationCopyImageSource(imageDestination, imageSource, copyOptions as CFDictionary, &copyError) else {
+            print("Failed to write image with updated metadata: \(String(describing: copyError?.takeRetainedValue()))")
+            return false
         }
         
         // Finalize (writes target output file to disk)
