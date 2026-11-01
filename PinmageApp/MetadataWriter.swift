@@ -5,7 +5,8 @@ import Darwin
 
 struct MetadataWriter {
     /// Copies image from sourceURL to destinationURL while embedding date and coordinates.
-    /// Returns true on success.
+    /// Returns true on success. Refuses multi-frame sources (copy or overwrite):
+    /// the encoder writes one image, so accepting them would silently drop frames.
     static func updateImageMetadata(sourceURL: URL, destinationURL: URL, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool) -> Bool {
         let isOverwrite = sourceURL.resolvingSymlinksInPath().standardizedFileURL == destinationURL.resolvingSymlinksInPath().standardizedFileURL
         let targetURL = isOverwrite ? sourceURL.resolvingSymlinksInPath() : destinationURL
@@ -108,6 +109,16 @@ struct MetadataWriter {
             return false
         }
         
+        // M15 (multi-frame fidelity): the destination below writes exactly one
+        // image (count 1), so a multi-frame source would silently lose its
+        // remaining frames. Refuse at the encoder entry for every operation:
+        // writeSafely refuses multi-frame overwrites upstream, but a copy to a
+        // different destination reached this encoder unchecked.
+        guard CGImageSourceGetCount(imageSource) == 1 else {
+            FileHandle.standardError.write(Data("Refusing multi-frame image: writing it would drop frames\n".utf8))
+            return false
+        }
+
         // Retrieve Uniform Type Identifier (UTI)
         guard let uti = CGImageSourceGetType(imageSource) else {
             print("Failed to get image source type")
@@ -151,7 +162,7 @@ struct MetadataWriter {
             // source data not represented in the properties dictionary -
             // custom ancillary chunks, embedded profiles handled outside the
             // image's color space, or auxiliary images - is not carried over.
-            // Multi-frame TIFFs are refused upstream of this function.
+            // Multi-frame sources are refused at this function's entry (M15).
             guard let decodedImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
                 FileHandle.standardError.write(Data("Failed to decode image for removal write\n".utf8))
                 return false

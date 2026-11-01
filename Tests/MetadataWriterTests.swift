@@ -283,6 +283,13 @@ struct MetadataWriterTests {
         let multiData = try Data(contentsOf: multi)
         try require(!update(multi, multi), "Multi-frame original must not lose frames")
         try require(try Data(contentsOf: multi) == multiData, "Multi-frame original changed")
+        // M15: the refusal covers copies, not only overwrites. A multi-frame
+        // source copied to a new destination previously produced a single-frame
+        // file, silently dropping the rest; it must fail and leave no output.
+        let multiCopy = root.appendingPathComponent("multipage-copy.tiff")
+        try require(!update(multi, multiCopy), "Multi-frame copy must be refused")
+        try require(!fm.fileExists(atPath: multiCopy.path), "Refused multi-frame copy left an output")
+        try require(try Data(contentsOf: multi) == multiData, "Refused multi-frame copy changed source")
         let alias = root.appendingPathComponent("alias.png")
         try fm.createSymbolicLink(at: alias, withDestinationURL: source)
         try require(update(alias, alias), "Symlink overwrite failed")

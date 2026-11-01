@@ -43,8 +43,8 @@ Metadata is encoded in a private staging directory beside the target, then reope
 and checked for format, dimensions and successful image decoding before publication.
 Overwrite mode flushes the completed file and atomically replaces the original path;
 encoder, validation and publication failures leave the original in place. Symlinks
-are followed rather than replaced. Multi-frame originals are refused because the
-current encoder writes one image. Existing output copies are never overwritten:
+are followed rather than replaced. Multi-frame sources are refused - for overwrites and for copies to a new
+file - because the current encoder writes one image. Existing output copies are never overwritten:
 choose a different output filename or folder if a copy already exists.
 
 The encoder and EXIF/GPS tag handling are unchanged. This does not make JPEG
