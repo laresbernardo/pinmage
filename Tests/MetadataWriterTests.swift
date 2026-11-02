@@ -325,6 +325,18 @@ struct MetadataWriterTests {
                 latitude: nil, longitude: nil, removeLocation: true), "Set date + remove location failed for \(ext)")
             try require(MetadataWriter.readExistingCoordinates(from: mixed) == nil, "GPS survived mixed write in \(ext)")
         }
+        // Reverse mixed request: set location, remove date. Date must be gone, GPS must be the requested one.
+        for (ext, uti) in [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")] {
+            let mixed = root.appendingPathComponent("mixed2.\(ext)")
+            try fixtureWithMetadata(at: mixed, type: uti as CFString)
+            try require(MetadataWriter.updateImageMetadata(sourceURL: mixed, destinationURL: mixed,
+                date: nil, removeDate: true, latitude: 12.5, longitude: -45.25, removeLocation: false), "Remove date + set location failed for \(ext)")
+            let coords = MetadataWriter.readExistingCoordinates(from: mixed)
+            try require(coords != nil && abs(coords!.latitude - 12.5) < 0.001 && abs(coords!.longitude + 45.25) < 0.001, "Requested GPS missing after mixed write in \(ext)")
+            let props = CGImageSourceCopyPropertiesAtIndex(CGImageSourceCreateWithURL(mixed as CFURL, nil)!, 0, nil) as? [CFString: Any]
+            let exif = props?[kCGImagePropertyExifDictionary] as? [CFString: Any]
+            try require(exif?[kCGImagePropertyExifDateTimeOriginal] == nil, "Date survived mixed removal in \(ext)")
+        }
         // No-op copy of a symlinked source yields a regular file.
         let linkSource = root.appendingPathComponent("link-source.png")
         try fixture(at: linkSource, type: "public.png" as CFString)
