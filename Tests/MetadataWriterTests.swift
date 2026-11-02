@@ -315,6 +315,26 @@ struct MetadataWriterTests {
         let removeWins = MetadataWriter.WritePlan(date: Date(), removeDate: true, latitude: 1, longitude: 2, removeLocation: true)
         try require(removeWins.date == nil && !removeWins.hasLocation && !removeWins.isNoOp, "Plan must normalize removal over set")
 
+        // Mixed request (set one field, remove the other) goes through the copy-write
+        // path with the readback check on: the production combination must still publish.
+        for (ext, uti) in [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")] {
+            let mixed = root.appendingPathComponent("mixed.\(ext)")
+            try fixtureWithMetadata(at: mixed, type: uti as CFString)
+            try require(MetadataWriter.updateImageMetadata(sourceURL: mixed, destinationURL: mixed,
+                date: Date(timeIntervalSince1970: 1_700_000_000), removeDate: false,
+                latitude: nil, longitude: nil, removeLocation: true), "Set date + remove location failed for \(ext)")
+            try require(MetadataWriter.readExistingCoordinates(from: mixed) == nil, "GPS survived mixed write in \(ext)")
+        }
+        // No-op copy of a symlinked source yields a regular file.
+        let linkSource = root.appendingPathComponent("link-source.png")
+        try fixture(at: linkSource, type: "public.png" as CFString)
+        let linkAlias = root.appendingPathComponent("link-alias.png")
+        try fm.createSymbolicLink(at: linkAlias, withDestinationURL: linkSource)
+        let linkCopy = root.appendingPathComponent("link-copy.png")
+        try require(MetadataWriter.updateImageMetadata(sourceURL: linkAlias, destinationURL: linkCopy, date: nil, removeDate: false, latitude: nil, longitude: nil, removeLocation: false), "No-op copy of symlink failed")
+        try require((try? fm.destinationOfSymbolicLink(atPath: linkCopy.path)) == nil, "No-op copy published a symlink")
+        try require(try Data(contentsOf: linkCopy) == Data(contentsOf: linkSource), "No-op symlink copy not byte-identical")
+
         // I03: readback verification. A failing verifier must publish nothing.
         let verifySource = root.appendingPathComponent("verify.png")
         try fixture(at: verifySource, type: "public.png" as CFString)

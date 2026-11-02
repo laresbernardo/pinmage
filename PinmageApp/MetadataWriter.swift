@@ -55,7 +55,8 @@ struct MetadataWriter {
                 do {
                     guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
                           CGImageSourceGetCount(source) == 1 else { return false }
-                    try FileManager.default.copyItem(at: sourceURL, to: temporaryURL)
+                    // Data, not copyItem: a symlinked source must yield a regular file.
+                    try Data(contentsOf: sourceURL).write(to: temporaryURL)
                     return true
                 } catch {
                     return false
