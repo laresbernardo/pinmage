@@ -4,15 +4,119 @@ import CoreServices
 import Darwin
 
 struct MetadataWriter {
+    /// The complete, immutable edit request for one file. Built once from the caller's
+    /// arguments; the same values drive the no-op decision, the encoder and the readback
+    /// check, so they cannot disagree. Removal wins over a set of the same field, as the
+    /// encoder always did. A location needs both coordinates, as before.
+    struct WritePlan: Equatable {
+        let date: Date?
+        let latitude: Double?
+        let longitude: Double?
+        let removeDate: Bool
+        let removeLocation: Bool
+
+        init(date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool) {
+            self.removeDate = removeDate
+            self.removeLocation = removeLocation
+            self.date = removeDate ? nil : date
+            if !removeLocation, let latitude = latitude, let longitude = longitude {
+                self.latitude = latitude
+                self.longitude = longitude
+            } else {
+                self.latitude = nil
+                self.longitude = nil
+            }
+        }
+
+        var hasLocation: Bool { latitude != nil && longitude != nil }
+        /// Nothing to set and nothing to remove: the file has no reason to be re-encoded.
+        var isNoOp: Bool { date == nil && !hasLocation && !removeDate && !removeLocation }
+    }
+
     /// Copies image from sourceURL to destinationURL while embedding date and coordinates.
     /// Returns true on success. Refuses multi-frame sources (copy or overwrite):
     /// the encoder writes one image, so accepting them would silently drop frames.
+    /// A request with nothing to set or remove never re-encodes: an overwrite leaves the
+    /// original untouched and a copy is a byte-for-byte copy of the source.
     static func updateImageMetadata(sourceURL: URL, destinationURL: URL, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool) -> Bool {
+        let plan = WritePlan(date: date, removeDate: removeDate, latitude: latitude, longitude: longitude, removeLocation: removeLocation)
         let isOverwrite = sourceURL.resolvingSymlinksInPath().standardizedFileURL == destinationURL.resolvingSymlinksInPath().standardizedFileURL
         let targetURL = isOverwrite ? sourceURL.resolvingSymlinksInPath() : destinationURL
+        if plan.isNoOp {
+            if isOverwrite {
+                // Same readable single-image check the write path applies, without any write.
+                guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+                      CGImageSourceGetCount(source) == 1,
+                      CGImageSourceGetStatus(source) == .statusComplete else { return false }
+                return true
+            }
+            // Copy: verbatim bytes through the same staging, validation and exclusive publish.
+            return writeSafely(sourceURL: sourceURL, destinationURL: targetURL, overwrite: false, encode: { temporaryURL in
+                do {
+                    guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+                          CGImageSourceGetCount(source) == 1 else { return false }
+                    // Data, not copyItem: a symlinked source must yield a regular file.
+                    try Data(contentsOf: sourceURL).write(to: temporaryURL)
+                    return true
+                } catch {
+                    return false
+                }
+            })
+        }
         return writeSafely(sourceURL: sourceURL, destinationURL: targetURL, overwrite: isOverwrite, encode: { temporaryURL in
-            encodeImageMetadata(sourceURL: sourceURL, destinationURL: temporaryURL, date: date, removeDate: removeDate, latitude: latitude, longitude: longitude, removeLocation: removeLocation)
-        })
+            encodeImageMetadata(sourceURL: sourceURL, destinationURL: temporaryURL, date: plan.date, removeDate: plan.removeDate, latitude: plan.latitude, longitude: plan.longitude, removeLocation: plan.removeLocation)
+        }, verify: { stagedURL in verifyIntent(plan, in: stagedURL) })
+    }
+
+    /// I03: reads the staged output back through ImageIO, independent of the encoder,
+    /// and checks it holds what the plan asked for. Fails closed.
+    static func verifyIntent(_ plan: WritePlan, in url: URL) -> Bool {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            return false
+        }
+        let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        if plan.removeDate {
+            if exif?[kCGImagePropertyExifDateTimeOriginal] != nil
+                || exif?[kCGImagePropertyExifDateTimeDigitized] != nil
+                || tiff?[kCGImagePropertyTIFFDateTime] != nil {
+                FileHandle.standardError.write(Data("Readback: date still present after removal\n".utf8))
+                return false
+            }
+        }
+        if plan.removeLocation, props[kCGImagePropertyGPSDictionary] != nil {
+            FileHandle.standardError.write(Data("Readback: GPS still present after removal\n".utf8))
+            return false
+        }
+        if let date = plan.date {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+            let expected = formatter.string(from: date)
+            guard let written = exif?[kCGImagePropertyExifDateTimeOriginal] as? String,
+                  normalizedDateString(written) == expected else {
+                FileHandle.standardError.write(Data("Readback: capture date differs from the requested date\n".utf8))
+                return false
+            }
+        }
+        if let lat = plan.latitude, let lon = plan.longitude {
+            guard let coords = readExistingCoordinates(from: url),
+                  abs(coords.latitude - lat) < 0.0001, abs(coords.longitude - lon) < 0.0001 else {
+                FileHandle.standardError.write(Data("Readback: coordinates differ from the requested location\n".utf8))
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Accepts the EXIF layout and the XMP layout ImageIO may report, to second precision.
+    private static func normalizedDateString(_ value: String) -> String {
+        var text = Array(value.prefix(19))
+        if text.count == 19 {
+            for index in [4, 7] where text[index] == "-" { text[index] = ":" }
+            if text[10] == "T" { text[10] = " " }
+        }
+        return String(text)
     }
 
     /// The injected operations let tests simulate encoder, validation and disk failures.
@@ -23,6 +127,7 @@ struct MetadataWriter {
         overwrite: Bool,
         encode: (URL) -> Bool,
         validate: (URL, URL) -> Bool = validateImage,
+        verify: (URL) -> Bool = { _ in true },
         publish: (URL, URL, Bool) throws -> Void = publishImage
     ) -> Bool {
         let fileManager = FileManager.default
@@ -43,7 +148,7 @@ struct MetadataWriter {
                 guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
                       CGImageSourceGetCount(source) == 1 else { return false }
             }
-            guard encode(temporaryURL), validate(sourceURL, temporaryURL) else { return false }
+            guard encode(temporaryURL), validate(sourceURL, temporaryURL), verify(temporaryURL) else { return false }
             if overwrite {
                 guard try Data(contentsOf: sourceURL) == originalData else { return false }
                 let attributes = try fileManager.attributesOfItem(atPath: sourceURL.path)
@@ -180,6 +285,29 @@ struct MetadataWriter {
             }
             if removeLocation {
                 removalDict.removeValue(forKey: kCGImagePropertyGPSDictionary)
+            }
+            // A mixed request (remove one field, set the other) must still carry the
+            // requested values: this branch used to apply only the removals, so the set
+            // half was silently dropped. Same EXIF-string form as the dictionary path.
+            if !removeDate, let date = date {
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+                let dateString = formatter.string(from: date)
+                var exifDict = removalDict[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+                exifDict[kCGImagePropertyExifDateTimeOriginal] = dateString
+                exifDict[kCGImagePropertyExifDateTimeDigitized] = dateString
+                removalDict[kCGImagePropertyExifDictionary] = exifDict
+                var tiffDict = removalDict[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+                tiffDict[kCGImagePropertyTIFFDateTime] = dateString
+                removalDict[kCGImagePropertyTIFFDictionary] = tiffDict
+            }
+            if !removeLocation, let lat = latitude, let lon = longitude {
+                var gpsDict = removalDict[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
+                gpsDict[kCGImagePropertyGPSLatitude] = abs(lat)
+                gpsDict[kCGImagePropertyGPSLatitudeRef] = lat >= 0 ? "N" : "S"
+                gpsDict[kCGImagePropertyGPSLongitude] = abs(lon)
+                gpsDict[kCGImagePropertyGPSLongitudeRef] = lon >= 0 ? "E" : "W"
+                removalDict[kCGImagePropertyGPSDictionary] = gpsDict
             }
             CGImageDestinationAddImage(imageDestination, decodedImage, removalDict as CFDictionary)
             guard CGImageDestinationFinalize(imageDestination) else {

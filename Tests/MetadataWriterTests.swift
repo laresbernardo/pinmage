@@ -290,6 +290,92 @@ struct MetadataWriterTests {
         try require(!update(multi, multiCopy), "Multi-frame copy must be refused")
         try require(!fm.fileExists(atPath: multiCopy.path), "Refused multi-frame copy left an output")
         try require(try Data(contentsOf: multi) == multiData, "Refused multi-frame copy changed source")
+        // M16: a request with nothing to set or remove never re-encodes.
+        for (ext, uti) in [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")] {
+            let still = root.appendingPathComponent("noop.\(ext)")
+            try fixtureWithMetadata(at: still, type: uti as CFString)
+            let stillData = try Data(contentsOf: still)
+            let stillMTime = try fm.attributesOfItem(atPath: still.path)[.modificationDate] as? Date
+            try require(MetadataWriter.updateImageMetadata(sourceURL: still, destinationURL: still, date: nil, removeDate: false, latitude: nil, longitude: nil, removeLocation: false), "No-op overwrite failed for \(ext)")
+            try require(try Data(contentsOf: still) == stillData, "No-op overwrite changed bytes in \(ext)")
+            try require(try fm.attributesOfItem(atPath: still.path)[.modificationDate] as? Date == stillMTime, "No-op overwrite touched the file in \(ext)")
+            // Partial coordinates are not a location: still a no-op.
+            try require(MetadataWriter.updateImageMetadata(sourceURL: still, destinationURL: still, date: nil, removeDate: false, latitude: 40.4, longitude: nil, removeLocation: false), "Half-location no-op failed for \(ext)")
+            try require(try Data(contentsOf: still) == stillData, "Half-location request changed bytes in \(ext)")
+            let stillCopy = root.appendingPathComponent("noop-copy.\(ext)")
+            try require(MetadataWriter.updateImageMetadata(sourceURL: still, destinationURL: stillCopy, date: nil, removeDate: false, latitude: nil, longitude: nil, removeLocation: false), "No-op copy failed for \(ext)")
+            try require(try Data(contentsOf: stillCopy) == stillData, "No-op copy is not byte-identical in \(ext)")
+            try require(!MetadataWriter.updateImageMetadata(sourceURL: still, destinationURL: stillCopy, date: nil, removeDate: false, latitude: nil, longitude: nil, removeLocation: false), "No-op copy must not overwrite an existing file in \(ext)")
+        }
+        try require(!MetadataWriter.updateImageMetadata(sourceURL: multi, destinationURL: multi, date: nil, removeDate: false, latitude: nil, longitude: nil, removeLocation: false), "No-op must still refuse multi-frame")
+        let multiNoOpCopy = root.appendingPathComponent("multipage-noop-copy.tiff")
+        try require(!MetadataWriter.updateImageMetadata(sourceURL: multi, destinationURL: multiNoOpCopy, date: nil, removeDate: false, latitude: nil, longitude: nil, removeLocation: false), "No-op copy must refuse multi-frame")
+        try require(!fm.fileExists(atPath: multiNoOpCopy.path), "Refused no-op copy left an output")
+        // Removal wins over a set of the same field.
+        let removeWins = MetadataWriter.WritePlan(date: Date(), removeDate: true, latitude: 1, longitude: 2, removeLocation: true)
+        try require(removeWins.date == nil && !removeWins.hasLocation && !removeWins.isNoOp, "Plan must normalize removal over set")
+
+        // Mixed request (set one field, remove the other) goes through the copy-write
+        // path with the readback check on: the production combination must still publish.
+        for (ext, uti) in [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")] {
+            let mixed = root.appendingPathComponent("mixed.\(ext)")
+            try fixtureWithMetadata(at: mixed, type: uti as CFString)
+            try require(MetadataWriter.updateImageMetadata(sourceURL: mixed, destinationURL: mixed,
+                date: Date(timeIntervalSince1970: 1_700_000_000), removeDate: false,
+                latitude: nil, longitude: nil, removeLocation: true), "Set date + remove location failed for \(ext)")
+            try require(MetadataWriter.readExistingCoordinates(from: mixed) == nil, "GPS survived mixed write in \(ext)")
+        }
+        // Reverse mixed request: set location, remove date. Date must be gone, GPS must be the requested one.
+        for (ext, uti) in [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")] {
+            let mixed = root.appendingPathComponent("mixed2.\(ext)")
+            try fixtureWithMetadata(at: mixed, type: uti as CFString)
+            try require(MetadataWriter.updateImageMetadata(sourceURL: mixed, destinationURL: mixed,
+                date: nil, removeDate: true, latitude: 12.5, longitude: -45.25, removeLocation: false), "Remove date + set location failed for \(ext)")
+            let coords = MetadataWriter.readExistingCoordinates(from: mixed)
+            try require(coords != nil && abs(coords!.latitude - 12.5) < 0.001 && abs(coords!.longitude + 45.25) < 0.001, "Requested GPS missing after mixed write in \(ext)")
+            let props = CGImageSourceCopyPropertiesAtIndex(CGImageSourceCreateWithURL(mixed as CFURL, nil)!, 0, nil) as? [CFString: Any]
+            let exif = props?[kCGImagePropertyExifDictionary] as? [CFString: Any]
+            try require(exif?[kCGImagePropertyExifDateTimeOriginal] == nil, "Date survived mixed removal in \(ext)")
+        }
+        // No-op copy of a symlinked source yields a regular file.
+        let linkSource = root.appendingPathComponent("link-source.png")
+        try fixture(at: linkSource, type: "public.png" as CFString)
+        let linkAlias = root.appendingPathComponent("link-alias.png")
+        try fm.createSymbolicLink(at: linkAlias, withDestinationURL: linkSource)
+        let linkCopy = root.appendingPathComponent("link-copy.png")
+        try require(MetadataWriter.updateImageMetadata(sourceURL: linkAlias, destinationURL: linkCopy, date: nil, removeDate: false, latitude: nil, longitude: nil, removeLocation: false), "No-op copy of symlink failed")
+        try require((try? fm.destinationOfSymbolicLink(atPath: linkCopy.path)) == nil, "No-op copy published a symlink")
+        try require(try Data(contentsOf: linkCopy) == Data(contentsOf: linkSource), "No-op symlink copy not byte-identical")
+
+        // I03: readback verification. A failing verifier must publish nothing.
+        let verifySource = root.appendingPathComponent("verify.png")
+        try fixture(at: verifySource, type: "public.png" as CFString)
+        let verifyBytes = try Data(contentsOf: verifySource)
+        let verifyEncode: (URL) -> Bool = { url in try! verifyBytes.write(to: url); return true }
+        try require(!MetadataWriter.writeSafely(sourceURL: verifySource, destinationURL: verifySource,
+            overwrite: true, encode: verifyEncode, verify: { _ in false }), "Readback failure must fail")
+        try require(try Data(contentsOf: verifySource) == verifyBytes, "Readback failure changed original")
+        let verifyCopy = root.appendingPathComponent("verify-copy.png")
+        try require(!MetadataWriter.writeSafely(sourceURL: verifySource, destinationURL: verifyCopy,
+            overwrite: false, encode: verifyEncode, verify: { _ in false }), "Readback failure must fail for copies")
+        try require(!fm.fileExists(atPath: verifyCopy.path), "Readback failure left a copy")
+        // verifyIntent against real outputs, per format.
+        let when = Date(timeIntervalSince1970: 1_700_000_000)
+        for (ext, uti) in [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")] {
+            let written = root.appendingPathComponent("intent.\(ext)")
+            try fixture(at: written, type: uti as CFString)
+            try require(update(written, written), "Intent write failed for \(ext)")
+            let good = MetadataWriter.WritePlan(date: when, removeDate: false, latitude: 40.4, longitude: -3.7, removeLocation: false)
+            try require(MetadataWriter.verifyIntent(good, in: written), "Readback rejected a correct write in \(ext)")
+            let wrongDate = MetadataWriter.WritePlan(date: when.addingTimeInterval(86_400), removeDate: false, latitude: nil, longitude: nil, removeLocation: false)
+            try require(!MetadataWriter.verifyIntent(wrongDate, in: written), "Readback accepted a wrong date in \(ext)")
+            let wrongPlace = MetadataWriter.WritePlan(date: nil, removeDate: false, latitude: 10, longitude: 10, removeLocation: false)
+            try require(!MetadataWriter.verifyIntent(wrongPlace, in: written), "Readback accepted a wrong location in \(ext)")
+            let notRemoved = MetadataWriter.WritePlan(date: nil, removeDate: true, latitude: nil, longitude: nil, removeLocation: true)
+            try require(!MetadataWriter.verifyIntent(notRemoved, in: written), "Readback accepted surviving date/GPS in \(ext)")
+            try require(update(written, written, remove: true), "Intent removal failed for \(ext)")
+            try require(MetadataWriter.verifyIntent(notRemoved, in: written), "Readback rejected a correct removal in \(ext)")
+        }
         let alias = root.appendingPathComponent("alias.png")
         try fm.createSymbolicLink(at: alias, withDestinationURL: source)
         try require(update(alias, alias), "Symlink overwrite failed")

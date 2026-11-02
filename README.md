@@ -54,6 +54,11 @@ ACLs and creation timestamps) are not guaranteed by this write path. Close other
 editors before overwrite: the source is checked for changes before publication,
 but this is not a lock against another process writing at the same instant.
 
+A request with nothing to set or remove never re-encodes: an overwrite leaves the
+original untouched and a copy is a byte-for-byte copy. Before publishing, the staged
+output is read back and must hold the requested date and coordinates, or lack the
+date/GPS the user asked to remove; otherwise nothing is published.
+
 Run the standalone safety tests on macOS:
 
 ```bash
