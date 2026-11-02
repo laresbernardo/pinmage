@@ -286,6 +286,29 @@ struct MetadataWriter {
             if removeLocation {
                 removalDict.removeValue(forKey: kCGImagePropertyGPSDictionary)
             }
+            // A mixed request (remove one field, set the other) must still carry the
+            // requested values: this branch used to apply only the removals, so the set
+            // half was silently dropped. Same EXIF-string form as the dictionary path.
+            if !removeDate, let date = date {
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+                let dateString = formatter.string(from: date)
+                var exifDict = removalDict[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+                exifDict[kCGImagePropertyExifDateTimeOriginal] = dateString
+                exifDict[kCGImagePropertyExifDateTimeDigitized] = dateString
+                removalDict[kCGImagePropertyExifDictionary] = exifDict
+                var tiffDict = removalDict[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+                tiffDict[kCGImagePropertyTIFFDateTime] = dateString
+                removalDict[kCGImagePropertyTIFFDictionary] = tiffDict
+            }
+            if !removeLocation, let lat = latitude, let lon = longitude {
+                var gpsDict = removalDict[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
+                gpsDict[kCGImagePropertyGPSLatitude] = abs(lat)
+                gpsDict[kCGImagePropertyGPSLatitudeRef] = lat >= 0 ? "N" : "S"
+                gpsDict[kCGImagePropertyGPSLongitude] = abs(lon)
+                gpsDict[kCGImagePropertyGPSLongitudeRef] = lon >= 0 ? "E" : "W"
+                removalDict[kCGImagePropertyGPSDictionary] = gpsDict
+            }
             CGImageDestinationAddImage(imageDestination, decodedImage, removalDict as CFDictionary)
             guard CGImageDestinationFinalize(imageDestination) else {
                 FileHandle.standardError.write(Data("Failed to finalize image destination\n".utf8))
