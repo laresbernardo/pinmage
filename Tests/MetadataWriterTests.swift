@@ -555,6 +555,224 @@ struct MetadataWriterTests {
         return out
     }
 
+
+    /// Splices an arbitrary TIFF tag by the same IFD0-at-EOF repoint the
+    /// production tag-700 correction uses.
+    static func spliceTIFFTag(_ data: Data, tag: Int, type: Int, payload: Data) -> Data? {
+        let b = [UInt8](data)
+        guard b.count >= 8 else { return nil }
+        let little: Bool
+        if b[0] == 0x49 && b[1] == 0x49 { little = true }
+        else if b[0] == 0x4D && b[1] == 0x4D { little = false }
+        else { return nil }
+        func u16(_ o: Int) -> Int {
+            little ? Int(b[o]) | Int(b[o + 1]) << 8 : Int(b[o]) << 8 | Int(b[o + 1])
+        }
+        func u32(_ o: Int) -> Int {
+            little ? Int(b[o]) | Int(b[o + 1]) << 8 | Int(b[o + 2]) << 16 | Int(b[o + 3]) << 24
+                   : Int(b[o]) << 24 | Int(b[o + 1]) << 16 | Int(b[o + 2]) << 8 | Int(b[o + 3])
+        }
+        func put16(_ d: inout Data, _ v: Int) {
+            if little { d.append(UInt8(v & 0xFF)); d.append(UInt8((v >> 8) & 0xFF)) }
+            else { d.append(UInt8((v >> 8) & 0xFF)); d.append(UInt8(v & 0xFF)) }
+        }
+        func put32(_ d: inout Data, _ v: Int) {
+            if little { d.append(UInt8(v & 0xFF)); d.append(UInt8((v >> 8) & 0xFF)); d.append(UInt8((v >> 16) & 0xFF)); d.append(UInt8((v >> 24) & 0xFF)) }
+            else { d.append(UInt8((v >> 24) & 0xFF)); d.append(UInt8((v >> 16) & 0xFF)); d.append(UInt8((v >> 8) & 0xFF)); d.append(UInt8(v & 0xFF)) }
+        }
+        guard u16(2) == 42 else { return nil }
+        let ifd0 = u32(4)
+        guard ifd0 > 0, ifd0 + 2 <= b.count else { return nil }
+        let n = u16(ifd0)
+        let base = ifd0 + 2
+        guard base + 12 * n + 4 <= b.count else { return nil }
+        var kept: [(Int, Data)] = []
+        for i in 0..<n {
+            let ent = base + 12 * i
+            if u16(ent) != tag { kept.append((u16(ent), Data(b[ent..<(ent + 12)]))) }
+        }
+        var out = Data(b)
+        let newIFD = out.count
+        let valueOff = newIFD + 2 + 12 * (kept.count + 1) + 4
+        var ifd = Data()
+        put16(&ifd, kept.count + 1)
+        var inserted = false
+        for (entryTag, raw) in kept.sorted(by: { $0.0 < $1.0 }) {
+            if !inserted && entryTag > tag {
+                put16(&ifd, tag); put16(&ifd, type); put32(&ifd, payload.count); put32(&ifd, valueOff)
+                inserted = true
+            }
+            ifd.append(raw)
+        }
+        if !inserted {
+            put16(&ifd, tag); put16(&ifd, type); put32(&ifd, payload.count); put32(&ifd, valueOff)
+        }
+        ifd.append(Data(b[(base + 12 * n)..<(base + 12 * n + 4)]))
+        var headerFix = Data()
+        put32(&headerFix, newIFD)
+        out.replaceSubrange(4..<8, with: headerFix)
+        out.append(ifd)
+        out.append(payload)
+        return out
+    }
+
+    /// Entropy-coded bytes between the SOS segment and the trailing EOI.
+    static func jpegEntropyData(_ data: Data) -> Data? {
+        let b = [UInt8](data)
+        guard b.count >= 4, b[0] == 0xFF, b[1] == 0xD8 else { return nil }
+        var pos = 2
+        while pos + 1 < b.count {
+            guard b[pos] == 0xFF else { return nil }
+            while pos < b.count && b[pos] == 0xFF { pos += 1 }
+            guard pos < b.count else { return nil }
+            let m = b[pos]; pos += 1
+            if m == 0xD8 || m == 0xD9 || m == 0x01 || (m >= 0xD0 && m <= 0xD7) { continue }
+            guard pos + 2 <= b.count else { return nil }
+            let len = Int(b[pos]) << 8 | Int(b[pos + 1])
+            guard len >= 2, pos + len <= b.count else { return nil }
+            if m == 0xDA {
+                let start = pos + len
+                guard b.count >= start + 2, b[b.count - 2] == 0xFF, b[b.count - 1] == 0xD9 else { return nil }
+                return Data(b[start..<(b.count - 2)])
+            }
+            pos += len
+        }
+        return nil
+    }
+
+    /// Hex dump of the meta children whose contents decide whether aux HEIC
+    /// entities can be verified (iinf item types, iref references, iloc
+    /// extents, pitm). Semantic parsing happens offline from the artifact.
+    static func heicMetaChildHex(_ data: Data) -> [String] {
+        let b = [UInt8](data)
+        guard b.count >= 8 else { return ["unparseable"] }
+        var out: [String] = []
+        var pos = 0
+        while pos + 8 <= b.count {
+            var size = Int(b[pos]) << 24 | Int(b[pos + 1]) << 16 | Int(b[pos + 2]) << 8 | Int(b[pos + 3])
+            let type = String(bytes: b[(pos + 4)..<(pos + 8)], encoding: .ascii) ?? "????"
+            var hdr = 8
+            if size == 1 {
+                guard pos + 16 <= b.count else { return out }
+                size = 0
+                for i in 0..<8 { size = size << 8 | Int(b[pos + 8 + i]) }
+                hdr = 16
+            } else if size == 0 {
+                size = b.count - pos
+            }
+            guard size >= hdr, pos + size <= b.count else { return out }
+            if type == "meta" {
+                var c = pos + hdr + 4
+                while c + 8 <= pos + size {
+                    var cs = Int(b[c]) << 24 | Int(b[c + 1]) << 16 | Int(b[c + 2]) << 8 | Int(b[c + 3])
+                    let ct = String(bytes: b[(c + 4)..<(c + 8)], encoding: .ascii) ?? "????"
+                    var ch = 8
+                    if cs == 1 {
+                        guard c + 16 <= pos + size else { break }
+                        cs = 0
+                        for i in 0..<8 { cs = cs << 8 | Int(b[c + 8 + i]) }
+                        ch = 16
+                    }
+                    guard cs >= ch, c + cs <= pos + size else { break }
+                    if ct == "iinf" || ct == "iref" || ct == "iloc" || ct == "pitm" || ct == "iprp" {
+                        out.append("\(ct) size=\(cs) hex=\(hexPrefix(Data(b[(c + ch)..<(c + cs)]), 200))")
+                    }
+                    c += cs
+                }
+            }
+            pos += size
+        }
+        return out
+    }
+
+    // MARK: - M15 cycle-2 route probe (diagnostic-only)
+
+    /// Settles two open questions with byte evidence: (1) whether the JPEG
+    /// dictionary set route re-encodes the compressed stream (DQT evidence
+    /// says yes) and whether the copy-write route maps a planned date/GPS set
+    /// back into EXIF readback while transporting pixels and entropy exactly;
+    /// (2) what the HEIC meta children (iinf/iref/iloc) actually contain on
+    /// the fixture before and after a copy-write set, so the final HEIC aux
+    /// guard can be built on verified structure instead of shape parity.
+    static func runRouteProbe(root: URL) {
+        let outDir = ProcessInfo.processInfo.environment["PRESERVATION_ARTIFACT_DIR"].map { URL(fileURLWithPath: $0) }
+        let probeRoot = root.appendingPathComponent("routeprobe", isDirectory: true)
+        try? FileManager.default.createDirectory(at: probeRoot, withIntermediateDirectories: true)
+        var report: [String] = []
+        let requestedDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let exifFormatter = DateFormatter()
+        exifFormatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+
+        // JPEG set, dictionary route (production path).
+        let dictJpg = probeRoot.appendingPathComponent("route-set-dict.jpg")
+        try? fixtureWithMetadata(at: dictJpg, type: "public.jpeg" as CFString)
+        if let before = try? Data(contentsOf: dictJpg), let rgbaBefore = try? pixelData(dictJpg) {
+            let ok = update(dictJpg, dictJpg)
+            let after = (try? Data(contentsOf: dictJpg)) ?? Data()
+            let rgbaAfter = try? pixelData(dictJpg)
+            let entBefore = jpegEntropyData(before) ?? Data()
+            let entAfter = jpegEntropyData(after) ?? Data()
+            report.append("jpg-set-dictionary: ok=\(ok) rgbaEqual=\(rgbaAfter == rgbaBefore) entropyEqual=\(entBefore == entAfter)")
+            report.append("entropy-before \(hexPrefix(entBefore, 96))")
+            report.append("entropy-after  \(hexPrefix(entAfter, 96))")
+        } else {
+            report.append("jpg-set-dictionary: fixture failed")
+        }
+
+        // JPEG set, copy-write route (simulation through the production plan).
+        let cwJpg = probeRoot.appendingPathComponent("route-set-cw-src.jpg")
+        let cwOut = probeRoot.appendingPathComponent("route-set-cw-out.jpg")
+        try? fixtureWithMetadata(at: cwJpg, type: "public.jpeg" as CFString)
+        if let data = try? Data(contentsOf: cwJpg), let rgbaBefore = try? pixelData(cwJpg),
+           let cwSource = CGImageSourceCreateWithData(data as CFData, nil),
+           let cwDest = CGImageDestinationCreateWithURL(cwOut as CFURL, "public.jpeg" as CFString, 1, nil) {
+            let meta = CGImageSourceCopyMetadataAtIndex(cwSource, 0, nil).flatMap { CGImageMetadataCreateMutableCopy($0) } ?? CGImageMetadataCreateMutable()
+            let planned = MetadataWriter.applyMetadataPlan(meta, date: requestedDate, removeDate: false,
+                                                           latitude: 40.4, longitude: -3.7, removeLocation: false)
+            var copyError: Unmanaged<CFError>?
+            let copyOptions: [CFString: Any] = [
+                kCGImageDestinationMetadata: meta,
+                kCGImageDestinationMergeMetadata: kCFBooleanFalse as Any,
+            ]
+            let ok = planned && CGImageDestinationCopyImageSource(cwDest, cwSource, copyOptions as CFDictionary, &copyError)
+            if ok, let outData = try? Data(contentsOf: cwOut), let rgbaAfter = try? pixelData(cwOut) {
+                let props = CGImageSourceCopyPropertiesAtIndex(CGImageSourceCreateWithURL(cwOut as CFURL, nil)!, 0, nil) as? [CFString: Any]
+                let exif = props?[kCGImagePropertyExifDictionary] as? [CFString: Any]
+                let readback = exif?[kCGImagePropertyExifDateTimeOriginal] as? String
+                let gps = props?[kCGImagePropertyGPSDictionary] as? [CFString: Any]
+                let entBefore = jpegEntropyData(data) ?? Data()
+                let entAfter = jpegEntropyData(outData) ?? Data()
+                report.append("jpg-set-copywrite: ok=true rgbaEqual=\(rgbaAfter == rgbaBefore) entropyEqual=\(entBefore == entAfter)")
+                report.append("jpg-set-copywrite: dateReadback=\(readback ?? "nil") expected=\(exifFormatter.string(from: requestedDate)) gpsPresent=\(gps != nil)")
+                for line in (jpegInventory(outData) ?? []).map({ "\($0.0) len=\($0.1)" }) {
+                    report.append("jpg-set-copywrite seg: \(line)")
+                }
+            } else {
+                let errDesc = copyError?.takeRetainedValue().localizedDescription ?? "unknown"
+                report.append("jpg-set-copywrite: ok=false planned=\(planned) error=\(errDesc)")
+            }
+        } else {
+            report.append("jpg-set-copywrite: setup failed")
+        }
+
+        // HEIC meta children before and after a production copy-write set.
+        let heic = probeRoot.appendingPathComponent("route-set.heic")
+        try? fixtureWithMetadata(at: heic, type: "public.heic" as CFString)
+        if let before = try? Data(contentsOf: heic) {
+            report.append("heic-before: " + heicMetaChildHex(before).joined(separator: " | "))
+            let ok = update(heic, heic)
+            let after = (try? Data(contentsOf: heic)) ?? Data()
+            report.append("heic-set: ok=\(ok)")
+            report.append("heic-after: " + heicMetaChildHex(after).joined(separator: " | "))
+        } else {
+            report.append("heic-set: fixture failed")
+        }
+
+        if let outDir = outDir {
+            try? report.joined(separator: "\n").write(to: outDir.appendingPathComponent("routeprobe-report.txt"), atomically: true, encoding: .utf8)
+        }
+    }
+
     static func runAuxTransportProbe(root: URL) {
         struct Scenario {
             let name: String
@@ -651,6 +869,7 @@ struct MetadataWriterTests {
         defer { try? fm.removeItem(at: root) }
         runDiagnosticsProbe(root: root)
         runAuxTransportProbe(root: root)
+        runRouteProbe(root: root)
         let source = root.appendingPathComponent("original.png")
         try fixture(at: source, type: "public.png" as CFString)
         let original = try Data(contentsOf: source)
@@ -1077,6 +1296,70 @@ struct MetadataWriterTests {
         try require(try fm.destinationOfSymbolicLink(atPath: alias.path) == source.path, "Symlink was replaced")
         try require(!(try fm.contentsOfDirectory(atPath: root.path)).contains(where: { $0.hasPrefix(".pinmage-write-") }),
                     "Staging directories leaked")
+
+        // M15 aux guards (verify-or-refuse; transport evidence run 41683971917,
+        // guard semantics mirrored and validated on crafted bytes locally):
+        // JPEG/TIFF/HEIC writes must never silently drop auxiliary data.
+
+        // TIFF: an unsurfaced private tag refuses both removal and set, intact.
+        for remove in [true, false] {
+            let f = root.appendingPathComponent("aux-tiff-priv-\(remove ? "remove" : "set").tiff")
+            try fixtureWithMetadata(at: f, type: "public.tiff" as CFString)
+            let spliced = spliceTIFFAux(try Data(contentsOf: f), tag: "suite")
+            try require(spliced != nil, "TIFF aux splice failed")
+            try spliced!.write(to: f)
+            let before = try Data(contentsOf: f)
+            try require(!update(f, f, remove: remove), "TIFF \(remove ? "removal" : "set") with an unsurfaced private tag must refuse")
+            try require(try Data(contentsOf: f) == before, "Refused TIFF write must leave the original intact")
+        }
+
+        // TIFF: a stale XMP carrier (tag 700) is corrected or dropped, never carried stale.
+        let tiff700 = root.appendingPathComponent("aux-tiff-700.tiff")
+        try fixtureWithMetadata(at: tiff700, type: "public.tiff" as CFString)
+        let stalePacket = Data("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmp:CreateDate=\"2001-02-03T04:05:06\"/></rdf:RDF></x:xmpmeta>".utf8)
+        let with700 = spliceTIFFTag(try Data(contentsOf: tiff700), tag: 700, type: 7, payload: stalePacket)
+        try require(with700 != nil, "TIFF tag-700 splice failed")
+        try with700!.write(to: tiff700)
+        try require(update(tiff700, tiff700, remove: true), "TIFF removal with a stale XMP carrier must correct or drop it, not refuse")
+        let tiff700Bytes = try Data(contentsOf: tiff700)
+        try require(tiff700Bytes.range(of: Data("2001:02:03".utf8)) == nil, "Stale XMP date (native form) survived TIFF removal")
+        try require(tiff700Bytes.range(of: Data("2001-02-03".utf8)) == nil, "Stale XMP date (packet form) survived TIFF removal")
+
+        // JPEG removal transports foreign aux segments byte-exact (run 41683971917).
+        let jpgAux = root.appendingPathComponent("aux-jpg-remove.jpg")
+        try fixtureWithMetadata(at: jpgAux, type: "public.jpeg" as CFString)
+        let splicedJ = spliceJPEGAux(try Data(contentsOf: jpgAux), tag: "suite")
+        try require(splicedJ != nil, "JPEG aux splice failed")
+        try splicedJ!.write(to: jpgAux)
+        try require(update(jpgAux, jpgAux, remove: true), "JPEG removal must transport foreign aux segments")
+        let jpgAuxBytes = try Data(contentsOf: jpgAux)
+        for needle in ["AUXPROBE-APP13-suite", "AUXPROBE-COM-suite", "AUXPROBE-APP11-suite"] {
+            try require(jpgAuxBytes.range(of: Data(needle.utf8)) != nil, "JPEG removal lost \(needle)")
+        }
+
+        // JPEG set on the dictionary route drops foreign segments (run 41683971917):
+        // refuse until the route is settled, leave the original intact.
+        let jpgSet = root.appendingPathComponent("aux-jpg-set.jpg")
+        try fixtureWithMetadata(at: jpgSet, type: "public.jpeg" as CFString)
+        let splicedJS = spliceJPEGAux(try Data(contentsOf: jpgSet), tag: "suite")
+        try require(splicedJS != nil, "JPEG aux splice failed")
+        try splicedJS!.write(to: jpgSet)
+        let jpgSetBefore = try Data(contentsOf: jpgSet)
+        try require(!update(jpgSet, jpgSet), "JPEG set with foreign aux segments must refuse until the route is settled")
+        try require(try Data(contentsOf: jpgSet) == jpgSetBefore, "Refused JPEG set must leave the original intact")
+
+        // HEIC: foreign top-level boxes refuse on both write paths, intact.
+        for remove in [true, false] {
+            let f = root.appendingPathComponent("aux-heic-\(remove ? "remove" : "set").heic")
+            try fixtureWithMetadata(at: f, type: "public.heic" as CFString)
+            let splicedH = spliceHEICAux(try Data(contentsOf: f), tag: "suite")
+            try require(splicedH != nil, "HEIC aux splice failed")
+            try splicedH!.write(to: f)
+            let before = try Data(contentsOf: f)
+            try require(!update(f, f, remove: remove), "HEIC \(remove ? "removal" : "set") with foreign top-level boxes must refuse")
+            try require(try Data(contentsOf: f) == before, "Refused HEIC write must leave the original intact")
+        }
+
         print("Metadata write safety tests passed (PNG, JPEG, TIFF, HEIC).")
     }
 }

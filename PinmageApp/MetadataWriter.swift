@@ -269,9 +269,11 @@ struct MetadataWriter {
             // images - is not carried over; for PNG the XMP carrier is
             // corrected and re-spliced below, and any other uncarried aux
             // chunk refuses the write instead of being silently dropped
-            // (M15b, per the reject-what-we-cannot-verify rule). TIFF aux
-            // tags beyond the
-            // properties dictionaries remain a documented gap. Multi-frame
+            // (M15b, per the reject-what-we-cannot-verify rule). For TIFF the
+            // byte-level aux guard below refuses any source tag the rebuild
+            // would drop or alter (private tags included), with the XMP
+            // carrier (tag 700) corrected through the plan-verified XMP
+            // machinery. Multi-frame
             // sources are refused at this function's entry (M15).
             guard let decodedImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
                 FileHandle.standardError.write(Data("Failed to decode image for removal write\n".utf8))
@@ -326,6 +328,11 @@ struct MetadataWriter {
                 guard corrected.success else { return false }
                 guard pngAuxChunksPreserved(source: sourceData, destinationURL: destinationURL, operation: "removal", xmpHandled: corrected.xmpHandled) else { return false }
             }
+            if utiString == "public.tiff" {
+                guard tiffAuxTagsHandled(sourceData: sourceData, destinationURL: destinationURL, imageSource: imageSource,
+                                         date: date, removeDate: removeDate, latitude: latitude, longitude: longitude,
+                                         removeLocation: removeLocation, operation: "removal") else { return false }
+            }
             // M15b, tag level: this branch rebuilds metadata from the
             // properties dictionary, so every source tag the dictionary
             // surfaces must come back unless the request removed it. Applies
@@ -351,8 +358,13 @@ struct MetadataWriter {
         if !useCopyWrite {
             // Dictionary path (no removal requested): copy source properties,
             // apply the date/GPS edits in EXIF string form, write with
-            // AddImageFromSource which transports compressed data untouched
-            // for PNG/JPEG/TIFF and maps values into native chunks.
+            // AddImageFromSource, which maps values into native chunks. CI
+            // evidence (run 41683971917): this route preserves decoded pixels
+            // on the fixture but rewrites the JPEG quantization tables and
+            // drops foreign JPEG segments and unsurfaced TIFF tags, so the
+            // byte-level guards below refuse writes it cannot carry; the
+            // JPEG set routing itself is being settled against the
+            // copy-write route probe.
             var metadataDict = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any] ?? [:]
             metadataDict.removeValue(forKey: kCGImageDestinationLossyCompressionQuality)
             
@@ -395,6 +407,24 @@ struct MetadataWriter {
                                                         removeLocation: removeLocation, operation: "set")
                 guard corrected.success else { return false }
                 guard pngAuxChunksPreserved(source: sourceData, destinationURL: destinationURL, operation: "set", xmpHandled: corrected.xmpHandled) else { return false }
+            }
+            if utiString == "public.jpeg" {
+                // Fail-closed while the set routing is being settled (CI
+                // evidence, run 41683971917): the dictionary path drops aux
+                // APPn/COM segments, so any source segment outside the
+                // carried set refuses the write. APP13/APP14 are regenerated
+                // by the writer on this path. The entropy stream is NOT
+                // compared here: this route rewrites the quantization tables,
+                // and decoded-pixel equality is asserted by the suite; the
+                // copy-write route probe decides whether this path is
+                // replaced outright.
+                guard jpegAuxSegmentsPreserved(source: sourceData, destinationURL: destinationURL, operation: "set",
+                                               extraCarried: [0xED, 0xEE], requireEntropyMatch: false) else { return false }
+            }
+            if utiString == "public.tiff" {
+                guard tiffAuxTagsHandled(sourceData: sourceData, destinationURL: destinationURL, imageSource: imageSource,
+                                         date: date, removeDate: removeDate, latitude: latitude, longitude: longitude,
+                                         removeLocation: removeLocation, operation: "set") else { return false }
             }
             return true
         }
@@ -448,10 +478,435 @@ struct MetadataWriter {
             FileHandle.standardError.write(Data("Failed to write image with updated metadata: \(errDesc)\n".utf8))
             return false
         }
-        
+        if utiString == "public.jpeg" {
+            // CI evidence (run 41683971917): this route transports foreign
+            // segments and the compressed stream byte-exact, but drops a
+            // recognizable Photoshop IRB (APP13) - carried here because the
+            // writer regenerates it - and regenerates both APP1 segments
+            // from the provided metadata. Any other aux segment that fails
+            // to survive byte-exact, or any entropy change, refuses.
+            guard jpegAuxSegmentsPreserved(source: sourceData, destinationURL: destinationURL, operation: isRemoval ? "removal" : "set",
+                                           extraCarried: [0xED], requireEntropyMatch: true) else { return false }
+        }
+        if utiString == "public.heic" || utiString == "public.heif" {
+            // Interim guard (refusal-only): any top-level box outside the
+            // writer-carried set must survive payload-exact. Meta-item and
+            // aux-entity verification (iinf/iref/iloc contents) is the next
+            // evidence cycle; unknown structures refuse rather than pass.
+            guard heicAuxBoxesPreserved(source: sourceData, destinationURL: destinationURL,
+                                        operation: isRemoval ? "removal" : "set") else { return false }
+        }
         return true
     }
     
+
+    // MARK: - M15 aux guards: JPEG, TIFF, HEIC (verify-or-refuse)
+
+    /// JPEG marker walk up to the first SOS: (marker, payload) per segment
+    /// plus every byte from the end of the SOS segment to the trailing EOI
+    /// (entropy-coded data, including later scans). Nil when the bytes are
+    /// not a well-formed JPEG. Payload-exact comparison of the segments the
+    /// writer is not proven to regenerate is how a write proves it did not
+    /// silently drop or alter auxiliary data; comparing the entropy bytes is
+    /// how it proves the compressed image was transported, not re-encoded.
+    private static func jpegSegments(_ data: Data) -> (segments: [(marker: UInt8, payload: Data)], entropy: Data)? {
+        let b = [UInt8](data)
+        guard b.count >= 4, b[0] == 0xFF, b[1] == 0xD8 else { return nil }
+        var segs: [(UInt8, Data)] = []
+        var pos = 2
+        while pos + 1 < b.count {
+            guard b[pos] == 0xFF else { return nil }
+            while pos < b.count && b[pos] == 0xFF { pos += 1 }
+            guard pos < b.count else { return nil }
+            let m = b[pos]; pos += 1
+            if m == 0xD8 || m == 0xD9 || m == 0x01 || (m >= 0xD0 && m <= 0xD7) {
+                continue
+            }
+            guard pos + 2 <= b.count else { return nil }
+            let len = Int(b[pos]) << 8 | Int(b[pos + 1])
+            guard len >= 2, pos + len <= b.count else { return nil }
+            segs.append((m, Data(b[(pos + 2)..<(pos + len)])))
+            if m == 0xDA {
+                let entropyStart = pos + len
+                guard b.count >= entropyStart + 2,
+                      b[b.count - 2] == 0xFF, b[b.count - 1] == 0xD9 else { return nil }
+                return (segs, Data(b[entropyStart..<(b.count - 2)]))
+            }
+            pos += len
+        }
+        return nil
+    }
+
+    /// Markers the JPEG writer is proven (CI run 41683971917) or expected to
+    /// regenerate or carry structurally; everything else - aux APPn segments
+    /// and COM - must survive with its exact payload. APP1 is carried because
+    /// the writer regenerates Exif/XMP from the written metadata (verified
+    /// separately by the plan and readback checks); APP2 as the color space;
+    /// APP14 only on the set path (the dictionary writer regenerates it).
+    private static func jpegCarriedMarkers(extra: Set<UInt8>) -> Set<UInt8> {
+        var carried: Set<UInt8> = [0xD8, 0xD9, 0x01, 0xDA, 0xDB, 0xC4, 0xCC, 0xDD, 0xDC, 0xDE, 0xDF, 0xC8, 0xE0, 0xE1, 0xE2]
+        for m in 0xD0...0xD7 { carried.insert(UInt8(m)) }
+        for m in 0xC0...0xCF where m != 0xC4 && m != 0xC8 && m != 0xCC { carried.insert(UInt8(m)) }
+        carried.formUnion(extra)
+        return carried
+    }
+
+    /// Fail-closed JPEG aux guard. Every source segment outside the carried
+    /// set must survive with its exact payload; on the removal path the
+    /// entropy-coded data must also match byte-exact (CI evidence: the
+    /// dictionary set path rewrites the quantization tables, so its compressed
+    /// stream cannot be trusted to match - that path is guarded by decoded-
+    /// pixel assertions in the suite instead, and loses aux segments, which
+    /// this guard refuses).
+    private static func jpegAuxSegmentsPreserved(source sourceData: Data, destinationURL: URL, operation: String, extraCarried: Set<UInt8>, requireEntropyMatch: Bool) -> Bool {
+        guard let source = jpegSegments(sourceData),
+              let stagedData = try? Data(contentsOf: destinationURL),
+              let staged = jpegSegments(stagedData) else {
+            FileHandle.standardError.write(Data("Refusing JPEG \(operation): source or staged output did not parse as JPEG\n".utf8))
+            return false
+        }
+        let carried = jpegCarriedMarkers(extra: extraCarried)
+        var byMarker: [UInt8: [Data]] = [:]
+        for (m, payload) in staged.segments where !carried.contains(m) {
+            byMarker[m, default: []].append(payload)
+        }
+        var lostCounts: [UInt8: Int] = [:]
+        for (m, payload) in source.segments where !carried.contains(m) {
+            if let index = byMarker[m]?.firstIndex(of: payload) {
+                byMarker[m]?.remove(at: index)
+            } else {
+                lostCounts[m, default: 0] += 1
+            }
+        }
+        let lost = lostCounts.sorted { $0.key < $1.key }.map { String(format: "FF%02X x%ld", $0.key, $0.value) }
+        guard lost.isEmpty else {
+            FileHandle.standardError.write(Data("Refusing JPEG \(operation): output would lose or alter segments [\(lost.joined(separator: ", "))]\n".utf8))
+            return false
+        }
+        if requireEntropyMatch, source.entropy != staged.entropy {
+            FileHandle.standardError.write(Data("Refusing JPEG \(operation): compressed image data was re-encoded\n".utf8))
+            return false
+        }
+        return true
+    }
+
+    /// TIFF IFD walk with resolved values: (label, entries, next offset) per
+    /// IFD, following the Exif/GPS/Interop sub-IFD pointers, endianness from
+    /// the header. Comparing resolved values ignores file layout (offsets
+    /// move legitimately between writes) and checks tag content.
+    private static func tiffIFDs(_ data: Data) -> (little: Bool, ifds: [(label: String, entries: [(tag: Int, type: Int, count: Int, value: Data?, raw: Data)], next: Int)])? {
+        let b = [UInt8](data)
+        guard b.count >= 8 else { return nil }
+        let little: Bool
+        if b[0] == 0x49 && b[1] == 0x49 { little = true }
+        else if b[0] == 0x4D && b[1] == 0x4D { little = false }
+        else { return nil }
+        func u16(_ o: Int) -> Int {
+            little ? Int(b[o]) | Int(b[o + 1]) << 8 : Int(b[o]) << 8 | Int(b[o + 1])
+        }
+        func u32(_ o: Int) -> Int {
+            little ? Int(b[o]) | Int(b[o + 1]) << 8 | Int(b[o + 2]) << 16 | Int(b[o + 3]) << 24
+                   : Int(b[o]) << 24 | Int(b[o + 1]) << 16 | Int(b[o + 2]) << 8 | Int(b[o + 3])
+        }
+        guard u16(2) == 42 else { return nil }
+        let typeSizes = [1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8]
+        var ifds: [(String, [(tag: Int, type: Int, count: Int, value: Data?, raw: Data)], Int)] = []
+        func readIFD(_ off: Int, _ label: String, _ depth: Int) {
+            guard off > 0, off + 2 <= b.count, depth <= 4 else { return }
+            let n = u16(off)
+            let base = off + 2
+            guard base + 12 * n + 4 <= b.count else { return }
+            var entries: [(tag: Int, type: Int, count: Int, value: Data?, raw: Data)] = []
+            for i in 0..<n {
+                let ent = base + 12 * i
+                let tag = u16(ent)
+                let typ = u16(ent + 2)
+                let cnt = u32(ent + 4)
+                let size = (typeSizes[typ] ?? 1) * cnt
+                let value: Data?
+                if size <= 4 {
+                    value = Data(b[(ent + 8)..<(ent + 8 + size)])
+                } else {
+                    let voff = u32(ent + 8)
+                    value = voff + size <= b.count ? Data(b[voff..<(voff + size)]) : nil
+                }
+                entries.append((tag, typ, cnt, value, Data(b[ent..<(ent + 12)])))
+            }
+            let next = u32(base + 12 * n)
+            ifds.append((label, entries, next))
+            for entry in entries where entry.tag == 34665 || entry.tag == 34853 || entry.tag == 40965 {
+                guard let inline = entry.value, inline.count >= 4 else { continue }
+                let voff = little
+                    ? Int(inline[0]) | Int(inline[1]) << 8 | Int(inline[2]) << 16 | Int(inline[3]) << 24
+                    : Int(inline[0]) << 24 | Int(inline[1]) << 16 | Int(inline[2]) << 8 | Int(inline[3])
+                readIFD(voff, "\(label)>\(entry.tag)", depth + 1)
+            }
+            if next != 0 { readIFD(next, label + "+next", depth + 1) }
+        }
+        readIFD(u32(4), "IFD0", 0)
+        return (little, ifds)
+    }
+
+    /// Tags whose values are file layout, not content (strip/tile offsets
+    /// and byte counts): presence is required, the value is not compared.
+    /// Sub-IFD pointers are not checked at all - the sub-IFD contents are
+    /// guarded by label, and a fully-exempted sub-IFD may legitimately vanish.
+    private static let tiffLayoutTags: Set<Int> = [273, 279, 324, 325, 513, 514]
+
+    /// Tags the writer regenerates from other state (ICC profile from the
+    /// color space, asserted separately by the suite): not compared.
+    private static let tiffRegeneratedTags: Set<Int> = [34675]
+
+    /// Every source tag outside the layout/regenerated/exempt sets must
+    /// survive in the same IFD with the same type and exact resolved value.
+    /// Returns the violations; nil when either file does not parse.
+    private static func tiffAuxTagViolations(sourceData: Data, outputData: Data, exempt: [String: Set<Int>]) -> [String]? {
+        guard let source = tiffIFDs(sourceData), let output = tiffIFDs(outputData) else { return nil }
+        var outValues: [String: [Int: [(Int, Data)]]] = [:]
+        for (label, entries, _) in output.ifds {
+            for entry in entries {
+                if let value = entry.value {
+                    outValues[label, default: [:]][entry.tag, default: []].append((entry.type, value))
+                }
+            }
+        }
+        var outPresent: Set<String> = []
+        for (label, entries, _) in output.ifds {
+            for entry in entries { outPresent.insert("\(label)#\(entry.tag)") }
+        }
+        var violations: [String] = []
+        for (label, entries, _) in source.ifds {
+            let exemptHere = exempt[label] ?? []
+            for entry in entries {
+                if tiffRegeneratedTags.contains(entry.tag) { continue }
+                if exemptHere.contains(entry.tag) { continue }
+                if entry.tag == 34665 || entry.tag == 34853 || entry.tag == 40965 { continue }
+                if tiffLayoutTags.contains(entry.tag) {
+                    if !outPresent.contains("\(label)#\(entry.tag)") {
+                        violations.append("layout tag \(entry.tag) missing at \(label)")
+                    }
+                    continue
+                }
+                guard let value = entry.value else {
+                    violations.append("tag \(entry.tag) unreadable at \(label)")
+                    continue
+                }
+                let candidates = outValues[label]?[entry.tag] ?? []
+                if !candidates.contains(where: { $0.0 == entry.type && $0.1 == value }) {
+                    violations.append("tag \(entry.tag) missing or altered at \(label)")
+                }
+            }
+        }
+        return violations
+    }
+
+    /// Rebuilds the output's IFD0 at EOF with tag 700 replaced by the
+    /// corrected XMP packet (or dropped when the packet is empty) and repoints
+    /// the header. Every original entry byte stays valid because nothing in
+    /// the file moves; only the IFD0 pointer and the appended data change.
+    /// Tag 700's value is an offset-free blob, so this is the one tag that can
+    /// be reattached safely after correction - arbitrary private tags are
+    /// refused by the guard instead of reattached (an opaque payload could
+    /// embed exactly the values a removal targets).
+    private static func tiffReplacingTag700(_ data: Data, correctedPacket: Data?) -> Data? {
+        let b = [UInt8](data)
+        guard b.count >= 8 else { return nil }
+        let little: Bool
+        if b[0] == 0x49 && b[1] == 0x49 { little = true }
+        else if b[0] == 0x4D && b[1] == 0x4D { little = false }
+        else { return nil }
+        func u16(_ o: Int) -> Int {
+            little ? Int(b[o]) | Int(b[o + 1]) << 8 : Int(b[o]) << 8 | Int(b[o + 1])
+        }
+        func u32(_ o: Int) -> Int {
+            little ? Int(b[o]) | Int(b[o + 1]) << 8 | Int(b[o + 2]) << 16 | Int(b[o + 3]) << 24
+                   : Int(b[o]) << 24 | Int(b[o + 1]) << 16 | Int(b[o + 2]) << 8 | Int(b[o + 3])
+        }
+        func put16(_ d: inout Data, _ v: Int) {
+            if little { d.append(UInt8(v & 0xFF)); d.append(UInt8((v >> 8) & 0xFF)) }
+            else { d.append(UInt8((v >> 8) & 0xFF)); d.append(UInt8(v & 0xFF)) }
+        }
+        func put32(_ d: inout Data, _ v: Int) {
+            if little { d.append(UInt8(v & 0xFF)); d.append(UInt8((v >> 8) & 0xFF)); d.append(UInt8((v >> 16) & 0xFF)); d.append(UInt8((v >> 24) & 0xFF)) }
+            else { d.append(UInt8((v >> 24) & 0xFF)); d.append(UInt8((v >> 16) & 0xFF)); d.append(UInt8((v >> 8) & 0xFF)); d.append(UInt8(v & 0xFF)) }
+        }
+        guard u16(2) == 42 else { return nil }
+        let ifd0 = u32(4)
+        guard ifd0 > 0, ifd0 + 2 <= b.count else { return nil }
+        let n = u16(ifd0)
+        let base = ifd0 + 2
+        guard base + 12 * n + 4 <= b.count else { return nil }
+        var entries: [(Int, Data)] = []
+        var had700 = false
+        for i in 0..<n {
+            let ent = base + 12 * i
+            let tag = u16(ent)
+            if tag == 700 {
+                had700 = true
+                continue
+            }
+            entries.append((tag, Data(b[ent..<(ent + 12)])))
+        }
+        let willHave700 = correctedPacket != nil && !(correctedPacket?.isEmpty ?? true)
+        let newCount = entries.count + (willHave700 ? 1 : 0)
+        guard had700 || willHave700 else { return data }
+        var out = Data(b)
+        let newIFD = out.count
+        let valueOff = newIFD + 2 + 12 * newCount + 4
+        var ifd = Data()
+        put16(&ifd, newCount)
+        var inserted = false
+        for (tag, raw) in entries.sorted(by: { $0.0 < $1.0 }) {
+            if willHave700 && !inserted && tag > 700 {
+                put16(&ifd, 700); put16(&ifd, 7); put32(&ifd, correctedPacket!.count); put32(&ifd, valueOff)
+                inserted = true
+            }
+            ifd.append(raw)
+        }
+        if willHave700 && !inserted {
+            put16(&ifd, 700); put16(&ifd, 7); put32(&ifd, correctedPacket!.count); put32(&ifd, valueOff)
+        }
+        ifd.append(Data(b[(base + 12 * n)..<(base + 12 * n + 4)]))
+        var headerFix = Data()
+        put32(&headerFix, newIFD)
+        out.replaceSubrange(4..<8, with: headerFix)
+        out.append(ifd)
+        if let packet = correctedPacket, !packet.isEmpty {
+            out.append(packet)
+            if packet.count % 2 != 0 { out.append(0) }
+        }
+        return out
+    }
+
+    /// TIFF aux handling shared by the removal rebuild and the plain-set
+    /// paths. The XMP carrier (tag 700) is never carried stale: it gets the
+    /// corrected packet from the plan-verified XMP machinery or is dropped.
+    /// Every other source tag outside the layout/regenerated/exempt sets must
+    /// survive with its exact resolved value; anything less refuses the
+    /// write - no arbitrary private-tag reattach, since an opaque payload
+    /// could embed exactly the values a removal targets.
+    private static func tiffAuxTagsHandled(sourceData: Data, destinationURL: URL, imageSource: CGImageSource,
+                                           date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?,
+                                           removeLocation: Bool, operation: String) -> Bool {
+        var exempt: [String: Set<Int>] = [:]
+        if date != nil || removeDate {
+            exempt["IFD0", default: []].insert(306)
+            exempt["IFD0>34665", default: []].formUnion([36867, 36868])
+        }
+        if latitude != nil || removeLocation {
+            exempt["IFD0>34853", default: []] = [0, 1, 2, 3, 4]
+        }
+        guard let sourceIFDs = tiffIFDs(sourceData) else {
+            FileHandle.standardError.write(Data("Refusing TIFF \(operation): source did not parse as TIFF\n".utf8))
+            return false
+        }
+        let sourceHas700 = sourceIFDs.ifds.contains { label, entries, _ in
+            label == "IFD0" && entries.contains { $0.tag == 700 }
+        }
+        if sourceHas700 { exempt["IFD0", default: []].insert(700) }
+        if sourceHas700 {
+            guard let packet = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
+                                                  latitude: latitude, longitude: longitude, removeLocation: removeLocation) else {
+                FileHandle.standardError.write(Data("Refusing TIFF \(operation): corrected XMP failed preservation checks\n".utf8))
+                return false
+            }
+            guard let stagedData = try? Data(contentsOf: destinationURL),
+                  let replaced = tiffReplacingTag700(stagedData, correctedPacket: packet.isEmpty ? nil : packet) else {
+                FileHandle.standardError.write(Data("Refusing TIFF \(operation): could not stage the corrected tag 700\n".utf8))
+                return false
+            }
+            do {
+                try replaced.write(to: destinationURL)
+            } catch {
+                FileHandle.standardError.write(Data("Refusing TIFF \(operation): could not stage the corrected tag 700\n".utf8))
+                return false
+            }
+            // Verify the staged tag 700 carries exactly the corrected packet
+            // (or is gone when the corrections emptied it).
+            guard let finalData = try? Data(contentsOf: destinationURL),
+                  let finalIFDs = tiffIFDs(finalData) else {
+                FileHandle.standardError.write(Data("Refusing TIFF \(operation): corrected tag 700 did not verify\n".utf8))
+                return false
+            }
+            let final700 = finalIFDs.ifds.first { label, _, _ in label == "IFD0" }?.entries.filter { $0.tag == 700 } ?? []
+            let expected700: [Data] = packet.isEmpty ? [] : [packet]
+            guard final700.compactMap({ $0.value }) == expected700 else {
+                FileHandle.standardError.write(Data("Refusing TIFF \(operation): corrected tag 700 did not verify\n".utf8))
+                return false
+            }
+        }
+        guard let finalData = try? Data(contentsOf: destinationURL),
+              let violations = tiffAuxTagViolations(sourceData: sourceData, outputData: finalData, exempt: exempt) else {
+            FileHandle.standardError.write(Data("Refusing TIFF \(operation): source or staged output did not parse as TIFF\n".utf8))
+            return false
+        }
+        guard violations.isEmpty else {
+            FileHandle.standardError.write(Data("Refusing TIFF \(operation): output would lose or alter tags [\(violations.joined(separator: ", "))]\n".utf8))
+            return false
+        }
+        return true
+    }
+
+    /// Top-level ISOBMFF box walk: (type, payload). Nil when the bytes do
+    /// not parse as boxes.
+    private static func heicTopLevelBoxes(_ data: Data) -> [(type: String, payload: Data)]? {
+        let b = [UInt8](data)
+        guard b.count >= 8 else { return nil }
+        var boxes: [(String, Data)] = []
+        var pos = 0
+        while pos + 8 <= b.count {
+            var size = Int(b[pos]) << 24 | Int(b[pos + 1]) << 16 | Int(b[pos + 2]) << 8 | Int(b[pos + 3])
+            let type = String(bytes: b[(pos + 4)..<(pos + 8)], encoding: .ascii) ?? "????"
+            var header = 8
+            if size == 1 {
+                guard pos + 16 <= b.count else { return nil }
+                size = Int(b[pos + 8]) << 56 | Int(b[pos + 9]) << 48 | Int(b[pos + 10]) << 40 | Int(b[pos + 11]) << 32
+                     | Int(b[pos + 12]) << 24 | Int(b[pos + 13]) << 16 | Int(b[pos + 14]) << 8 | Int(b[pos + 15])
+                header = 16
+            } else if size == 0 {
+                size = b.count - pos
+            }
+            guard size >= header, pos + size <= b.count else { return nil }
+            boxes.append((type, Data(b[(pos + header)..<(pos + size)])))
+            pos += size
+        }
+        guard pos == b.count else { return nil }
+        return boxes
+    }
+
+    /// HEIC aux guard, refusal-only for now: any top-level box the writer is
+    /// not proven to regenerate (evidence run 41683971917: free/uuid are
+    /// dropped) must survive payload-exact, otherwise the write refuses.
+    /// Meta-item and aux-entity verification (iinf/iref/iloc) is the next
+    /// evidence cycle; unknown structures refuse rather than pass silently.
+    private static func heicAuxBoxesPreserved(source sourceData: Data, destinationURL: URL, operation: String) -> Bool {
+        let carried: Set<String> = ["ftyp", "meta", "mdat"]
+        guard let sourceBoxes = heicTopLevelBoxes(sourceData),
+              let stagedData = try? Data(contentsOf: destinationURL),
+              let stagedBoxes = heicTopLevelBoxes(stagedData) else {
+            FileHandle.standardError.write(Data("Refusing HEIC \(operation): source or staged output did not parse as boxes\n".utf8))
+            return false
+        }
+        var byType: [String: [Data]] = [:]
+        for (type, payload) in stagedBoxes where !carried.contains(type) {
+            byType[type, default: []].append(payload)
+        }
+        var lostCounts: [String: Int] = [:]
+        for (type, payload) in sourceBoxes where !carried.contains(type) {
+            if let index = byType[type]?.firstIndex(of: payload) {
+                byType[type]?.remove(at: index)
+            } else {
+                lostCounts[type, default: 0] += 1
+            }
+        }
+        let lost = lostCounts.sorted { $0.key < $1.key }.map { "\($0.key) x\($0.value)" }
+        guard lost.isEmpty else {
+            FileHandle.standardError.write(Data("Refusing HEIC \(operation): output would lose or alter boxes [\(lost.joined(separator: ", "))]\n".utf8))
+            return false
+        }
+        return true
+    }
+
     // MARK: - M15b PNG aux-chunk fidelity
 
     /// Chunk types a PNG write is proven to reproduce, so their absence from a
