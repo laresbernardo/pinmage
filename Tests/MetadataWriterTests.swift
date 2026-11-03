@@ -1204,6 +1204,16 @@ struct MetadataWriterTests {
         let root = fm.temporaryDirectory.appendingPathComponent("PinmageTests-\(UUID().uuidString)")
         try fm.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? fm.removeItem(at: root) }
+        // Soft checks collect failures across independent format stages so
+        // one CI run surfaces every failing surface with its evidence; the
+        // hard gate at the end of main keeps the suite red on any of them.
+        var softFailures: [String] = []
+        func check(_ condition: Bool, _ message: String) {
+            if !condition {
+                softFailures.append(message)
+                FileHandle.standardError.write(Data("CHECK FAILED: \(message)\n".utf8))
+            }
+        }
         runDiagnosticsProbe(root: root)
         runAuxTransportProbe(root: root)
         runRouteProbe(root: root)
@@ -1277,16 +1287,19 @@ struct MetadataWriterTests {
             let photo = root.appendingPathComponent("format.\(ext)")
             try fixture(at: photo, type: uti as CFString)
             let pixelsBeforeWrite = try pixelData(photo)
-            try require(update(photo, photo), "Overwrite failed for \(ext)")
-            try require(try pixelData(photo) == pixelsBeforeWrite, "Pixels changed during write in \(ext)")
-            try require(MetadataWriter.validateImage(photo, photo), "Invalid \(ext) output")
-            let coords = MetadataWriter.readExistingCoordinates(from: photo)
-            try require(coords != nil && abs(coords!.latitude - 40.4) < 0.001 && abs(coords!.longitude + 3.7) < 0.001,
-                        "GPS tags missing in \(ext)")
-            let imageSource = CGImageSourceCreateWithURL(photo as CFURL, nil)!
-            let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
-            let exif = props?[kCGImagePropertyExifDictionary] as? [CFString: Any]
-            try require(exif?[kCGImagePropertyExifDateTimeOriginal] != nil, "Date missing in \(ext)")
+            let wrote = update(photo, photo)
+            check(wrote, "Overwrite failed for \(ext)")
+            if wrote {
+                check(try pixelData(photo) == pixelsBeforeWrite, "Pixels changed during write in \(ext)")
+                check(MetadataWriter.validateImage(photo, photo), "Invalid \(ext) output")
+                let coords = MetadataWriter.readExistingCoordinates(from: photo)
+                check(coords != nil && abs(coords!.latitude - 40.4) < 0.001 && abs(coords!.longitude + 3.7) < 0.001,
+                      "GPS tags missing in \(ext)")
+                let imageSource = CGImageSourceCreateWithURL(photo as CFURL, nil)!
+                let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
+                let exif = props?[kCGImagePropertyExifDictionary] as? [CFString: Any]
+                check(exif?[kCGImagePropertyExifDateTimeOriginal] != nil, "Date missing in \(ext)")
+            }
         }
 
         // M17: honest removal semantics. Removing date/location must produce a
@@ -1297,26 +1310,29 @@ struct MetadataWriterTests {
             try fixtureWithMetadata(at: photo, type: uti as CFString)
             try require(MetadataWriter.readExistingCoordinates(from: photo) != nil, "Fixture GPS missing in \(ext)")
             let pixelsBeforeRemoval = try pixelData(photo)
-            try require(update(photo, photo, remove: true), "Removal overwrite failed for \(ext)")
-            try require(MetadataWriter.validateImage(photo, photo), "Invalid \(ext) after removal")
-            try require(try pixelData(photo) == pixelsBeforeRemoval, "Pixels changed during removal in \(ext)")
-            try require(MetadataWriter.readExistingCoordinates(from: photo) == nil, "GPS survived removal in \(ext)")
-            let imageSource = CGImageSourceCreateWithURL(photo as CFURL, nil)!
-            let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
-            let exif = props?[kCGImagePropertyExifDictionary] as? [CFString: Any]
-            try require(exif?[kCGImagePropertyExifDateTimeOriginal] == nil, "DateTimeOriginal survived removal in \(ext)")
-            try require(exif?[kCGImagePropertyExifDateTimeDigitized] == nil, "DateTimeDigitized survived removal in \(ext)")
-            let tiff = props?[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
-            try require(tiff?[kCGImagePropertyTIFFDateTime] == nil, "TIFF DateTime survived removal in \(ext)")
-            try require(props?[kCGImagePropertyGPSDictionary] == nil, "GPS dictionary survived removal in \(ext)")
-            if ext == "png" {
+            let removed = update(photo, photo, remove: true)
+            check(removed, "Removal overwrite failed for \(ext)")
+            if removed {
+                check(MetadataWriter.validateImage(photo, photo), "Invalid \(ext) after removal")
+                check(try pixelData(photo) == pixelsBeforeRemoval, "Pixels changed during removal in \(ext)")
+                check(MetadataWriter.readExistingCoordinates(from: photo) == nil, "GPS survived removal in \(ext)")
+                let imageSource = CGImageSourceCreateWithURL(photo as CFURL, nil)!
+                let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
+                let exif = props?[kCGImagePropertyExifDictionary] as? [CFString: Any]
+                check(exif?[kCGImagePropertyExifDateTimeOriginal] == nil, "DateTimeOriginal survived removal in \(ext)")
+                check(exif?[kCGImagePropertyExifDateTimeDigitized] == nil, "DateTimeDigitized survived removal in \(ext)")
+                let tiff = props?[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+                check(tiff?[kCGImagePropertyTIFFDateTime] == nil, "TIFF DateTime survived removal in \(ext)")
+                check(props?[kCGImagePropertyGPSDictionary] == nil, "GPS dictionary survived removal in \(ext)")
+            }
+            if ext == "png", removed {
                 // M15b XMP correction: the carrier is either gone (nothing
                 // survived) or holds a corrected packet. It must never carry
                 // the removed values - stale XMP is the M17 bug.
                 if let packet = try xmpPacketString(photo) {
-                    try require(!packet.contains("2001-02-03") && !packet.contains("2001:02:03"),
-                                "Removed date survived in png XMP packet")
-                    try require(!packet.contains("GPSLatitude"), "Removed GPS survived in png XMP packet")
+                    check(!packet.contains("2001-02-03") && !packet.contains("2001:02:03"),
+                          "Removed date survived in png XMP packet")
+                    check(!packet.contains("GPSLatitude"), "Removed GPS survived in png XMP packet")
                 }
             }
         }
@@ -1328,12 +1344,15 @@ struct MetadataWriterTests {
             let f = root.appendingPathComponent("ftyp-restore.heic")
             try fixtureWithMetadata(at: f, type: "public.heic" as CFString)
             let before = try Data(contentsOf: f)
-            try require(update(f, f), "HEIC set must succeed with the ftyp transplant")
-            let after = try Data(contentsOf: f)
-            let beforeLine = heicInventory(before)?.first(where: { $0.hasPrefix("top ftyp") })
-            let afterLine = heicInventory(after)?.first(where: { $0.hasPrefix("top ftyp") })
-            try require(beforeLine != nil && beforeLine == afterLine,
-                        "HEIC output ftyp does not match the source declarations")
+            let wrote = update(f, f)
+            check(wrote, "HEIC set must succeed with the ftyp transplant")
+            if wrote {
+                let after = try Data(contentsOf: f)
+                let beforeLine = heicInventory(before)?.first(where: { $0.hasPrefix("top ftyp") })
+                let afterLine = heicInventory(after)?.first(where: { $0.hasPrefix("top ftyp") })
+                check(beforeLine != nil && beforeLine == afterLine,
+                      "HEIC output ftyp does not match the source declarations")
+            }
         }
 
         // Preservation through the PNG/TIFF removal rewrite: orientation, DPI
@@ -1882,6 +1901,7 @@ struct MetadataWriterTests {
             try require(try pixelData(f) != nil, "JPEG output must decode")
         }
 
+        try require(softFailures.isEmpty, "\(softFailures.count) check(s) failed across format stages: \(softFailures.joined(separator: " | "))")
         print("Metadata write safety tests passed (PNG, JPEG, TIFF, HEIC).")
     }
 }

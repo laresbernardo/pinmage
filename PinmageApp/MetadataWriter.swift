@@ -1244,6 +1244,85 @@ struct MetadataWriter {
         return subs.map { $0.payload }
     }
 
+    /// Full structural inventory of a source/staged HEIC pair for CI
+    /// refusal evidence: top-level boxes, ftyp bytes, meta children, parsed
+    /// items, references, iloc extents and the non-primary item payloads
+    /// (hex, capped). Diagnostic only; the sole caller is the
+    /// artifact-dir-gated refusal path, so it never runs in the app.
+    private static func heicDiagnosticInventory(source: Data, staged: Data) -> String {
+        var out = ""
+        func describe(_ label: String, _ data: Data) {
+            out += "== heic-diag \(label): \(data.count) bytes\n"
+            guard let top = heicBoxes(data, range: 0..<data.count) else {
+                out += "== heic-diag \(label): top-level parse failed\n"
+                return
+            }
+            var topDesc: [String] = []
+            for box in top { topDesc.append("\(box.type)+\(box.payload.count)") }
+            out += "== heic-diag \(label) top: " + topDesc.joined(separator: " ") + "\n"
+            if let ftyp = top.first(where: { $0.type == "ftyp" }) {
+                out += "== heic-diag \(label) ftyp: " + ftyp.payload.map { String(format: "%02x", $0) }.joined() + "\n"
+            }
+            guard let meta = top.first(where: { $0.type == "meta" }), meta.payload.count >= 4,
+                  let children = heicBoxes(meta.payload, range: 4..<meta.payload.count) else {
+                out += "== heic-diag \(label): meta children parse failed\n"
+                return
+            }
+            var childDesc: [String] = []
+            for child in children { childDesc.append("\(child.type)+\(child.payload.count)") }
+            out += "== heic-diag \(label) meta: " + childDesc.joined(separator: " ") + "\n"
+            var primary = -1
+            if let pitm = children.first(where: { $0.type == "pitm" }), let p = heicPrimaryItem(pitm.payload) {
+                primary = p
+            }
+            if let iinf = children.first(where: { $0.type == "iinf" }),
+               let items = heicIinfItems(iinf.payload) {
+                var itemDesc: [String] = []
+                for item in items { itemDesc.append("id=\(item.id):\(item.type):\(item.contentType ?? "-")") }
+                out += "== heic-diag \(label) items: " + itemDesc.joined(separator: " ") + "\n"
+            }
+            if let iref = children.first(where: { $0.type == "iref" }),
+               let refs = heicReferences(iref.payload) {
+                var refDesc: [String] = []
+                for ref in refs { refDesc.append("\(ref.type) \(ref.from)->\(ref.to)") }
+                out += "== heic-diag \(label) refs: " + refDesc.joined(separator: " ") + "\n"
+            }
+            guard let iloc = children.first(where: { $0.type == "iloc" }),
+                  let located = heicExtents(iloc.payload) else {
+                out += "== heic-diag \(label): iloc parse failed\n"
+                return
+            }
+            var ilocDesc: [String] = []
+            for item in located {
+                var extDesc: [String] = []
+                for extent in item.extents { extDesc.append("@\(extent.offset)+\(extent.length)") }
+                ilocDesc.append("id=\(item.id) m=\(item.method) d=\(item.dref) " + extDesc.joined(separator: ","))
+            }
+            out += "== heic-diag \(label) iloc: " + ilocDesc.joined(separator: " ") + "\n"
+            let mdatRanges = top.filter { $0.type == "mdat" }.map { $0.range }
+            let b = [UInt8](data)
+            for item in located where item.id != primary {
+                guard item.method == 0, item.dref == 0 else { continue }
+                var payload = Data()
+                var readable = true
+                for extent in item.extents {
+                    guard extent.offset >= 0, extent.length >= 0, extent.offset + extent.length <= b.count,
+                          mdatRanges.contains(where: { extent.offset >= $0.lowerBound && extent.offset + extent.length <= $0.upperBound }) else {
+                        readable = false
+                        break
+                    }
+                    payload.append(Data(b[extent.offset..<(extent.offset + extent.length)]))
+                }
+                guard readable, !payload.isEmpty, payload.count <= 8192 else { continue }
+                let hex = payload.map { String(format: "%02x", $0) }.joined()
+                out += "== heic-diag \(label) item \(item.id) payload (\(payload.count) bytes): \(hex)\n"
+            }
+        }
+        describe("source", source)
+        describe("staged", staged)
+        return out
+    }
+
     /// iref payload -> (reference type, from id, to ids) per reference.
     /// Strict: v0 (16-bit ids) and v1 (32-bit ids); from_item_ID precedes
     /// reference_count (ISO/IEC 14496-12 SingleItemTypeReferenceBox).
@@ -1686,8 +1765,25 @@ struct MetadataWriter {
     private static func heicWriteVerified(sourceData: Data, destinationURL: URL, imageSource: CGImageSource,
                                           date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?,
                                           removeLocation: Bool, operation: String) -> Bool {
+        // Full structural evidence is CI-only: PRESERVATION_ARTIFACT_DIR is
+        // set by the workflow and never by the app, so a CI refusal dumps
+        // both box structures and the synthetic fixture bytes for one-run
+        // diagnosis; in the app a refusal stays the single line above.
+        var stagedDataForDump: Data? = nil
         func refuse(_ message: String) -> Bool {
             FileHandle.standardError.write(Data("Refusing HEIC \(operation): \(message)\n".utf8))
+            if let dir = ProcessInfo.processInfo.environment["PRESERVATION_ARTIFACT_DIR"],
+               let staged = stagedDataForDump {
+                let report = heicDiagnosticInventory(source: sourceData, staged: staged)
+                FileHandle.standardError.write(Data(report.utf8))
+                let base = URL(fileURLWithPath: dir)
+                let stamp = "\(operation)-\(UUID().uuidString)"
+                try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+                try? sourceData.write(to: base.appendingPathComponent("heic-refusal-\(stamp)-source.bin"))
+                try? staged.write(to: base.appendingPathComponent("heic-refusal-\(stamp)-staged.bin"))
+                try? ("Refusing HEIC \(operation): \(message)\n" + report)
+                    .write(to: base.appendingPathComponent("heic-refusal-\(stamp).txt"), atomically: true, encoding: .utf8)
+            }
             return false
         }
         typealias Box = (type: String, payload: Data, range: Range<Int>)
@@ -1705,6 +1801,7 @@ struct MetadataWriter {
         guard var stagedData = try? Data(contentsOf: destinationURL) else {
             return refuse("staged output did not parse as boxes")
         }
+        stagedDataForDump = stagedData
         // ImageIO rewrites the ftyp brand list on every copy-write (observed
         // run 41697547199: source heic|mif1,MiPr,miaf,MiHB,heic -> staged
         // heic|heic,mif1). The staged content is verified equivalent to the
@@ -1718,6 +1815,7 @@ struct MetadataWriter {
             do {
                 try patched.write(to: destinationURL)
                 stagedData = patched
+                stagedDataForDump = stagedData
             } catch {
                 return refuse("could not stage the source ftyp")
             }
@@ -1737,6 +1835,7 @@ struct MetadataWriter {
             do {
                 try patched.write(to: destinationURL)
                 stagedData = patched
+                stagedDataForDump = stagedData
             } catch {
                 return refuse("could not stage the corrected XMP item")
             }
