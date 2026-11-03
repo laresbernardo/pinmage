@@ -316,12 +316,341 @@ struct MetadataWriterTests {
         return lines.sorted().joined(separator: "\n")
     }
 
+
+    // MARK: - M15 aux-transport inventory probe (diagnostic-only)
+
+    /// Byte-level inventories for the formats whose aux containers have no
+    /// preservation guard yet (JPEG APPn/COM segments, TIFF IFD tags, HEIC
+    /// boxes; PNG included as a control against its existing chunk guard).
+    /// Each case splices a recognizable foreign payload into the fixture,
+    /// runs the production write, and records whether the payload survived
+    /// byte-exact, so the verify-or-refuse work is grounded in the real
+    /// transport behavior instead of assumptions. Diagnostic only: never
+    /// throws, one report file per case in PRESERVATION_ARTIFACT_DIR.
+    static func hexPrefix(_ data: Data, _ limit: Int) -> String {
+        data.prefix(limit).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// JPEG marker walk up to SOS: (name, segment length, payload) per segment.
+    static func jpegInventory(_ data: Data) -> [(String, Int, Data)]? {
+        let b = [UInt8](data)
+        guard b.count >= 4, b[0] == 0xFF, b[1] == 0xD8 else { return nil }
+        var segs: [(String, Int, Data)] = [("SOI", 0, Data())]
+        var pos = 2
+        while pos + 1 < b.count {
+            guard b[pos] == 0xFF else { return nil }
+            while pos < b.count && b[pos] == 0xFF { pos += 1 }
+            guard pos < b.count else { return nil }
+            let m = b[pos]; pos += 1
+            if m == 0xD8 || m == 0xD9 || m == 0x01 || (m >= 0xD0 && m <= 0xD7) {
+                segs.append((String(format: "FF%02X", m), 0, Data()))
+                if m == 0xD9 { return segs }
+                continue
+            }
+            guard pos + 2 <= b.count else { return nil }
+            let len = Int(b[pos]) << 8 | Int(b[pos + 1])
+            guard len >= 2, pos + len <= b.count else { return nil }
+            let payload = Data(b[(pos + 2)..<(pos + len)])
+            if m == 0xDA {
+                segs.append(("SOS", len, payload))
+                segs.append(("ENTROPY-EOI", b.count - (pos + len), Data()))
+                return segs
+            }
+            segs.append((String(format: "FF%02X", m), len, payload))
+            pos += len
+        }
+        return nil
+    }
+
+    /// TIFF IFD walk: one line per entry with its resolved value bytes
+    /// (inline or via offset), following the next-IFD chain and the Exif/GPS/
+    /// Interop sub-IFD pointers. Endianness from the header.
+    static func tiffInventory(_ data: Data) -> [String]? {
+        let b = [UInt8](data)
+        guard b.count >= 8 else { return nil }
+        let little: Bool
+        if b[0] == 0x49 && b[1] == 0x49 { little = true }
+        else if b[0] == 0x4D && b[1] == 0x4D { little = false }
+        else { return nil }
+        func u16(_ o: Int) -> Int {
+            little ? Int(b[o]) | Int(b[o + 1]) << 8 : Int(b[o]) << 8 | Int(b[o + 1])
+        }
+        func u32(_ o: Int) -> Int {
+            little ? Int(b[o]) | Int(b[o + 1]) << 8 | Int(b[o + 2]) << 16 | Int(b[o + 3]) << 24
+                   : Int(b[o]) << 24 | Int(b[o + 1]) << 16 | Int(b[o + 2]) << 8 | Int(b[o + 3])
+        }
+        guard u16(2) == 42 else { return nil }
+        let typeSizes = [1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8]
+        var lines: [String] = []
+        func readIFD(_ off: Int, _ label: String, _ depth: Int) {
+            guard off > 0, off + 2 <= b.count, depth <= 4 else { return }
+            let n = u16(off)
+            let base = off + 2
+            guard base + 12 * n + 4 <= b.count else {
+                lines.append("\(label): TRUNCATED")
+                return
+            }
+            for i in 0..<n {
+                let ent = base + 12 * i
+                let tag = u16(ent)
+                let typ = u16(ent + 2)
+                let cnt = u32(ent + 4)
+                let size = (typeSizes[typ] ?? 1) * cnt
+                let value: Data
+                if size <= 4 {
+                    value = Data(b[(ent + 8)..<(ent + 8 + size)])
+                } else {
+                    let voff = u32(ent + 8)
+                    value = voff + size <= b.count ? Data(b[voff..<(voff + size)]) : Data("<BADOFFSET>".utf8)
+                }
+                lines.append("\(label) tag=\(tag) type=\(typ) count=\(cnt) value=\(hexPrefix(value, 12))")
+                if (tag == 34665 || tag == 34853 || tag == 40965) && size <= 4 {
+                    readIFD(u32(ent + 8), "\(label)>\(tag)", depth + 1)
+                }
+            }
+            let next = u32(base + 12 * n)
+            if next != 0 { readIFD(next, label + "+next", depth + 1) }
+        }
+        readIFD(u32(4), "IFD0", 0)
+        return lines
+    }
+
+    /// HEIC/ISOBMFF box walk, one level into meta's children.
+    static func heicInventory(_ data: Data) -> [String]? {
+        let b = [UInt8](data)
+        guard b.count >= 8 else { return nil }
+        var lines: [String] = []
+        func walk(_ start: Int, _ end: Int, _ label: String, _ depth: Int) {
+            var pos = start
+            while pos + 8 <= end {
+                var size = Int(b[pos]) << 24 | Int(b[pos + 1]) << 16 | Int(b[pos + 2]) << 8 | Int(b[pos + 3])
+                let type = String(bytes: b[(pos + 4)..<(pos + 8)], encoding: .ascii) ?? "????"
+                var header = 8
+                if size == 1 {
+                    guard pos + 16 <= end else { return }
+                    size = Int(b[pos + 8]) << 56 | Int(b[pos + 9]) << 48 | Int(b[pos + 10]) << 40 | Int(b[pos + 11]) << 32
+                         | Int(b[pos + 12]) << 24 | Int(b[pos + 13]) << 16 | Int(b[pos + 14]) << 8 | Int(b[pos + 15])
+                    header = 16
+                } else if size == 0 {
+                    size = end - pos
+                }
+                guard size >= header, pos + size <= end else {
+                    lines.append("\(label): BADBOX at \(pos)")
+                    return
+                }
+                let payload = Data(b[(pos + header)..<(pos + size)])
+                lines.append("\(label) \(type) size=\(size) head=\(hexPrefix(payload, 8))")
+                if type == "meta" && depth == 0 && payload.count >= 4 {
+                    walk(pos + header + 4, pos + size, "meta", depth + 1)
+                }
+                pos += size
+            }
+        }
+        walk(0, b.count, "top", 0)
+        return lines
+    }
+
+    /// Splices recognizable foreign APP13/COM/APP11 segments before SOS.
+    static func spliceJPEGAux(_ data: Data, tag: String) -> Data? {
+        let b = [UInt8](data)
+        guard b.count >= 4, b[0] == 0xFF, b[1] == 0xD8 else { return nil }
+        var pos = 2
+        var sosAt: Int?
+        while pos + 1 < b.count {
+            guard b[pos] == 0xFF else { return nil }
+            while pos < b.count && b[pos] == 0xFF { pos += 1 }
+            guard pos < b.count else { return nil }
+            let m = b[pos]; pos += 1
+            if m == 0xDA { sosAt = pos - 2; break }  // cut at the FF prefix
+            if m == 0xD8 || m == 0xD9 || m == 0x01 || (m >= 0xD0 && m <= 0xD7) { continue }
+            guard pos + 2 <= b.count else { return nil }
+            let len = Int(b[pos]) << 8 | Int(b[pos + 1])
+            guard len >= 2, pos + len <= b.count else { return nil }
+            pos += len
+        }
+        guard let cut = sosAt else { return nil }
+        var out = Data(b[0..<cut])
+        for (marker, name) in [(0xED, "AUXPROBE-APP13"), (0xFE, "AUXPROBE-COM"), (0xEB, "AUXPROBE-APP11")] {
+            let payload = Data("\(name)-\(tag)".utf8)
+            let len = payload.count + 2
+            out.append(Data([0xFF, UInt8(marker), UInt8((len >> 8) & 0xFF), UInt8(len & 0xFF)]))
+            out.append(payload)
+        }
+        out.append(Data(b[cut...]))
+        return out
+    }
+
+    /// Splices a private TIFF tag 65000 by rebuilding IFD0 at EOF and
+    /// repointing the header: original entry bytes (and their out-of-line
+    /// value offsets) stay valid; the new tag's payload is appended.
+    static func spliceTIFFAux(_ data: Data, tag: String) -> Data? {
+        let b = [UInt8](data)
+        guard b.count >= 8 else { return nil }
+        let little: Bool
+        if b[0] == 0x49 && b[1] == 0x49 { little = true }
+        else if b[0] == 0x4D && b[1] == 0x4D { little = false }
+        else { return nil }
+        func u16(_ o: Int) -> Int {
+            little ? Int(b[o]) | Int(b[o + 1]) << 8 : Int(b[o]) << 8 | Int(b[o + 1])
+        }
+        func u32(_ o: Int) -> Int {
+            little ? Int(b[o]) | Int(b[o + 1]) << 8 | Int(b[o + 2]) << 16 | Int(b[o + 3]) << 24
+                   : Int(b[o]) << 24 | Int(b[o + 1]) << 16 | Int(b[o + 2]) << 8 | Int(b[o + 3])
+        }
+        func put16(_ d: inout Data, _ v: Int) {
+            if little { d.append(UInt8(v & 0xFF)); d.append(UInt8((v >> 8) & 0xFF)) }
+            else { d.append(UInt8((v >> 8) & 0xFF)); d.append(UInt8(v & 0xFF)) }
+        }
+        func put32(_ d: inout Data, _ v: Int) {
+            if little { d.append(UInt8(v & 0xFF)); d.append(UInt8((v >> 8) & 0xFF)); d.append(UInt8((v >> 16) & 0xFF)); d.append(UInt8((v >> 24) & 0xFF)) }
+            else { d.append(UInt8((v >> 24) & 0xFF)); d.append(UInt8((v >> 16) & 0xFF)); d.append(UInt8((v >> 8) & 0xFF)); d.append(UInt8(v & 0xFF)) }
+        }
+        guard u16(2) == 42 else { return nil }
+        let ifd0 = u32(4)
+        guard ifd0 > 0, ifd0 + 2 <= b.count else { return nil }
+        let n = u16(ifd0)
+        let base = ifd0 + 2
+        guard base + 12 * n + 4 <= b.count else { return nil }
+        let payload = Data("AUXPROBE-TIFF-\(tag)".utf8)
+        var out = Data(b)
+        let newIFD = out.count
+        let valueOff = newIFD + 2 + 12 * (n + 1) + 4
+        var ifd = Data()
+        put16(&ifd, n + 1)
+        var inserted = false
+        for i in 0..<n {
+            let ent = base + 12 * i
+            let entryTag = u16(ent)
+            if !inserted && entryTag > 65000 {
+                put16(&ifd, 65000); put16(&ifd, 7); put32(&ifd, payload.count); put32(&ifd, valueOff)
+                inserted = true
+            }
+            ifd.append(Data(b[ent..<(ent + 12)]))
+        }
+        if !inserted {
+            put16(&ifd, 65000); put16(&ifd, 7); put32(&ifd, payload.count); put32(&ifd, valueOff)
+        }
+        ifd.append(Data(b[(base + 12 * n)..<(base + 12 * n + 4)]))
+        var headerFix = Data()
+        put32(&headerFix, newIFD)
+        out.replaceSubrange(4..<8, with: headerFix)
+        out.append(ifd)
+        out.append(payload)
+        return out
+    }
+
+    /// Appends top-level free and uuid boxes with recognizable payloads.
+    static func spliceHEICAux(_ data: Data, tag: String) -> Data? {
+        let b = [UInt8](data)
+        guard b.count >= 8 else { return nil }
+        var out = Data(b)
+        func appendBox(_ type: String, _ payload: Data) {
+            let size = payload.count + 8
+            out.append(Data([UInt8((size >> 24) & 0xFF), UInt8((size >> 16) & 0xFF), UInt8((size >> 8) & 0xFF), UInt8(size & 0xFF)]))
+            out.append(Data(type.utf8))
+            out.append(payload)
+        }
+        appendBox("free", Data("AUXPROBE-FREE-\(tag)".utf8))
+        appendBox("uuid", Data([UInt8](repeating: 0xAB, count: 16)) + Data("AUXPROBE-UUID-\(tag)".utf8))
+        return out
+    }
+
+    static func runAuxTransportProbe(root: URL) {
+        struct Scenario {
+            let name: String
+            let date: Date?
+            let removeDate: Bool
+            let removeLocation: Bool
+        }
+        let scenarios = [
+            Scenario(name: "aux-set-date", date: Date(timeIntervalSince1970: 1_700_000_000), removeDate: false, removeLocation: false),
+            Scenario(name: "aux-remove-date", date: nil, removeDate: true, removeLocation: false),
+            Scenario(name: "aux-remove-location", date: nil, removeDate: false, removeLocation: true),
+        ]
+        let formats: [(String, CFString)] = [("png", "public.png" as CFString), ("jpg", "public.jpeg" as CFString), ("tiff", "public.tiff" as CFString), ("heic", "public.heic" as CFString)]
+        let env = ProcessInfo.processInfo.environment
+        let outDir = env["PRESERVATION_ARTIFACT_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? root
+        try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let probeRoot = root.appendingPathComponent("probe", isDirectory: true)
+        try? FileManager.default.createDirectory(at: probeRoot, withIntermediateDirectories: true)
+        for scenario in scenarios {
+            for (ext, uti) in formats {
+                var report: [String] = []
+                report.append("scenario=\(scenario.name) format=\(ext)")
+                let file = probeRoot.appendingPathComponent("auxprobe-\(scenario.name).\(ext)")
+                do {
+                    try fixtureWithMetadata(at: file, type: uti)
+                    report.append("fixture: created")
+                } catch {
+                    report.append("fixture: FAILED \(error.localizedDescription)")
+                    try? report.joined(separator: "\n").write(to: outDir.appendingPathComponent("auxprobe-\(scenario.name)-\(ext).txt"), atomically: true, encoding: .utf8)
+                    continue
+                }
+                var magics: [String] = []
+                do {
+                    switch ext {
+                    case "jpg":
+                        guard let src = try? Data(contentsOf: file), let s = spliceJPEGAux(src, tag: scenario.name) else { throw NSError(domain: "Probe", code: 2) }
+                        try s.write(to: file)
+                        magics = ["AUXPROBE-APP13", "AUXPROBE-COM", "AUXPROBE-APP11"]
+                    case "tiff":
+                        guard let src = try? Data(contentsOf: file), let s = spliceTIFFAux(src, tag: scenario.name) else { throw NSError(domain: "Probe", code: 3) }
+                        try s.write(to: file)
+                        magics = ["AUXPROBE-TIFF"]
+                    case "heic":
+                        guard let src = try? Data(contentsOf: file), let s = spliceHEICAux(src, tag: scenario.name) else { throw NSError(domain: "Probe", code: 4) }
+                        try s.write(to: file)
+                        magics = ["AUXPROBE-FREE", "AUXPROBE-UUID"]
+                    default:
+                        try appendPNGChunk(file, type: "prVt", payload: [UInt8](Data("AUXPROBE-PNG-\(scenario.name)".utf8)))
+                        magics = ["AUXPROBE-PNG"]
+                    }
+                    report.append("splice: ok \(magics)")
+                } catch {
+                    report.append("splice: FAILED")
+                    try? report.joined(separator: "\n").write(to: outDir.appendingPathComponent("auxprobe-\(scenario.name)-\(ext).txt"), atomically: true, encoding: .utf8)
+                    continue
+                }
+                func dumpInventory(_ label: String, _ data: Data?) {
+                    guard let data = data else { report.append("\(label): no data"); return }
+                    switch ext {
+                    case "jpg":
+                        for (name, len, payload) in jpegInventory(data) ?? [("PARSE-FAIL", 0, Data())] {
+                            report.append("\(label) seg \(name) len=\(len) payload=\(hexPrefix(payload, 10))")
+                        }
+                    case "tiff":
+                        for line in tiffInventory(data) ?? ["PARSE-FAIL"] { report.append("\(label) \(line)") }
+                    case "heic":
+                        for line in heicInventory(data) ?? ["PARSE-FAIL"] { report.append("\(label) \(line)") }
+                    default:
+                        let counts = MetadataWriter.pngChunkTypeCounts(data) ?? [:]
+                        report.append("\(label) chunks=\(counts)")
+                    }
+                }
+                dumpInventory("BEFORE", try? Data(contentsOf: file))
+                let ok = MetadataWriter.updateImageMetadata(sourceURL: file, destinationURL: file,
+                    date: scenario.date, removeDate: scenario.removeDate,
+                    latitude: nil, longitude: nil, removeLocation: scenario.removeLocation)
+                let after = try? Data(contentsOf: file)
+                report.append("PRODUCTION updateImageMetadata -> \(ok)")
+                for magic in magics {
+                    let found = after?.range(of: Data(magic.utf8)) != nil
+                    let fate = ok ? (found ? "SURVIVED-EXACT" : "MISSING") : (found ? "REFUSED-WRITE-ORIGINAL-INTACT" : "REFUSED-WRITE")
+                    report.append("SPLICED \(magic): \(fate)")
+                }
+                dumpInventory("AFTER", after)
+                try? report.joined(separator: "\n").write(to: outDir.appendingPathComponent("auxprobe-\(scenario.name)-\(ext).txt"), atomically: true, encoding: .utf8)
+            }
+        }
+    }
+
     static func main() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("PinmageTests-\(UUID().uuidString)")
         try fm.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? fm.removeItem(at: root) }
         runDiagnosticsProbe(root: root)
+        runAuxTransportProbe(root: root)
         let source = root.appendingPathComponent("original.png")
         try fixture(at: source, type: "public.png" as CFString)
         let original = try Data(contentsOf: source)
