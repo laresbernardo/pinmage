@@ -353,7 +353,14 @@ struct MetadataWriter {
             return true
         }
         
-        let useCopyWrite = isRemoval || utiString == "public.heic" || utiString == "public.heif"
+        // JPEG joins the copy-write route (CI evidence, runs 41686881879 and
+        // 41690332177): the dictionary set route drops APP2/APP14 and foreign
+        // segments, regenerates Exif (losing MakerNote and private tags) and
+        // the Photoshop IRB, and rewrote a quantization table row while
+        // transporting the entropy stream - the copy-write route transports
+        // all of those byte-exact, so it is the only route the verified
+        // guard stack below can clear.
+        let useCopyWrite = isRemoval || utiString == "public.heic" || utiString == "public.heif" || utiString == "public.jpeg"
         
         if !useCopyWrite {
             // Dictionary path (no removal requested): copy source properties,
@@ -407,19 +414,6 @@ struct MetadataWriter {
                                                         removeLocation: removeLocation, operation: "set")
                 guard corrected.success else { return false }
                 guard pngAuxChunksPreserved(source: sourceData, destinationURL: destinationURL, operation: "set", xmpHandled: corrected.xmpHandled) else { return false }
-            }
-            if utiString == "public.jpeg" {
-                // Fail-closed while the set routing is being settled (CI
-                // evidence, run 41683971917): the dictionary path drops aux
-                // APPn/COM segments, so any source segment outside the
-                // carried set refuses the write. APP13/APP14 are regenerated
-                // by the writer on this path. The entropy stream is NOT
-                // compared here: this route rewrites the quantization tables,
-                // and decoded-pixel equality is asserted by the suite; the
-                // copy-write route probe decides whether this path is
-                // replaced outright.
-                guard jpegAuxSegmentsPreserved(source: sourceData, destinationURL: destinationURL, operation: "set",
-                                               extraCarried: [0xED, 0xEE], requireEntropyMatch: false) else { return false }
             }
             if utiString == "public.tiff" {
                 guard tiffAuxTagsHandled(sourceData: sourceData, destinationURL: destinationURL, imageSource: imageSource,
@@ -479,14 +473,9 @@ struct MetadataWriter {
             return false
         }
         if utiString == "public.jpeg" {
-            // CI evidence (run 41683971917): this route transports foreign
-            // segments and the compressed stream byte-exact, but drops a
-            // recognizable Photoshop IRB (APP13) - carried here because the
-            // writer regenerates it - and regenerates both APP1 segments
-            // from the provided metadata. Any other aux segment that fails
-            // to survive byte-exact, or any entropy change, refuses.
-            guard jpegAuxSegmentsPreserved(source: sourceData, destinationURL: destinationURL, operation: isRemoval ? "removal" : "set",
-                                           extraCarried: [0xED], requireEntropyMatch: true) else { return false }
+            guard jpegWriteVerified(sourceData: sourceData, destinationURL: destinationURL, imageSource: imageSource,
+                                    date: date, removeDate: removeDate, latitude: latitude, longitude: longitude,
+                                    removeLocation: removeLocation, operation: isRemoval ? "removal" : "set") else { return false }
         }
         if utiString == "public.heic" || utiString == "public.heif" {
             // Interim guard (refusal-only): any top-level box outside the
@@ -537,55 +526,292 @@ struct MetadataWriter {
         return nil
     }
 
-    /// Markers the JPEG writer is proven (CI run 41683971917) or expected to
-    /// regenerate or carry structurally; everything else - aux APPn segments
-    /// and COM - must survive with its exact payload. APP1 is carried because
-    /// the writer regenerates Exif/XMP from the written metadata (verified
-    /// separately by the plan and readback checks); APP2 as the color space;
-    /// APP14 only on the set path (the dictionary writer regenerates it).
-    private static func jpegCarriedMarkers(extra: Set<UInt8>) -> Set<UInt8> {
-        var carried: Set<UInt8> = [0xD8, 0xD9, 0x01, 0xDA, 0xDB, 0xC4, 0xCC, 0xDD, 0xDC, 0xDE, 0xDF, 0xC8, 0xE0, 0xE1, 0xE2]
-        for m in 0xD0...0xD7 { carried.insert(UInt8(m)) }
-        for m in 0xC0...0xCF where m != 0xC4 && m != 0xC8 && m != 0xCC { carried.insert(UInt8(m)) }
-        carried.formUnion(extra)
-        return carried
+    /// Decoded RGBA bytes of a single-frame image. The per-write pixel
+    /// fidelity check: exact decoded equality between source and staged
+    /// output, route-agnostic, never inferred from fixture evidence.
+    private static func rgbaData(_ data: Data) -> Data? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) == 1,
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        let width = image.width, height = image.height
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(data: &bytes, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return Data(bytes)
     }
 
-    /// Fail-closed JPEG aux guard. Every source segment outside the carried
-    /// set must survive with its exact payload; on the removal path the
-    /// entropy-coded data must also match byte-exact (CI evidence: the
-    /// dictionary set path rewrites the quantization tables, so its compressed
-    /// stream cannot be trusted to match - that path is guarded by decoded-
-    /// pixel assertions in the suite instead, and loses aux segments, which
-    /// this guard refuses).
-    private static func jpegAuxSegmentsPreserved(source sourceData: Data, destinationURL: URL, operation: String, extraCarried: Set<UInt8>, requireEntropyMatch: Bool) -> Bool {
-        guard let source = jpegSegments(sourceData),
-              let stagedData = try? Data(contentsOf: destinationURL),
-              let staged = jpegSegments(stagedData) else {
-            FileHandle.standardError.write(Data("Refusing JPEG \(operation): source or staged output did not parse as JPEG\n".utf8))
+    /// Photoshop IRB (APP13 "Photoshop 3.0") 8BIM resource walk. Strict: nil
+    /// when the payload does not parse completely - a resource list we
+    /// cannot walk refuses the write rather than passing partially checked.
+    private static func irbResources(_ payload: Data) -> [(id: Int, data: Data)]? {
+        let prefix = Data("Photoshop 3.0\0".utf8)
+        let b = [UInt8](payload)
+        guard b.count >= prefix.count, payload.prefix(prefix.count) == prefix else { return nil }
+        var pos = prefix.count
+        var out: [(Int, Data)] = []
+        while pos < b.count {
+            guard pos + 12 <= b.count,
+                  b[pos] == 0x38 && b[pos + 1] == 0x42 && b[pos + 2] == 0x49 && b[pos + 3] == 0x4D else { return nil }
+            let rid = Int(b[pos + 4]) << 8 | Int(b[pos + 5])
+            var p = pos + 6
+            let nameLength = Int(b[p])
+            p += 1 + nameLength
+            if (1 + nameLength) % 2 != 0 { p += 1 }
+            guard p + 4 <= b.count else { return nil }
+            let size = Int(b[p]) << 24 | Int(b[p + 1]) << 16 | Int(b[p + 2]) << 8 | Int(b[p + 3])
+            p += 4
+            guard p + size <= b.count else { return nil }
+            out.append((rid, Data(b[p..<(p + size)])))
+            p += size + (size % 2)
+            pos = p
+        }
+        return out
+    }
+
+    private static func irbPayload(_ resources: [(id: Int, data: Data)]) -> Data {
+        var out = Data("Photoshop 3.0\0".utf8)
+        for (rid, payload) in resources {
+            out.append(contentsOf: [0x38, 0x42, 0x49, 0x4D, UInt8((rid >> 8) & 0xFF), UInt8(rid & 0xFF), 0, 0])
+            out.append(contentsOf: [UInt8((payload.count >> 24) & 0xFF), UInt8((payload.count >> 16) & 0xFF), UInt8((payload.count >> 8) & 0xFF), UInt8(payload.count & 0xFF)])
+            out.append(payload)
+            if payload.count % 2 != 0 { out.append(0) }
+        }
+        return out
+    }
+
+    /// IRB resources that can carry date or location payloads (IPTC-NAA,
+    /// Exif, XMP). Their semantics under a metadata change are unverifiable,
+    /// so a metadata-changing write on a file carrying any of them non-empty
+    /// refuses instead of trusting the writer's regeneration.
+    private static let irbTargetedResources: Set<Int> = [0x0404, 0x0422, 0x0424]
+
+    /// Replaces the first genuine Photoshop IRB with the given payload;
+    /// inserts one after the last APP0/APP1 when the file has none (the
+    /// conventional IRB position, keeping compared-segment order stable).
+    private static func jpegReplacingAPP13(_ data: Data, payload: Data) -> Data? {
+        let b = [UInt8](data)
+        guard b.count >= 4, b[0] == 0xFF, b[1] == 0xD8 else { return nil }
+        var out = Data([0xFF, 0xD8])
+        var pos = 2
+        var done = false
+        while pos + 1 < b.count {
+            guard b[pos] == 0xFF else { return nil }
+            let segStart = pos
+            while pos < b.count && b[pos] == 0xFF { pos += 1 }
+            guard pos < b.count else { return nil }
+            let m = b[pos]; pos += 1
+            if m == 0xD8 || m == 0xD9 || m == 0x01 || (m >= 0xD0 && m <= 0xD7) {
+                out.append(Data(b[segStart..<pos]))
+                if m == 0xD9 { return done ? out : nil }
+                continue
+            }
+            guard pos + 2 <= b.count else { return nil }
+            let len = Int(b[pos]) << 8 | Int(b[pos + 1])
+            guard len >= 2, pos + len <= b.count else { return nil }
+            if m == 0xDA {
+                out.append(Data(b[segStart...]))
+                return done ? out : nil
+            }
+            let segPayload = Data(b[(pos + 2)..<(pos + len)])
+            if !done && ((m == 0xED && segPayload.prefix(14) == Data("Photoshop 3.0\0".utf8))) {
+                let plen = payload.count + 2
+                out.append(contentsOf: [0xFF, 0xED, UInt8((plen >> 8) & 0xFF), UInt8(plen & 0xFF)])
+                out.append(payload)
+                done = true
+            } else {
+                out.append(Data(b[segStart..<(pos + len)]))
+                if !done && m != 0xE0 && m != 0xE1 {
+                    // Past the APP0/APP1 block without an IRB to replace:
+                    // insert at the conventional position.
+                    let plen = payload.count + 2
+                    var segment = Data([0xFF, 0xED, UInt8((plen >> 8) & 0xFF), UInt8(plen & 0xFF)])
+                    segment.append(payload)
+                    out.insert(contentsOf: segment, at: out.count - (pos + len - segStart))
+                    done = true
+                }
+            }
+            pos += len
+        }
+        return nil
+    }
+
+    /// The intended-change exemptions shared by the TIFF guard and the JPEG
+    /// Exif-APP1 compare: only the exact tags the request itself changes.
+    private static func intentExemptions(date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool) -> [String: Set<Int>] {
+        var exempt: [String: Set<Int>] = [:]
+        if date != nil || removeDate {
+            exempt["IFD0", default: []].insert(306)
+            exempt["IFD0>34665", default: []].formUnion([36867, 36868])
+        }
+        if latitude != nil || removeLocation {
+            exempt["IFD0>34853", default: []] = [0, 1, 2, 3, 4]
+        }
+        return exempt
+    }
+
+    /// Full JPEG write verification, fail-closed at every step, per actual
+    /// input/output - nothing is inferred from fixture evidence:
+    /// 1. Both files parse as JPEG. Decoded RGBA and the entropy-coded
+    ///    stream are byte-exact; every payload-bearing segment outside the
+    ///    semantically-handled APP1/APP13 classes survives payload-exact
+    ///    (frame/coding tables, APP0, APP2, APP14, COM, foreign APPn, SOS
+    ///    header), as a multiset per marker; only no-payload markers are
+    ///    exempt. The compared segments keep their relative order.
+    /// 2. Exif APP1 payloads are compared tag by tag through the TIFF
+    ///    machinery, with exemptions only for the values the request itself
+    ///    changes. MakerNote and private tags the writer drops refuse.
+    /// 3. The XMP APP1 packet must equal the plan-verified corrected packet
+    ///    (the PNG/TIFF carrier machinery).
+    /// 4. A Photoshop IRB is rebuilt from the source's own 8BIM resources
+    ///    byte-exact after the write and verified. Non-empty IPTC/Exif/XMP
+    ///    resources refuse: their date/location semantics under a metadata
+    ///    change are unverifiable. Malformed IRB refuses.
+    private static func jpegWriteVerified(sourceData: Data, destinationURL: URL, imageSource: CGImageSource,
+                                          date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?,
+                                          removeLocation: Bool, operation: String) -> Bool {
+        let irbPrefix = Data("Photoshop 3.0\0".utf8)
+        let exifPrefix = Data("Exif\0\0".utf8)
+        let xmpPrefix = Data("http://ns.adobe.com/xap/1.0/\0".utf8)
+        func refuse(_ message: String) -> Bool {
+            FileHandle.standardError.write(Data("Refusing JPEG \(operation): \(message)\n".utf8))
             return false
         }
-        let carried = jpegCarriedMarkers(extra: extraCarried)
-        var byMarker: [UInt8: [Data]] = [:]
-        for (m, payload) in staged.segments where !carried.contains(m) {
-            byMarker[m, default: []].append(payload)
+        guard let source = jpegSegments(sourceData) else {
+            return refuse("source did not parse as JPEG")
         }
-        var lostCounts: [UInt8: Int] = [:]
-        for (m, payload) in source.segments where !carried.contains(m) {
-            if let index = byMarker[m]?.firstIndex(of: payload) {
-                byMarker[m]?.remove(at: index)
-            } else {
-                lostCounts[m, default: 0] += 1
+        // Source IRB: strict parse; targeted non-empty resources refuse.
+        var sourceIRB: [(id: Int, data: Data)]?
+        for (marker, payload) in source.segments where marker == 0xED {
+            if payload.prefix(irbPrefix.count) == irbPrefix {
+                guard let resources = irbResources(payload) else {
+                    return refuse("malformed Photoshop IRB")
+                }
+                sourceIRB = resources
+                break
             }
         }
-        let lost = lostCounts.sorted { $0.key < $1.key }.map { String(format: "FF%02X x%ld", $0.key, $0.value) }
-        guard lost.isEmpty else {
-            FileHandle.standardError.write(Data("Refusing JPEG \(operation): output would lose or alter segments [\(lost.joined(separator: ", "))]\n".utf8))
-            return false
+        if let resources = sourceIRB {
+            let targeted = resources.filter { irbTargetedResources.contains($0.id) && !$0.data.isEmpty }
+            guard targeted.isEmpty else {
+                return refuse("Photoshop IRB carries IPTC/Exif/XMP resources whose date/location semantics cannot be verified")
+            }
+            // Reattach the source's own resources byte-exact over whatever
+            // the writer staged, then verify below like any other field.
+            guard let stagedBytes = try? Data(contentsOf: destinationURL),
+                  let replaced = jpegReplacingAPP13(stagedBytes, payload: irbPayload(resources)) else {
+                return refuse("could not stage the source Photoshop IRB")
+            }
+            do {
+                try replaced.write(to: destinationURL)
+            } catch {
+                return refuse("could not stage the source Photoshop IRB")
+            }
         }
-        if requireEntropyMatch, source.entropy != staged.entropy {
-            FileHandle.standardError.write(Data("Refusing JPEG \(operation): compressed image data was re-encoded\n".utf8))
-            return false
+        guard let stagedData = try? Data(contentsOf: destinationURL),
+              let staged = jpegSegments(stagedData) else {
+            return refuse("staged output did not parse as JPEG")
+        }
+        let stagedIRB = staged.segments.filter { $0.marker == 0xED && $0.payload.prefix(irbPrefix.count) == irbPrefix }.map { $0.payload }
+        if let resources = sourceIRB {
+            guard stagedIRB.contains(irbPayload(resources)) else {
+                return refuse("Photoshop IRB did not verify byte-exact")
+            }
+        } else {
+            guard stagedIRB.isEmpty else {
+                return refuse("output gained a Photoshop IRB the source did not have")
+            }
+        }
+        // Compressed stream + decoded pixels, both exact.
+        guard source.entropy == staged.entropy else {
+            return refuse("compressed image data was re-encoded")
+        }
+        guard let sourceRGBA = rgbaData(sourceData), let stagedRGBA = rgbaData(stagedData), sourceRGBA == stagedRGBA else {
+            return refuse("decoded pixels changed")
+        }
+        // Classify segments: Exif/XMP/IRB are handled semantically;
+        // no-payload markers are exempt; everything else is payload-exact.
+        func classified(_ segments: [(marker: UInt8, payload: Data)]) -> (exact: [UInt8: [Data]], order: [UInt8], exif: [Data], xmp: [Data]) {
+            var exact: [UInt8: [Data]] = [:]
+            var order: [UInt8] = []
+            var exif: [Data] = []
+            var xmp: [Data] = []
+            for (m, payload) in segments {
+                if m == 0xD8 || m == 0xD9 || m == 0x01 || (m >= 0xD0 && m <= 0xD7) { continue }
+                order.append(m)
+                if m == 0xE1 && payload.prefix(exifPrefix.count) == exifPrefix {
+                    exif.append(payload)
+                } else if m == 0xE1 && payload.prefix(xmpPrefix.count) == xmpPrefix {
+                    xmp.append(payload)
+                } else if m == 0xED && payload.prefix(irbPrefix.count) == irbPrefix {
+                    continue
+                } else {
+                    exact[m, default: []].append(payload)
+                }
+            }
+            return (exact, order, exif, xmp)
+        }
+        let sourceParts = classified(source.segments)
+        let stagedParts = classified(staged.segments)
+        // Exact class: marker-multiset equality in both directions.
+        let markers = Set(sourceParts.exact.keys).union(stagedParts.exact.keys)
+        for marker in markers.sorted() {
+            let srcPayloads = sourceParts.exact[marker] ?? []
+            let stgPayloads = stagedParts.exact[marker] ?? []
+            guard srcPayloads.count == stgPayloads.count else {
+                return refuse(String(format: "segment FF%02X count changed (%d -> %d)", marker, srcPayloads.count, stgPayloads.count))
+            }
+            let sortPayloads: ([Data]) -> [[UInt8]] = { $0.map { Array($0) }.sorted { $0.lexicographicallyPrecedes($1) } }
+            guard sortPayloads(srcPayloads) == sortPayloads(stgPayloads) else {
+                return refuse(String(format: "segment FF%02X payload changed", marker))
+            }
+        }
+        // Relative order of compared segments is preserved.
+        var searchFrom = 0
+        for marker in sourceParts.order {
+            guard let found = stagedParts.order[searchFrom...].firstIndex(of: marker) else {
+                return refuse(String(format: "segment order changed at FF%02X", marker))
+            }
+            searchFrom = found + 1
+        }
+        // Exif APP1: tag-level compare, intent exemptions only.
+        guard sourceParts.exif.count == stagedParts.exif.count else {
+            return refuse("Exif APP1 segment count changed")
+        }
+        for (sourcePayload, stagedPayload) in zip(sourceParts.exif, stagedParts.exif) {
+            guard let violations = tiffAuxTagViolations(sourceData: sourcePayload.dropFirst(exifPrefix.count),
+                                                        outputData: stagedPayload.dropFirst(exifPrefix.count),
+                                                        exempt: intentExemptions(date: date, removeDate: removeDate,
+                                                                                 latitude: latitude, longitude: longitude,
+                                                                                 removeLocation: removeLocation)) else {
+                return refuse("Exif payload did not parse")
+            }
+            guard violations.isEmpty else {
+                return refuse("Exif would lose or alter tags [\(violations.joined(separator: ", "))]")
+            }
+        }
+        // XMP APP1: the staged packet must match the plan-verified packet.
+        guard let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
+                                                      latitude: latitude, longitude: longitude, removeLocation: removeLocation) else {
+            return refuse("corrected XMP failed preservation checks")
+        }
+        if expectedPacket.isEmpty {
+            guard stagedParts.xmp.isEmpty else {
+                return refuse("staged XMP packet failed verification")
+            }
+        } else {
+            guard stagedParts.xmp.count == 1,
+                  let stagedGraph = CGImageMetadataCreateFromXMPData(stagedParts.xmp[0].dropFirst(xmpPrefix.count)),
+                  let expectedGraph = CGImageMetadataCreateFromXMPData(expectedPacket) else {
+                return refuse("staged XMP packet failed verification")
+            }
+            let violations = xmpPlanViolations(source: expectedGraph, result: stagedGraph,
+                                               date: nil, removeDate: false, latitude: nil, longitude: nil, removeLocation: false)
+            guard violations.isEmpty else {
+                return refuse("staged XMP packet differs from the verified packet [\(violations.joined(separator: ", "))]")
+            }
         }
         return true
     }
@@ -611,11 +837,20 @@ struct MetadataWriter {
         guard u16(2) == 42 else { return nil }
         let typeSizes = [1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8]
         var ifds: [(String, [(tag: Int, type: Int, count: Int, value: Data?, raw: Data)], Int)] = []
+        // Strict: any truncation or unreasonable structure fails the whole
+        // parse, and the guards refuse - no partially-checked files.
+        var parseFailed = false
         func readIFD(_ off: Int, _ label: String, _ depth: Int) {
-            guard off > 0, off + 2 <= b.count, depth <= 4 else { return }
+            guard off > 0, off + 2 <= b.count, depth <= 4 else {
+                parseFailed = true
+                return
+            }
             let n = u16(off)
             let base = off + 2
-            guard base + 12 * n + 4 <= b.count else { return }
+            guard base + 12 * n + 4 <= b.count else {
+                parseFailed = true
+                return
+            }
             var entries: [(tag: Int, type: Int, count: Int, value: Data?, raw: Data)] = []
             for i in 0..<n {
                 let ent = base + 12 * i
@@ -644,6 +879,7 @@ struct MetadataWriter {
             if next != 0 { readIFD(next, label + "+next", depth + 1) }
         }
         readIFD(u32(4), "IFD0", 0)
+        guard !parseFailed else { return nil }
         return (little, ifds)
     }
 
@@ -652,10 +888,6 @@ struct MetadataWriter {
     /// Sub-IFD pointers are not checked at all - the sub-IFD contents are
     /// guarded by label, and a fully-exempted sub-IFD may legitimately vanish.
     private static let tiffLayoutTags: Set<Int> = [273, 279, 324, 325, 513, 514]
-
-    /// Tags the writer regenerates from other state (ICC profile from the
-    /// color space, asserted separately by the suite): not compared.
-    private static let tiffRegeneratedTags: Set<Int> = [34675]
 
     /// Every source tag outside the layout/regenerated/exempt sets must
     /// survive in the same IFD with the same type and exact resolved value.
@@ -678,7 +910,6 @@ struct MetadataWriter {
         for (label, entries, _) in source.ifds {
             let exemptHere = exempt[label] ?? []
             for entry in entries {
-                if tiffRegeneratedTags.contains(entry.tag) { continue }
                 if exemptHere.contains(entry.tag) { continue }
                 if entry.tag == 34665 || entry.tag == 34853 || entry.tag == 40965 { continue }
                 if tiffLayoutTags.contains(entry.tag) {
@@ -788,14 +1019,8 @@ struct MetadataWriter {
     private static func tiffAuxTagsHandled(sourceData: Data, destinationURL: URL, imageSource: CGImageSource,
                                            date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?,
                                            removeLocation: Bool, operation: String) -> Bool {
-        var exempt: [String: Set<Int>] = [:]
-        if date != nil || removeDate {
-            exempt["IFD0", default: []].insert(306)
-            exempt["IFD0>34665", default: []].formUnion([36867, 36868])
-        }
-        if latitude != nil || removeLocation {
-            exempt["IFD0>34853", default: []] = [0, 1, 2, 3, 4]
-        }
+        var exempt = intentExemptions(date: date, removeDate: removeDate,
+                                      latitude: latitude, longitude: longitude, removeLocation: removeLocation)
         guard let sourceIFDs = tiffIFDs(sourceData) else {
             FileHandle.standardError.write(Data("Refusing TIFF \(operation): source did not parse as TIFF\n".utf8))
             return false
@@ -842,6 +1067,13 @@ struct MetadataWriter {
         }
         guard violations.isEmpty else {
             FileHandle.standardError.write(Data("Refusing TIFF \(operation): output would lose or alter tags [\(violations.joined(separator: ", "))]\n".utf8))
+            return false
+        }
+        // Pixel fidelity per actual input/output: the layout tags are only
+        // presence-checked, so decoded RGBA equality is what verifies the
+        // strip/tile offsets and counts still point at intact pixel data.
+        guard let sourceRGBA = rgbaData(sourceData), let stagedRGBA = rgbaData(finalData), sourceRGBA == stagedRGBA else {
+            FileHandle.standardError.write(Data("Refusing TIFF \(operation): decoded pixels changed\n".utf8))
             return false
         }
         return true
@@ -902,6 +1134,10 @@ struct MetadataWriter {
         let lost = lostCounts.sorted { $0.key < $1.key }.map { "\($0.key) x\($0.value)" }
         guard lost.isEmpty else {
             FileHandle.standardError.write(Data("Refusing HEIC \(operation): output would lose or alter boxes [\(lost.joined(separator: ", "))]\n".utf8))
+            return false
+        }
+        guard let sourceRGBA = rgbaData(sourceData), let stagedRGBA = rgbaData(stagedData), sourceRGBA == stagedRGBA else {
+            FileHandle.standardError.write(Data("Refusing HEIC \(operation): decoded pixels changed\n".utf8))
             return false
         }
         return true

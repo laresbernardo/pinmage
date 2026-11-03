@@ -1649,16 +1649,18 @@ struct MetadataWriterTests {
             try require(jpgAuxBytes.range(of: Data(needle.utf8)) != nil, "JPEG removal lost \(needle)")
         }
 
-        // JPEG set on the dictionary route drops foreign segments (run 41683971917):
-        // refuse until the route is settled, leave the original intact.
+        // JPEG set (copy-write route, settled on run 41690332177 evidence):
+        // foreign aux segments are transported byte-exact like on removal.
         let jpgSet = root.appendingPathComponent("aux-jpg-set.jpg")
         try fixtureWithMetadata(at: jpgSet, type: "public.jpeg" as CFString)
         let splicedJS = spliceJPEGAux(try Data(contentsOf: jpgSet), tag: "suite")
         try require(splicedJS != nil, "JPEG aux splice failed")
         try splicedJS!.write(to: jpgSet)
-        let jpgSetBefore = try Data(contentsOf: jpgSet)
-        try require(!update(jpgSet, jpgSet), "JPEG set with foreign aux segments must refuse until the route is settled")
-        try require(try Data(contentsOf: jpgSet) == jpgSetBefore, "Refused JPEG set must leave the original intact")
+        try require(update(jpgSet, jpgSet), "JPEG set must transport foreign aux segments")
+        let jpgSetBytes = try Data(contentsOf: jpgSet)
+        for needle in ["AUXPROBE-APP13-suite", "AUXPROBE-COM-suite", "AUXPROBE-APP11-suite"] {
+            try require(jpgSetBytes.range(of: Data(needle.utf8)) != nil, "JPEG set lost \(needle)")
+        }
 
         // HEIC: foreign top-level boxes refuse on both write paths, intact.
         for remove in [true, false] {
@@ -1670,6 +1672,66 @@ struct MetadataWriterTests {
             let before = try Data(contentsOf: f)
             try require(!update(f, f, remove: remove), "HEIC \(remove ? "removal" : "set") with foreign top-level boxes must refuse")
             try require(try Data(contentsOf: f) == before, "Refused HEIC write must leave the original intact")
+        }
+
+
+        // M15 cycle 3 (deep-probe evidence, run 41690332177): the remaining
+        // carve-outs proved lossy in CI - TIFF ICC is regenerated, JPEG Exif
+        // loses MakerNote/private tags, non-empty IPTC in an IRB has
+        // unverifiable date semantics. All refuse now; verified content must
+        // survive byte-exact.
+
+        // TIFF: an embedded ICC profile the writer regenerates refuses both paths.
+        for remove in [true, false] {
+            let f = root.appendingPathComponent("aux-tiff-icc-\(remove ? "remove" : "set").tiff")
+            try fixtureWithMetadata(at: f, type: "public.tiff" as CFString)
+            let spliced = spliceTIFFTag(try Data(contentsOf: f), tag: 34675, type: 7, payload: Data("SUITE-FAKE-ICC-PROFILE".utf8))
+            try require(spliced != nil, "TIFF ICC splice failed")
+            try spliced!.write(to: f)
+            let before = try Data(contentsOf: f)
+            try require(!update(f, f, remove: remove), "TIFF \(remove ? "removal" : "set") must refuse a regenerated ICC profile")
+            try require(try Data(contentsOf: f) == before, "Refused TIFF ICC write must leave the original intact")
+        }
+
+        // JPEG: MakerNote or private Exif tags the writer drops refuse removal.
+        let jpgMaker = root.appendingPathComponent("aux-jpg-makernote.jpg")
+        try fixtureWithMetadata(at: jpgMaker, type: "public.jpeg" as CFString)
+        let withMaker = spliceJPEGExifTag(try Data(contentsOf: jpgMaker), tag: 37500, payload: Data("SUITE-MAKERNOTE".utf8))
+        try require(withMaker != nil, "JPEG Exif splice failed")
+        try withMaker!.write(to: jpgMaker)
+        let jpgMakerBefore = try Data(contentsOf: jpgMaker)
+        try require(!update(jpgMaker, jpgMaker, remove: true), "JPEG removal must refuse a dropped MakerNote")
+        try require(try Data(contentsOf: jpgMaker) == jpgMakerBefore, "Refused JPEG removal must leave the original intact")
+
+        // JPEG: an IRB with non-empty IPTC/Exif/XMP resources refuses any
+        // metadata change (date/location semantics unverifiable).
+        let jpgIRB = root.appendingPathComponent("aux-jpg-irb.jpg")
+        try fixtureWithMetadata(at: jpgIRB, type: "public.jpeg" as CFString)
+        let targetedIRB = buildIRB([(0x03ED, Data(repeating: 0, count: 16)), (0x0404, Data("IPTC-DATED-2001".utf8))])
+        let withIRB = jpegReplacingAPP13(try Data(contentsOf: jpgIRB), payload: targetedIRB)
+        try require(withIRB != nil, "JPEG IRB splice failed")
+        try withIRB!.write(to: jpgIRB)
+        let jpgIRBBefore = try Data(contentsOf: jpgIRB)
+        try require(!update(jpgIRB, jpgIRB, remove: true), "JPEG removal must refuse non-empty IPTC in the IRB")
+        try require(!update(jpgIRB, jpgIRB), "JPEG set must refuse non-empty IPTC in the IRB")
+        try require(try Data(contentsOf: jpgIRB) == jpgIRBBefore, "Refused JPEG IRB write must leave the original intact")
+
+        // JPEG happy path (copy-write route, evidence runs 41686881879 +
+        // 41690332177): the ImageIO-authored IRB (empty IPTC + digest) is
+        // reattached byte-exact, entropy and pixels are transported, and the
+        // intended date/GPS values verify.
+        for remove in [true, false] {
+            let f = root.appendingPathComponent("aux-jpg-happy-\(remove ? "remove" : "set").jpg")
+            try fixtureWithMetadata(at: f, type: "public.jpeg" as CFString)
+            let before = try Data(contentsOf: f)
+            let sourceIRBPayload = jpegInventory(before)?.filter { $0.0 == "FFED" }.first?.2
+            try require(sourceIRBPayload != nil, "Fixture JPEG should carry the ImageIO IRB")
+            try require(update(f, f, remove: remove), "Plain JPEG \(remove ? "removal" : "set") must succeed")
+            let after = try Data(contentsOf: f)
+            let afterIRBPayload = jpegInventory(after)?.filter { $0.0 == "FFED" }.first?.2
+            try require(afterIRBPayload == sourceIRBPayload, "JPEG IRB must survive byte-exact")
+            try require(jpegEntropyData(before) == jpegEntropyData(after), "JPEG entropy must survive byte-exact")
+            try require(try pixelData(f) != nil, "JPEG output must decode")
         }
 
         print("Metadata write safety tests passed (PNG, JPEG, TIFF, HEIC).")
