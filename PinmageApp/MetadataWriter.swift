@@ -1231,6 +1231,19 @@ struct MetadataWriter {
         return items
     }
 
+    /// iinf payload -> raw infe box payloads (without size/type headers), or
+    /// nil when the strict v0/v1 layout does not parse. Byte-exact entry
+    /// comparison uses this; semantic parsing stays with heicIinfItems.
+    private static func heicIinfEntryPayloads(_ payload: Data) -> [Data]? {
+        let b = [UInt8](payload)
+        guard b.count >= 6 else { return nil }
+        let header = b[0] == 0 ? 6 : 8
+        guard b.count >= header else { return nil }
+        guard let subs = heicBoxes(payload, range: header..<b.count),
+              subs.allSatisfy({ $0.type == "infe" }) else { return nil }
+        return subs.map { $0.payload }
+    }
+
     /// iref payload -> (reference type, from id, to ids) per reference.
     /// Strict: v0 (16-bit ids) and v1 (32-bit ids); from_item_ID precedes
     /// reference_count (ISO/IEC 14496-12 SingleItemTypeReferenceBox).
@@ -1752,7 +1765,9 @@ struct MetadataWriter {
             }
         }
         // Meta: one box each side, exact header, known children only, and
-        // every child but iloc payload-exact.
+        // every child but iloc, iinf and iref payload-exact. iinf and iref
+        // are verified structurally below (source entries byte-exact inside
+        // the staged box, at most one verified added XMP item).
         let sourceMetas = sourceBoxes.filter { $0.type == "meta" }
         let stagedMetas = stagedBoxes.filter { $0.type == "meta" }
         guard sourceMetas.count == 1, stagedMetas.count == 1,
@@ -1768,8 +1783,8 @@ struct MetadataWriter {
         for child in sourceChildren + stagedChildren where !knownChildren.contains(child.type) {
             return refuse("unknown meta child \(child.type)")
         }
-        let sourceExact = multiset(sourceChildren, excluding: ["iloc"])
-        let stagedExact = multiset(stagedChildren, excluding: ["iloc"])
+        let sourceExact = multiset(sourceChildren, excluding: ["iloc", "iinf", "iref"])
+        let stagedExact = multiset(stagedChildren, excluding: ["iloc", "iinf", "iref"])
         for type in Set(sourceExact.keys).union(stagedExact.keys).sorted() {
             guard sortPayloads(sourceExact[type] ?? []) == sortPayloads(stagedExact[type] ?? []) else {
                 return refuse("meta child \(type) changed")
@@ -1813,6 +1828,100 @@ struct MetadataWriter {
                 return refuse("metadata items without cdsc references")
             }
         }
+        // ImageIO ADDS an XMP mime item when the source had none and the
+        // plan sets metadata (observed run 41710548605: plain 8x6 fixture,
+        // staged iinf gained a mime application/rdf+xml infe). This is an
+        // admission, not an exemption: every source infe entry must survive
+        // byte-exact inside the staged iinf, at most one entry may be added
+        // and it must parse as mime application/rdf+xml; any added iref
+        // reference must be that item's cdsc link to the primary image item;
+        // the added item's payload is graph-checked against the verified
+        // corrected packet below (after the splice it IS that packet,
+        // byte-exact). Anything else refuses.
+        let stagedIinfs = stagedChildren.filter { $0.type == "iinf" }
+        guard stagedIinfs.count == 1,
+              let stagedItems = heicIinfItems(stagedIinfs[0].payload),
+              let sourceInfe = heicIinfEntryPayloads(sourceIinfs[0].payload),
+              let stagedInfe = heicIinfEntryPayloads(stagedIinfs[0].payload) else {
+            return refuse("staged iinf did not parse")
+        }
+        var remainingInfe = stagedInfe.map { Array($0) }
+        for entry in sourceInfe {
+            guard let index = remainingInfe.firstIndex(of: Array(entry)) else {
+                return refuse("source iinf entry changed or was lost")
+            }
+            remainingInfe.remove(at: index)
+        }
+        var addedMimeID: Int? = nil
+        if !remainingInfe.isEmpty {
+            let sourceIDs = Set(items.map { $0.id })
+            let added = stagedItems.filter { !sourceIDs.contains($0.id) }
+            guard remainingInfe.count == 1, added.count == 1,
+                  added[0].type == "mime", added[0].contentType == "application/rdf+xml",
+                  Set(stagedItems.map { $0.id }).count == stagedItems.count else {
+                return refuse("staged iinf adds items outside one verified XMP carrier")
+            }
+            addedMimeID = added[0].id
+        }
+        // iref: source reference boxes stay byte-exact; the only admissible
+        // staged addition is the cdsc link from the added XMP item to the
+        // primary image item.
+        func refBoxes(_ irefPayload: Data) -> [(type: String, payload: Data)]? {
+            guard irefPayload.count >= 4 else { return nil }
+            return heicBoxes(irefPayload, range: 4..<irefPayload.count)
+        }
+        let stagedIrefs = stagedChildren.filter { $0.type == "iref" }
+        guard stagedIrefs.count <= 1 else {
+            return refuse("staged iref did not parse")
+        }
+        var sourceRefBoxes: [(type: String, payload: Data)] = []
+        var stagedRefBoxes: [(type: String, payload: Data)] = []
+        if let box = sourceIrefs.first {
+            guard let parsed = refBoxes(box.payload) else {
+                return refuse("source iref did not parse")
+            }
+            sourceRefBoxes = parsed
+        }
+        if let box = stagedIrefs.first {
+            guard let parsed = refBoxes(box.payload),
+                  heicReferences(box.payload) != nil else {
+                return refuse("staged iref did not parse")
+            }
+            stagedRefBoxes = parsed
+        }
+        if let sourceIref = sourceIrefs.first, let stagedIref = stagedIrefs.first {
+            guard sourceIref.payload.prefix(4) == stagedIref.payload.prefix(4) else {
+                return refuse("iref version changed")
+            }
+        }
+        var remainingRefs = stagedRefBoxes.map { (type: $0.type, bytes: Array($0.payload)) }
+        for box in sourceRefBoxes {
+            guard let index = remainingRefs.firstIndex(where: { $0.type == box.type && $0.bytes == Array(box.payload) }) else {
+                return refuse("source iref reference changed or was lost")
+            }
+            remainingRefs.remove(at: index)
+        }
+        for extra in remainingRefs {
+            guard let addedID = addedMimeID, extra.type == "cdsc",
+                  let stagedIref = stagedIrefs.first else {
+                return refuse("staged iref adds references without an added XMP item")
+            }
+            // Re-parse the added reference box through the strict parser, in
+            // its iref version context.
+            var context = Data(stagedIref.payload.prefix(4))
+            let size = extra.bytes.count + 8
+            context.append(UInt8((size >> 24) & 0xff))
+            context.append(UInt8((size >> 16) & 0xff))
+            context.append(UInt8((size >> 8) & 0xff))
+            context.append(UInt8(size & 0xff))
+            context.append(contentsOf: extra.type.utf8)
+            context.append(contentsOf: extra.bytes)
+            guard let parsed = heicReferences(context), parsed.count == 1,
+                  parsed[0].type == "cdsc", parsed[0].from == addedID,
+                  parsed[0].to.count == 1, parsed[0].to[0] == primary else {
+                return refuse("staged iref adds a reference outside the verified cdsc shape")
+            }
+        }
         // iloc: structural verify, then per-item payload comparisons.
         func itemPayloads(_ whole: Data, _ topBoxes: [Box], _ children: [Box]) -> [Int: Data]? {
             let ilocs = children.filter { $0.type == "iloc" }
@@ -1838,7 +1947,9 @@ struct MetadataWriter {
             return refuse("iloc structure unsupported or extents outside mdat")
         }
         let itemIDs = Set(items.map { $0.id })
-        guard Set(sourcePayloads.keys) == itemIDs, Set(stagedPayloads.keys) == itemIDs else {
+        var expectedStagedIDs = itemIDs
+        if let addedID = addedMimeID { expectedStagedIDs.insert(addedID) }
+        guard Set(sourcePayloads.keys) == itemIDs, Set(stagedPayloads.keys) == expectedStagedIDs else {
             return refuse("iloc item ids do not match iinf")
         }
         guard sourcePayloads[primary] == stagedPayloads[primary] else {
@@ -1866,14 +1977,15 @@ struct MetadataWriter {
                 return refuse("Exif item would lose or alter tags [\(violations.joined(separator: ", "))]")
             }
         }
-        if items.contains(where: { $0.type == "mime" }) {
+        let mimeItemIDs = items.filter { $0.type == "mime" }.map { $0.id } + (addedMimeID.map { [$0] } ?? [])
+        if !mimeItemIDs.isEmpty {
             guard let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
                                                           latitude: latitude, longitude: longitude, removeLocation: removeLocation),
                   !expectedPacket.isEmpty else {
                 return refuse("corrected XMP failed preservation checks")
             }
-            for item in items where item.type == "mime" {
-                guard let stagedPayload = stagedPayloads[item.id],
+            for mimeID in mimeItemIDs {
+                guard let stagedPayload = stagedPayloads[mimeID],
                       let stagedGraph = CGImageMetadataCreateFromXMPData(stagedPayload as CFData),
                       let expectedGraph = CGImageMetadataCreateFromXMPData(expectedPacket as CFData) else {
                     return refuse("staged XMP item failed verification")
@@ -2298,27 +2410,60 @@ struct MetadataWriter {
     /// Degrees value of a GPS coordinate tag across ImageIO's observed
     /// serializations: a number, a decimal string ("40.399999999999999"),
     /// or the sexagesimal XMP form ("40,24N", optionally with seconds).
-    private static func gpsDegrees(_ v: CFTypeRef?) -> Double? {
-        if let d = xmpNumericValue(v) { return d }
-        guard let v = v, let s = v as? String, let ref = s.last,
-              ref == "N" || ref == "S" || ref == "E" || ref == "W" else { return nil }
-        let parts = s.dropLast().split(separator: ",")
+    /// Strict, axis-aware: the hemisphere reference must belong to the axis
+    /// (N/S latitude, E/W longitude) and sets the sign (S/W negative); the
+    /// magnitude must parse fully - integral degrees, minutes (integral when
+    /// seconds follow) and seconds below 60, no empty components, no
+    /// trailing data - and land within the axis range (|lat| <= 90,
+    /// |lon| <= 180). Anything else is nil, never a coordinate, so a
+    /// malformed or genuinely different value can never compare equal.
+    static func gpsDegrees(_ v: CFTypeRef?, latitude: Bool) -> Double? {
+        let limit = latitude ? 90.0 : 180.0
+        if let d = xmpNumericValue(v) {
+            guard d.isFinite, abs(d) <= limit else { return nil }
+            return d
+        }
+        guard let v = v, let s = v as? String, let ref = s.last else { return nil }
+        let sign: Double
+        if latitude {
+            guard ref == "N" || ref == "S" else { return nil }
+            sign = ref == "S" ? -1 : 1
+        } else {
+            guard ref == "E" || ref == "W" else { return nil }
+            sign = ref == "W" ? -1 : 1
+        }
+        let parts = s.dropLast().split(separator: ",", omittingEmptySubsequences: false)
         guard parts.count == 2 || parts.count == 3,
-              let deg = Double(parts[0]), let min = Double(parts[1]) else { return nil }
-        var value = deg + min / 60
-        if parts.count == 3, let sec = Double(parts[2]) { value += sec / 3600 }
-        return value
+              let deg = Double(parts[0]), deg >= 0, deg == deg.rounded(),
+              let minutes = Double(parts[1]), minutes >= 0, minutes < 60 else { return nil }
+        if parts.count == 3, minutes != minutes.rounded() { return nil }
+        var value = deg + minutes / 60
+        if parts.count == 3 {
+            guard let sec = Double(parts[2]), sec >= 0, sec < 60 else { return nil }
+            value += sec / 3600
+        }
+        guard value.isFinite, value <= limit else { return nil }
+        return sign * value
     }
 
     /// Value equality where the tag path is known: GPS coordinates
     /// additionally tolerate alternate serializations of the SAME
-    /// coordinate (decimal at full float precision, or sexagesimal).
-    /// Equal information, different text - not a loss.
-    private static func metadataTagValuesEqual(path: String, _ a: CFTypeRef?, _ b: CFTypeRef?) -> Bool {
+    /// coordinate (decimal at full float precision, or sexagesimal),
+    /// compared at an explicit 1e-9 tolerance. Hemisphere and axis
+    /// consistency is enforced by gpsDegrees: "40,24N" never equals -40.4
+    /// or "40,24S", and a latitude never parses an E/W reference.
+    static func metadataTagValuesEqual(path: String, _ a: CFTypeRef?, _ b: CFTypeRef?) -> Bool {
         if metadataValuesEqual(a, b) { return true }
         let leaf = path.components(separatedBy: ":").last ?? path
-        guard leaf == "GPSLatitude" || leaf == "GPSLongitude",
-              let da = gpsDegrees(a), let db = gpsDegrees(b) else { return false }
+        let isLatitude: Bool
+        if leaf == "GPSLatitude" {
+            isLatitude = true
+        } else if leaf == "GPSLongitude" {
+            isLatitude = false
+        } else {
+            return false
+        }
+        guard let da = gpsDegrees(a, latitude: isLatitude), let db = gpsDegrees(b, latitude: isLatitude) else { return false }
         return abs(da - db) < 1e-9
     }
 
@@ -2417,11 +2562,22 @@ struct MetadataWriter {
         // mutable graph, not from a refusal.
         let sourceMetadata: CGImageMetadata
         let mutableMetadata: CGMutableImageMetadata
-        if let source = CGImageSourceCopyMetadataAtIndex(imageSource, 0, nil),
-           let copy = CGImageMetadataCreateMutableCopy(source) {
+        if let source = CGImageSourceCopyMetadataAtIndex(imageSource, 0, nil) {
+            // A graph exists but cannot be read: refuse. Existing metadata
+            // must never be silently treated as empty.
+            guard let copy = CGImageMetadataCreateMutableCopy(source) else { return nil }
             sourceMetadata = source
             mutableMetadata = copy
         } else {
+            // No metadata graph. The empty fallback is honest only when the
+            // source carries no metadata dictionaries either; metadata that
+            // exists but did not yield a graph is unreadable, not empty.
+            if let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [String: Any] {
+                let carrierKeys = [kCGImagePropertyExifDictionary as String,
+                                   kCGImagePropertyGPSDictionary as String,
+                                   kCGImagePropertyIPTCDictionary as String]
+                if carrierKeys.contains(where: { properties[$0] != nil }) { return nil }
+            }
             let empty = CGImageMetadataCreateMutable()
             sourceMetadata = empty
             mutableMetadata = empty
