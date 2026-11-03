@@ -1343,6 +1343,124 @@ struct MetadataWriter {
     ///   Exif item's TIFF stream is compared tag by tag with intent
     ///   exemptions only; the XMP item graph-matches the plan-verified
     ///   corrected packet. idat-backed items refuse.
+    /// Rebuilds the staged file with the source's own ftyp box, shifting
+    /// every later byte and adjusting the staged iloc's absolute offsets by
+    /// the size delta. Returns nil unless every precondition holds: ftyp is
+    /// the first box on both sides, exactly one meta with one iloc, and the
+    /// iloc adjustment succeeds. Only ftyp placement is assumed; everything
+    /// else is re-verified against the result by the full guard.
+    private static func heicRestoringSourceFtyp(sourceData: Data, stagedData: Data) -> Data? {
+        func firstBox(_ data: Data, _ type: String) -> (box: Data, boxEnd: Int)? {
+            let b = [UInt8](data)
+            guard b.count >= 8 else { return nil }
+            var size = Int(b[0]) << 24 | Int(b[1]) << 16 | Int(b[2]) << 8 | Int(b[3])
+            guard let t = String(bytes: b[4..<8], encoding: .ascii), t == type else { return nil }
+            let header: Int
+            if size == 1 {
+                guard b.count >= 16 else { return nil }
+                size = Int(b[8]) << 56 | Int(b[9]) << 48 | Int(b[10]) << 40 | Int(b[11]) << 32
+                     | Int(b[12]) << 24 | Int(b[13]) << 16 | Int(b[14]) << 8 | Int(b[15])
+                header = 16
+            } else {
+                header = 8
+                if size == 0 { size = b.count }
+            }
+            guard size >= header, size <= b.count else { return nil }
+            return (Data(b[0..<size]), size)
+        }
+        guard let sourceFtyp = firstBox(sourceData, "ftyp"),
+              let stagedFtyp = firstBox(stagedData, "ftyp") else { return nil }
+        let delta = sourceFtyp.box.count - stagedFtyp.boxEnd
+        var out = Data(sourceFtyp.box)
+        out.append(stagedData[stagedFtyp.boxEnd...])
+        guard delta != 0 else { return out }
+        guard let stagedBoxes = heicBoxes(stagedData, range: 0..<stagedData.count),
+              stagedBoxes.filter({ $0.type == "meta" }).count == 1,
+              let metaBox = stagedBoxes.first(where: { $0.type == "meta" }),
+              metaBox.payload.count >= 4,
+              let children = heicBoxes(metaBox.payload, range: 4..<metaBox.payload.count),
+              children.filter({ $0.type == "iloc" }).count == 1,
+              let iloc = children.first(where: { $0.type == "iloc" }),
+              let adjusted = adjustIlocOffsets([UInt8](iloc.payload), delta: delta) else { return nil }
+        // iloc.range is relative to the meta payload (which starts at 4 in
+        // that buffer); the shift moves everything after the staged ftyp.
+        let ilocStartInOut = sourceFtyp.box.count + (metaBox.range.lowerBound + iloc.range.lowerBound - stagedFtyp.boxEnd)
+        guard ilocStartInOut >= 0, ilocStartInOut + adjusted.count <= out.count else { return nil }
+        out.replaceSubrange(ilocStartInOut..<(ilocStartInOut + adjusted.count), with: adjusted)
+        return out
+    }
+
+    /// Shifts an iloc payload's absolute file offsets by delta, editing
+    /// fixed-width fields in place. absolute = base_offset + extent_offset,
+    /// so the shift goes to the base when a base field exists, otherwise to
+    /// each extent offset - never both. Refuses non-file construction
+    /// methods, zero-length extents (unverified semantics), field overflow,
+    /// and trailing bytes. Field widths 0/4/8 only, versions 0-2, matching
+    /// the verifier's parser.
+    private static func adjustIlocOffsets(_ payload: [UInt8], delta: Int) -> [UInt8]? {
+        let b = payload
+        guard b.count >= 8, b[0] <= 2 else { return nil }
+        let version = Int(b[0])
+        let offsetSize = Int(b[4] >> 4), lengthSize = Int(b[4] & 0xF)
+        let baseOffsetSize = Int(b[5] >> 4)
+        let indexSize = version >= 1 ? Int(b[5] & 0xF) : 0
+        for size in [offsetSize, lengthSize, baseOffsetSize, indexSize] {
+            guard size == 0 || size == 4 || size == 8 else { return nil }
+        }
+        var out = b
+        func read(_ o: Int, _ n: Int) -> Int { var v = 0; for i in 0..<n { v = v << 8 | Int(b[o + i]) }; return v }
+        func write(_ o: Int, _ n: Int, _ v: Int) -> Bool {
+            guard v >= 0, n > 0, n == 8 || v < (1 << (8 * n)) else { return false }
+            for i in 0..<n { out[o + n - 1 - i] = UInt8((v >> (8 * i)) & 0xFF) }
+            return true
+        }
+        var o = 6
+        let count: Int
+        if version < 2 {
+            guard o + 2 <= b.count else { return nil }
+            count = read(o, 2); o += 2
+        } else {
+            guard o + 4 <= b.count else { return nil }
+            count = read(o, 4); o += 4
+        }
+        for _ in 0..<count {
+            let idLength = version < 2 ? 2 : 4
+            guard o + idLength <= b.count else { return nil }
+            o += idLength
+            if version >= 1 {
+                guard o + 2 <= b.count else { return nil }
+                guard Int(b[o + 1]) & 0xF == 0 else { return nil }
+                o += 2
+            }
+            guard o + 2 <= b.count else { return nil }
+            o += 2 // data_reference_index
+            let hasBase = baseOffsetSize > 0
+            if hasBase {
+                guard o + baseOffsetSize <= b.count else { return nil }
+                guard write(o, baseOffsetSize, read(o, baseOffsetSize) + delta) else { return nil }
+                o += baseOffsetSize
+            }
+            guard o + 2 <= b.count else { return nil }
+            let extentCount = read(o, 2); o += 2
+            for _ in 0..<extentCount {
+                if indexSize > 0 {
+                    guard o + indexSize <= b.count else { return nil }
+                    o += indexSize
+                }
+                guard o + offsetSize + lengthSize <= b.count else { return nil }
+                if offsetSize > 0 && !hasBase {
+                    guard write(o, offsetSize, read(o, offsetSize) + delta) else { return nil }
+                }
+                o += offsetSize
+                let length = read(o, lengthSize)
+                guard length > 0 else { return nil }
+                o += lengthSize
+            }
+        }
+        guard o == b.count else { return nil }
+        return out
+    }
+
     private static func heicWriteVerified(sourceData: Data, destinationURL: URL, imageSource: CGImageSource,
                                           date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?,
                                           removeLocation: Bool, operation: String) -> Bool {
@@ -1359,10 +1477,31 @@ struct MetadataWriter {
             }
             return byType
         }
-        guard let sourceBoxes = heicBoxes(sourceData, range: 0..<sourceData.count),
-              let stagedData = try? Data(contentsOf: destinationURL),
-              let stagedBoxes = heicBoxes(stagedData, range: 0..<stagedData.count) else {
-            return refuse("source or staged output did not parse as boxes")
+        guard let sourceBoxes = heicBoxes(sourceData, range: 0..<sourceData.count) else {
+            return refuse("source did not parse as boxes")
+        }
+        guard var stagedData = try? Data(contentsOf: destinationURL) else {
+            return refuse("staged output did not parse as boxes")
+        }
+        // ImageIO rewrites the ftyp brand list on every copy-write (observed
+        // run 41697547199: source heic|mif1,MiPr,miaf,MiHB,heic -> staged
+        // heic|heic,mif1). The staged content is verified equivalent to the
+        // source everywhere else by the checks below, so the source's own
+        // conformance declarations remain true of it. Transplant the source
+        // ftyp onto the staged file and shift every later byte, adjusting
+        // iloc absolute offsets - the only file offsets in the verified
+        // plain-still shape. The transplant is a candidate, never an
+        // exemption: the result must still pass every check below.
+        if let patched = heicRestoringSourceFtyp(sourceData: sourceData, stagedData: stagedData), patched != stagedData {
+            do {
+                try patched.write(to: destinationURL)
+                stagedData = patched
+            } catch {
+                return refuse("could not stage the source ftyp")
+            }
+        }
+        guard let stagedBoxes = heicBoxes(stagedData, range: 0..<stagedData.count) else {
+            return refuse("staged output did not parse as boxes")
         }
         // Top level: ftyp and foreign boxes payload-exact, none gained.
         let sourceTop = multiset(sourceBoxes, excluding: ["meta", "mdat"])
