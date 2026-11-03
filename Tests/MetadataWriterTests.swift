@@ -669,6 +669,40 @@ struct MetadataWriterTests {
             let exif = props?[kCGImagePropertyExifDictionary] as? [CFString: Any]
             try require(exif?[kCGImagePropertyExifDateTimeOriginal] == nil, "Date survived mixed removal in \(ext)")
         }
+        // Regression (diagnostic probe evidence, run 41660381865): plain
+        // metadata sets on a PNG must succeed too - the destination-synthesized
+        // iTXt XMP carrier used to trip the aux guard, and xmp:ModifyDate kept
+        // the stale source date on a date set because the plan never wrote the
+        // MWG-canonical TIFF DateTime location.
+        let setOnly = root.appendingPathComponent("setonly.png")
+        try fixtureWithMetadata(at: setOnly, type: "public.png" as CFString)
+        let requestedDate = Date(timeIntervalSince1970: 1_700_000_000)
+        try require(MetadataWriter.updateImageMetadata(sourceURL: setOnly, destinationURL: setOnly,
+            date: requestedDate, removeDate: false, latitude: nil, longitude: nil, removeLocation: false), "Set date only failed for png")
+        let setOnlyProps = CGImageSourceCopyPropertiesAtIndex(CGImageSourceCreateWithURL(setOnly as CFURL, nil)!, 0, nil) as? [CFString: Any]
+        let setOnlyExif = setOnlyProps?[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let exifFormatter = DateFormatter()
+        exifFormatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        try require(setOnlyExif?[kCGImagePropertyExifDateTimeOriginal] as? String == exifFormatter.string(from: requestedDate), "Set date missing in png readback")
+        var modifyDateValue: String?
+        if let setOnlyGraph = CGImageSourceCopyMetadataAtIndex(CGImageSourceCreateWithURL(setOnly as CFURL, nil)!, 0, nil) {
+            CGImageMetadataEnumerateTagsUsingBlock(setOnlyGraph, nil, nil) { path, tag in
+                if (path as String) == "xmp:ModifyDate" {
+                    modifyDateValue = CGImageMetadataTagCopyValue(tag) as? String
+                }
+                return true
+            }
+        }
+        let xmpFormatter = DateFormatter()
+        xmpFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        try require(modifyDateValue == xmpFormatter.string(from: requestedDate), "xmp:ModifyDate stale after png date set")
+        let locOnly = root.appendingPathComponent("loconly.png")
+        try fixtureWithMetadata(at: locOnly, type: "public.png" as CFString)
+        try require(MetadataWriter.updateImageMetadata(sourceURL: locOnly, destinationURL: locOnly,
+            date: nil, removeDate: false, latitude: 12.5, longitude: -45.25, removeLocation: false), "Set location only failed for png")
+        let locCoords = MetadataWriter.readExistingCoordinates(from: locOnly)
+        try require(locCoords != nil && abs(locCoords!.latitude - 12.5) < 0.001 && abs(locCoords!.longitude + 45.25) < 0.001, "Requested GPS missing after png set")
+
         // No-op copy of a symlinked source yields a regular file.
         let linkSource = root.appendingPathComponent("link-source.png")
         try fixture(at: linkSource, type: "public.png" as CFString)

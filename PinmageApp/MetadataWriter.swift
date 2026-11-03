@@ -320,53 +320,11 @@ struct MetadataWriter {
                 return false
             }
             if utiString == "public.png" {
-                // XMP correction: the rewrite must not silently drop the
-                // source XMP packet (v3 CI: "output would lose or alter
-                // chunks [iTXt x1]") nor carry it stale - removed dates/GPS
-                // would survive inside XMP, the M17 bug. Replace it with the
-                // corrected packet built from the source's own metadata.
-                guard let sourceChunks = pngChunks(sourceData) else {
-                    FileHandle.standardError.write(Data("Refusing PNG removal: source did not parse as PNG\n".utf8))
-                    return false
-                }
-                let sourceXMP = (sourceChunks["iTXt"] ?? []).filter(isXMPCarrierPayload)
-                guard sourceXMP.count <= 1 else {
-                    FileHandle.standardError.write(Data("Refusing PNG removal: multiple XMP packets\n".utf8))
-                    return false
-                }
-                var xmpHandled = false
-                if !sourceXMP.isEmpty {
-                    // An empty packet means nothing survived the removals, so
-                    // the carrier is dropped rather than written empty.
-                    guard let packet = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
-                                                          latitude: latitude, longitude: longitude, removeLocation: removeLocation),
-                          let staged = try? Data(contentsOf: destinationURL),
-                          let replaced = pngReplacingXMPCarrier(staged, correctedPacket: packet.isEmpty ? nil : packet) else {
-                        FileHandle.standardError.write(Data("Refusing PNG removal: could not build or stage the corrected XMP packet\n".utf8))
-                        return false
-                    }
-                    do {
-                        try replaced.write(to: destinationURL)
-                    } catch {
-                        FileHandle.standardError.write(Data("Refusing PNG removal: could not stage the corrected XMP packet\n".utf8))
-                        return false
-                    }
-                    // Verify the staged file carries exactly the intended packet
-                    // (none, when the removals emptied it). Chunk payloads
-                    // include the iTXt header (keyword, NUL, flags, two empty
-                    // NUL-terminated strings), so the expected payload is the
-                    // same header the splice wrote plus the packet bytes.
-                    let carrierHeader = Array("\(xmpITXtKeyword)\0".utf8) + [0, 0, 0, 0]
-                    let expected: [Data] = packet.isEmpty ? [] : [Data(carrierHeader + [UInt8](packet))]
-                    guard let finalData = try? Data(contentsOf: destinationURL),
-                          let finalChunks = pngChunks(finalData),
-                          (finalChunks["iTXt"] ?? []).filter(isXMPCarrierPayload) == expected else {
-                        FileHandle.standardError.write(Data("Refusing PNG removal: corrected XMP packet did not verify\n".utf8))
-                        return false
-                    }
-                    xmpHandled = true
-                }
-                guard pngAuxChunksPreserved(source: sourceData, destinationURL: destinationURL, operation: "removal", xmpHandled: xmpHandled) else { return false }
+                let corrected = correctStagedXMPCarrier(sourceData: sourceData, destinationURL: destinationURL, imageSource: imageSource,
+                                                        date: date, removeDate: removeDate, latitude: latitude, longitude: longitude,
+                                                        removeLocation: removeLocation, operation: "removal")
+                guard corrected.success else { return false }
+                guard pngAuxChunksPreserved(source: sourceData, destinationURL: destinationURL, operation: "removal", xmpHandled: corrected.xmpHandled) else { return false }
             }
             // M15b, tag level: this branch rebuilds metadata from the
             // properties dictionary, so every source tag the dictionary
@@ -425,9 +383,18 @@ struct MetadataWriter {
                 return false
             }
             if utiString == "public.png" {
-                // AddImageFromSource may transport every chunk untouched; the
-                // guard accepts transport and refuses only a real loss.
-                guard pngAuxChunksPreserved(source: sourceData, destinationURL: destinationURL, operation: "set") else { return false }
+                // Same XMP carrier correction as the removal rebuild path:
+                // AddImageFromSource synthesizes an iTXt XMP packet from the
+                // written properties, which never matches the source packet
+                // byte-wise, so the aux guard refused every metadata-carrying
+                // PNG set (CI probe, run 41660381865). The corrected packet
+                // keeps exact-payload semantics for every other chunk and is
+                // itself verified against the staged file.
+                let corrected = correctStagedXMPCarrier(sourceData: sourceData, destinationURL: destinationURL, imageSource: imageSource,
+                                                        date: date, removeDate: removeDate, latitude: latitude, longitude: longitude,
+                                                        removeLocation: removeLocation, operation: "set")
+                guard corrected.success else { return false }
+                guard pngAuxChunksPreserved(source: sourceData, destinationURL: destinationURL, operation: "set", xmpHandled: corrected.xmpHandled) else { return false }
             }
             return true
         }
@@ -638,6 +605,7 @@ struct MetadataWriter {
             // mapping (CI: exif:DateTimeOriginal alone read back as missing).
             guard CGImageMetadataSetValueWithPath(mutableMetadata, nil, "photoshop:DateCreated" as CFString, dateString as CFString),
                   CGImageMetadataSetValueWithPath(mutableMetadata, nil, "xmp:CreateDate" as CFString, dateString as CFString),
+                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "xmp:ModifyDate" as CFString, dateString as CFString),
                   CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeOriginal" as CFString, dateString as CFString),
                   CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeDigitized" as CFString, dateString as CFString),
                   CGImageMetadataSetValueWithPath(mutableMetadata, nil, "tiff:DateTime" as CFString, dateString as CFString) else {
@@ -693,6 +661,61 @@ struct MetadataWriter {
         let crc = pngCRC32(typeBytes + payloadBytes)
         chunk += [UInt8((crc >> 24) & 0xFF), UInt8((crc >> 16) & 0xFF), UInt8((crc >> 8) & 0xFF), UInt8(crc & 0xFF)]
         return chunk
+    }
+
+    /// XMP carrier correction shared by the removal rebuild and the plain-set
+    /// PNG paths: the rewrite must not silently drop the source XMP packet
+    /// (v3 CI: "output would lose or alter chunks [iTXt x1]") nor carry it
+    /// stale (removed dates/GPS would survive inside XMP, the M17 bug), and
+    /// the destination-synthesized carrier on a set never matches the source
+    /// packet byte-wise. Replace it with the corrected packet built from the
+    /// source's own metadata, staged and verified exactly. Returns whether
+    /// the write may proceed and whether the XMP carrier was handled, so the
+    /// aux guard verifies it by identity instead of payload comparison.
+    private static func correctStagedXMPCarrier(sourceData: Data, destinationURL: URL, imageSource: CGImageSource,
+                                                date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?,
+                                                removeLocation: Bool, operation: String) -> (success: Bool, xmpHandled: Bool) {
+        guard let sourceChunks = pngChunks(sourceData) else {
+            FileHandle.standardError.write(Data("Refusing PNG \(operation): source did not parse as PNG\n".utf8))
+            return (false, false)
+        }
+        let sourceXMP = (sourceChunks["iTXt"] ?? []).filter(isXMPCarrierPayload)
+        guard sourceXMP.count <= 1 else {
+            FileHandle.standardError.write(Data("Refusing PNG \(operation): multiple XMP packets\n".utf8))
+            return (false, false)
+        }
+        guard !sourceXMP.isEmpty else {
+            return (true, false)
+        }
+        // An empty packet means nothing survived the plan, so the carrier is
+        // dropped rather than written empty.
+        guard let packet = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
+                                              latitude: latitude, longitude: longitude, removeLocation: removeLocation),
+              let staged = try? Data(contentsOf: destinationURL),
+              let replaced = pngReplacingXMPCarrier(staged, correctedPacket: packet.isEmpty ? nil : packet) else {
+            FileHandle.standardError.write(Data("Refusing PNG \(operation): could not build or stage the corrected XMP packet\n".utf8))
+            return (false, false)
+        }
+        do {
+            try replaced.write(to: destinationURL)
+        } catch {
+            FileHandle.standardError.write(Data("Refusing PNG \(operation): could not stage the corrected XMP packet\n".utf8))
+            return (false, false)
+        }
+        // Verify the staged file carries exactly the intended packet (none,
+        // when the plan emptied it). Chunk payloads include the iTXt header
+        // (keyword, NUL, flags, two empty NUL-terminated strings), so the
+        // expected payload is the same header the splice wrote plus the
+        // packet bytes.
+        let carrierHeader = Array("\(xmpITXtKeyword)\0".utf8) + [0, 0, 0, 0]
+        let expected: [Data] = packet.isEmpty ? [] : [Data(carrierHeader + [UInt8](packet))]
+        guard let finalData = try? Data(contentsOf: destinationURL),
+              let finalChunks = pngChunks(finalData),
+              (finalChunks["iTXt"] ?? []).filter(isXMPCarrierPayload) == expected else {
+            FileHandle.standardError.write(Data("Refusing PNG \(operation): corrected XMP packet did not verify\n".utf8))
+            return (false, false)
+        }
+        return (true, true)
     }
 
     /// Byte-level surgery on a finished PNG: drop every XMP-carrier iTXt and,
@@ -751,15 +774,21 @@ struct MetadataWriter {
             || (removeLocation && leaf.hasPrefix("GPS"))
     }
 
-    /// The XMP paths a plan sets, with their expected values. Mirrors the sets
-    /// in applyMetadataPlan; the invariant checks them by value.
+    /// The XMP paths a plan sets, with their expected values, at the canonical
+    /// locations ImageIO's XMP writer provably round-trips. CI probe evidence
+    /// (run 41660381865): the serializer carries photoshop:DateCreated,
+    /// xmp:CreateDate, xmp:ModifyDate and exif:DateTimeOriginal but omits the
+    /// exif:DateTimeDigitized and tiff:DateTime aliases from the packet, so
+    /// requiring them here refused every date set. applyMetadataPlan still
+    /// writes those aliases into the graph for property-dictionary consumers;
+    /// the invariant checks the paths that survive serialization.
     private static func plannedSetValues(date: Date?, latitude: Double?, longitude: Double?) -> [String: CFTypeRef] {
         var expected: [String: CFTypeRef] = [:]
         if let date = date {
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
             let dateString = formatter.string(from: date)
-            for path in ["photoshop:DateCreated", "xmp:CreateDate", "exif:DateTimeOriginal", "exif:DateTimeDigitized", "tiff:DateTime"] {
+            for path in ["photoshop:DateCreated", "xmp:CreateDate", "xmp:ModifyDate", "exif:DateTimeOriginal"] {
                 expected[path] = dateString as CFString
             }
         }
