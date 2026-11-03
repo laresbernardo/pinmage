@@ -236,7 +236,10 @@ struct MetadataWriterTests {
                 }
                 if let src = CGImageSourceCreateWithURL(file as CFURL, nil),
                    let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
-                    report.append("PROPERTIES BEFORE: exif=\(props[kCGImagePropertyExifDictionary] ?? [:]) tiff=\(props[kCGImagePropertyTIFFDictionary] ?? [:]) gps=\(props[kCGImagePropertyGPSDictionary] ?? [:])")
+                    let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+                    let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+                    let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
+                    report.append("PROPERTIES BEFORE: exif=\(exif) tiff=\(tiff) gps=\(gps)")
                 }
                 let before = try? Data(contentsOf: file)
                 let ok = MetadataWriter.updateImageMetadata(sourceURL: file, destinationURL: file,
@@ -246,7 +249,10 @@ struct MetadataWriterTests {
                 report.append("PRODUCTION updateImageMetadata -> \(ok); output exists=\(FileManager.default.fileExists(atPath: file.path)) bytesChanged=\(before != after)")
                 if let src = CGImageSourceCreateWithURL(file as CFURL, nil),
                    let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
-                    report.append("PROPERTIES AFTER: exif=\(props[kCGImagePropertyExifDictionary] ?? [:]) tiff=\(props[kCGImagePropertyTIFFDictionary] ?? [:]) gps=\(props[kCGImagePropertyGPSDictionary] ?? [:])")
+                    let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+                    let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+                    let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
+                    report.append("PROPERTIES AFTER: exif=\(exif) tiff=\(tiff) gps=\(gps)")
                 }
                 if ext == "png" {
                     report.append(contentsOf: simulateCorrectedXMPPacket(probeRoot: probeRoot, scenario: (scenario.name, scenario.date, scenario.removeDate, scenario.lat, scenario.lon, scenario.removeLocation)))
