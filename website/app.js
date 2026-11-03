@@ -130,13 +130,20 @@ async function handleDownload() {
       download_count: increment(1)
     });
 
-    // B. Log detailed event metadata for historical analysis
-    const logCollection = collection(db, "downloads");
-    const logPromise = addDoc(logCollection, {
+    // B. Log detailed event metadata for historical analysis.
+    // utm_source is stored only when present in the page URL (e.g. ?utm_source=test
+    // for internal checks), so unlabeled events stay distinguishable from test traffic.
+    const logData = {
       ip: userIpAddress,
       version: APP_VERSION,
       timestamp: serverTimestamp()
-    });
+    };
+    const utmSource = new URLSearchParams(window.location.search).get("utm_source");
+    if (utmSource) {
+      logData.utm_source = utmSource;
+    }
+    const logCollection = collection(db, "downloads");
+    const logPromise = addDoc(logCollection, logData);
 
     // Run both writes concurrently in the background
     await Promise.all([updatePromise, logPromise]);
