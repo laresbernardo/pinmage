@@ -1859,7 +1859,12 @@ struct MetadataWriter {
             guard remainingInfe.count == 1, added.count == 1,
                   added[0].type == "mime", added[0].contentType == "application/rdf+xml",
                   Set(stagedItems.map { $0.id }).count == stagedItems.count else {
-                return refuse("staged iinf adds items outside one verified XMP carrier")
+                // Self-evidencing: the next diagnosis needs the real staged
+                // item list, not a guess about what ImageIO added.
+                func itemDesc(_ list: [(id: Int, type: String, contentType: String?)]) -> String {
+                    list.map { "id=\($0.id):\($0.type):\($0.contentType ?? "-")" }.joined(separator: ",")
+                }
+                return refuse("staged iinf adds items outside one verified XMP carrier (extras=\(remainingInfe.count) source=[\(itemDesc(items))] staged=[\(itemDesc(stagedItems))])")
             }
             addedMimeID = added[0].id
         }
