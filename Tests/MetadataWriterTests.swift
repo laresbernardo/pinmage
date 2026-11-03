@@ -439,7 +439,7 @@ struct MetadataWriterTests {
                     return
                 }
                 let payload = Data(b[(pos + header)..<(pos + size)])
-                lines.append("\(label) \(type) size=\(size) head=\(hexPrefix(payload, 8))")
+                lines.append("\(label) \(type) size=\(size) head=\(hexPrefix(payload, type == "ftyp" ? 256 : 8))")
                 if type == "meta" && depth == 0 && payload.count >= 4 {
                     walk(pos + header + 4, pos + size, "meta", depth + 1)
                 }

@@ -813,17 +813,17 @@ struct MetadataWriter {
                 return refuse("Exif would lose or alter tags [\(violations.joined(separator: ", "))]")
             }
         }
-        // XMP APP1: the staged packet must match the plan-verified packet.
-        guard let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
-                                                      latitude: latitude, longitude: longitude, removeLocation: removeLocation) else {
-            return refuse("corrected XMP failed preservation checks")
+        // Refuse added/lost/duplicate XMP carriers explicitly. A source
+        // without XMP needs no synthetic XMP graph, but intent must still
+        // pass verifyIntent on the staged file before publication.
+        guard sourceParts.xmp.count <= 1,
+              sourceParts.xmp.count == stagedParts.xmp.count else {
+            return refuse("XMP APP1 carrier count changed or unsupported")
         }
-        if expectedPacket.isEmpty {
-            guard stagedParts.xmp.isEmpty else {
-                return refuse("staged XMP packet failed verification")
-            }
-        } else {
-            guard stagedParts.xmp.count == 1,
+        if !sourceParts.xmp.isEmpty {
+            guard let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
+                                                           latitude: latitude, longitude: longitude, removeLocation: removeLocation),
+                  !expectedPacket.isEmpty,
                   let stagedGraph = CGImageMetadataCreateFromXMPData(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count)) as CFData),
                   let expectedGraph = CGImageMetadataCreateFromXMPData(expectedPacket as CFData) else {
                 return refuse("staged XMP packet failed verification")
@@ -1325,6 +1325,18 @@ struct MetadataWriter {
         let stagedTop = multiset(stagedBoxes, excluding: ["meta", "mdat"])
         for type in Set(sourceTop.keys).union(stagedTop.keys).sorted() {
             guard sortPayloads(sourceTop[type] ?? []) == sortPayloads(stagedTop[type] ?? []) else {
+                if type == "ftyp" {
+                    // Diagnostic only: retain exact refusal until staged brand
+                    // changes are grounded. Never infer this from the unchanged
+                    // original after a refused write.
+                    func describe(_ payloads: [Data]) -> String {
+                        return payloads.map { data in
+                            let hex = data.prefix(256).map { String(format: "%02x", $0) }.joined()
+                            return "bytes=\(data.count) hex=\(hex)\(data.count > 256 ? " [truncated]" : "")"
+                        }.joined(separator: "; ")
+                    }
+                    return refuse("ftyp differs: source [\(describe(sourceTop[type] ?? []))] staged [\(describe(stagedTop[type] ?? []))]")
+                }
                 return refuse("top-level box \(type) changed or was lost")
             }
         }
