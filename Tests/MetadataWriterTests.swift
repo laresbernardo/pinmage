@@ -463,9 +463,9 @@ struct MetadataWriterTests {
         _ = CGImageMetadataSetValueWithPath(withSet, nil, "tiff:Model" as CFString, "TestCamera" as CFString)
         try require(MetadataWriter.applyMetadataPlan(withSet, date: Date(timeIntervalSince1970: 1_700_000_000),
             removeDate: false, latitude: nil, longitude: nil, removeLocation: false), "Set plan failed")
-        let when = Date(timeIntervalSince1970: 1_700_000_000)
+        let planDate = Date(timeIntervalSince1970: 1_700_000_000)
         try require(MetadataWriter.xmpPlanViolations(source: setSource, result: withSet,
-            date: when, removeDate: false, latitude: nil, longitude: nil, removeLocation: false).isEmpty,
+            date: planDate, removeDate: false, latitude: nil, longitude: nil, removeLocation: false).isEmpty,
                     "Invariant rejected a correct set")
         let wrongSet = CGImageMetadataCreateMutable()
         _ = CGImageMetadataSetValueWithPath(wrongSet, nil, "tiff:Model" as CFString, "TestCamera" as CFString)
@@ -475,7 +475,7 @@ struct MetadataWriterTests {
         _ = CGImageMetadataSetValueWithPath(wrongSet, nil, "exif:DateTimeDigitized" as CFString, "1999-01-01T00:00:00" as CFString)
         _ = CGImageMetadataSetValueWithPath(wrongSet, nil, "tiff:DateTime" as CFString, "1999-01-01T00:00:00" as CFString)
         let wrongViolations = MetadataWriter.xmpPlanViolations(source: setSource, result: wrongSet,
-            date: when, removeDate: false, latitude: nil, longitude: nil, removeLocation: false)
+            date: planDate, removeDate: false, latitude: nil, longitude: nil, removeLocation: false)
         try require(!wrongViolations.isEmpty, "Invariant accepted a wrong set value")
 
         let multi = root.appendingPathComponent("multipage.tiff")
