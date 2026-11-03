@@ -1251,6 +1251,15 @@ struct MetadataWriterTests {
             let photo = root.appendingPathComponent("format.\(ext)")
             try fixture(at: photo, type: uti as CFString)
             let pixelsBeforeWrite = try pixelData(photo)
+            if ext == "heic" {
+                // HEIC currently refuses every write: ImageIO rewrites the
+                // ftyp brand list and dropping those conformance claims is
+                // not yet proven safe. Document the limitation, do not ship it.
+                let before = try Data(contentsOf: photo)
+                try require(!update(photo, photo), "HEIC set must refuse while the ftyp brand rewrite is unverified")
+                try require(try Data(contentsOf: photo) == before, "Refused HEIC set must leave the original intact")
+                continue
+            }
             try require(update(photo, photo), "Overwrite failed for \(ext)")
             try require(try pixelData(photo) == pixelsBeforeWrite, "Pixels changed during write in \(ext)")
             try require(MetadataWriter.validateImage(photo, photo), "Invalid \(ext) output")
@@ -1271,6 +1280,12 @@ struct MetadataWriterTests {
             try fixtureWithMetadata(at: photo, type: uti as CFString)
             try require(MetadataWriter.readExistingCoordinates(from: photo) != nil, "Fixture GPS missing in \(ext)")
             let pixelsBeforeRemoval = try pixelData(photo)
+            if ext == "heic" {
+                let before = try Data(contentsOf: photo)
+                try require(!update(photo, photo, remove: true), "HEIC removal must refuse while the ftyp brand rewrite is unverified")
+                try require(try Data(contentsOf: photo) == before, "Refused HEIC removal must leave the original intact")
+                continue
+            }
             try require(update(photo, photo, remove: true), "Removal overwrite failed for \(ext)")
             try require(MetadataWriter.validateImage(photo, photo), "Invalid \(ext) after removal")
             try require(try pixelData(photo) == pixelsBeforeRemoval, "Pixels changed during removal in \(ext)")
@@ -1538,6 +1553,14 @@ struct MetadataWriterTests {
         for (ext, uti) in [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")] {
             let mixed = root.appendingPathComponent("mixed.\(ext)")
             try fixtureWithMetadata(at: mixed, type: uti as CFString)
+            if ext == "heic" {
+                let before = try Data(contentsOf: mixed)
+                try require(!MetadataWriter.updateImageMetadata(sourceURL: mixed, destinationURL: mixed,
+                    date: Date(timeIntervalSince1970: 1_700_000_000), removeDate: false,
+                    latitude: nil, longitude: nil, removeLocation: true), "HEIC set date + remove location must refuse")
+                try require(try Data(contentsOf: mixed) == before, "Refused HEIC mixed write must leave the original intact")
+                continue
+            }
             try require(MetadataWriter.updateImageMetadata(sourceURL: mixed, destinationURL: mixed,
                 date: Date(timeIntervalSince1970: 1_700_000_000), removeDate: false,
                 latitude: nil, longitude: nil, removeLocation: true), "Set date + remove location failed for \(ext)")
@@ -1547,6 +1570,13 @@ struct MetadataWriterTests {
         for (ext, uti) in [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")] {
             let mixed = root.appendingPathComponent("mixed2.\(ext)")
             try fixtureWithMetadata(at: mixed, type: uti as CFString)
+            if ext == "heic" {
+                let before = try Data(contentsOf: mixed)
+                try require(!MetadataWriter.updateImageMetadata(sourceURL: mixed, destinationURL: mixed,
+                    date: nil, removeDate: true, latitude: 12.5, longitude: -45.25, removeLocation: false), "HEIC remove date + set location must refuse")
+                try require(try Data(contentsOf: mixed) == before, "Refused HEIC mixed write must leave the original intact")
+                continue
+            }
             try require(MetadataWriter.updateImageMetadata(sourceURL: mixed, destinationURL: mixed,
                 date: nil, removeDate: true, latitude: 12.5, longitude: -45.25, removeLocation: false), "Remove date + set location failed for \(ext)")
             let coords = MetadataWriter.readExistingCoordinates(from: mixed)
@@ -1616,6 +1646,13 @@ struct MetadataWriterTests {
         for (ext, uti) in [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")] {
             let written = root.appendingPathComponent("intent.\(ext)")
             try fixture(at: written, type: uti as CFString)
+            if ext == "heic" {
+                let before = try Data(contentsOf: written)
+                try require(!update(written, written), "HEIC intent write must refuse")
+                try require(!update(written, written, remove: true), "HEIC intent removal must refuse")
+                try require(try Data(contentsOf: written) == before, "Refused HEIC intent writes must leave the original intact")
+                continue
+            }
             try require(update(written, written), "Intent write failed for \(ext)")
             let good = MetadataWriter.WritePlan(date: when, removeDate: false, latitude: 40.4, longitude: -3.7, removeLocation: false)
             try require(MetadataWriter.verifyIntent(good, in: written), "Readback rejected a correct write in \(ext)")

@@ -813,14 +813,24 @@ struct MetadataWriter {
                 return refuse("Exif would lose or alter tags [\(violations.joined(separator: ", "))]")
             }
         }
-        // Refuse added/lost/duplicate XMP carriers explicitly. A source
-        // without XMP needs no synthetic XMP graph, but intent must still
-        // pass verifyIntent on the staged file before publication.
-        guard sourceParts.xmp.count <= 1,
-              sourceParts.xmp.count == stagedParts.xmp.count else {
-            return refuse("XMP APP1 carrier count changed or unsupported")
+        // XMP APP1 carriers: at most one each side; a lost carrier or
+        // duplicates refuse. ImageIO ADDS one XMP carrier when the source
+        // had none (both routes; probe evidence runs 41690332177 and
+        // 41697547199): the observed packet holds only exif:PixelXDimension
+        // and exif:PixelYDimension equal to the decoded pixels. An added
+        // carrier is admitted only when its ENTIRE parsed graph is those
+        // two tags with those values and no qualifiers - any other tag,
+        // value or qualifier refuses. verifyIntent independently proves
+        // the requested metadata before publication regardless. When the
+        // source carries XMP, the staged packet must match the
+        // plan-verified corrected packet as before.
+        guard sourceParts.xmp.count <= 1, stagedParts.xmp.count <= 1 else {
+            return refuse("unsupported multiple XMP APP1 carriers")
         }
-        if !sourceParts.xmp.isEmpty {
+        if sourceParts.xmp.count == 1 {
+            guard stagedParts.xmp.count == 1 else {
+                return refuse("XMP APP1 carrier lost")
+            }
             guard let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
                                                            latitude: latitude, longitude: longitude, removeLocation: removeLocation),
                   !expectedPacket.isEmpty,
@@ -833,8 +843,42 @@ struct MetadataWriter {
             guard violations.isEmpty else {
                 return refuse("staged XMP packet differs from the verified packet [\(violations.joined(separator: ", "))]")
             }
+        } else if stagedParts.xmp.count == 1 {
+            guard addedXMPVerifiedDimensionOnly(stagedParts.xmp[0], xmpPrefix: xmpPrefix, imageSource: imageSource) else {
+                return refuse("added XMP APP1 carrier failed dimension-only verification")
+            }
         }
         return true
+    }
+
+    /// Positive allowlist for an XMP carrier ImageIO adds to a JPEG that
+    /// had none: the whole parsed graph must be exactly the two
+    /// pixel-dimension tags with values equal to the decoded source
+    /// pixels. Unknown paths, qualifiers, or wrong values fail.
+    private static func addedXMPVerifiedDimensionOnly(_ packet: Data, xmpPrefix: Data, imageSource: CGImageSource) -> Bool {
+        guard packet.prefix(xmpPrefix.count) == xmpPrefix,
+              let graph = CGImageMetadataCreateFromXMPData(Data(packet.dropFirst(xmpPrefix.count)) as CFData),
+              let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
+              let width = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue else { return false }
+        var ok = true
+        CGImageMetadataEnumerateTagsUsingBlock(graph, nil, nil) { (path, tag) in
+            let p = path as String
+            guard p == "exif:PixelXDimension" || p == "exif:PixelYDimension",
+                  CGImageMetadataTagCopyQualifiers(tag) == nil,
+                  let raw = CGImageMetadataTagCopyValue(tag) else {
+                ok = false
+                return false
+            }
+            let expected = p == "exif:PixelXDimension" ? width : height
+            let text = (raw as? String) ?? (raw as? NSNumber)?.stringValue
+            guard text == String(expected) else {
+                ok = false
+                return false
+            }
+            return true
+        }
+        return ok
     }
 
     /// TIFF IFD walk with resolved values: (label, entries, next offset) per
