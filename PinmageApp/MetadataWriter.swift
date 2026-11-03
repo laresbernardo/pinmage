@@ -1868,7 +1868,7 @@ struct MetadataWriter {
         // primary image item.
         func refBoxes(_ irefPayload: Data) -> [(type: String, payload: Data)]? {
             guard irefPayload.count >= 4 else { return nil }
-            return heicBoxes(irefPayload, range: 4..<irefPayload.count)
+            return heicBoxes(irefPayload, range: 4..<irefPayload.count)?.map { (type: $0.type, payload: $0.payload) }
         }
         let stagedIrefs = stagedChildren.filter { $0.type == "iref" }
         guard stagedIrefs.count <= 1 else {
