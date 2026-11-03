@@ -2,6 +2,7 @@ import Foundation
 import ImageIO
 import CoreServices
 import Darwin
+import CryptoKit
 
 struct MetadataWriter {
     /// The complete, immutable edit request for one file. Built once from the caller's
@@ -478,12 +479,9 @@ struct MetadataWriter {
                                     removeLocation: removeLocation, operation: isRemoval ? "removal" : "set") else { return false }
         }
         if utiString == "public.heic" || utiString == "public.heif" {
-            // Interim guard (refusal-only): any top-level box outside the
-            // writer-carried set must survive payload-exact. Meta-item and
-            // aux-entity verification (iinf/iref/iloc contents) is the next
-            // evidence cycle; unknown structures refuse rather than pass.
-            guard heicAuxBoxesPreserved(source: sourceData, destinationURL: destinationURL,
-                                        operation: isRemoval ? "removal" : "set") else { return false }
+            guard heicWriteVerified(sourceData: sourceData, destinationURL: destinationURL, imageSource: imageSource,
+                                    date: date, removeDate: removeDate, latitude: latitude, longitude: longitude,
+                                    removeLocation: removeLocation, operation: isRemoval ? "removal" : "set") else { return false }
         }
         return true
     }
@@ -543,15 +541,17 @@ struct MetadataWriter {
         return Data(bytes)
     }
 
-    /// Photoshop IRB (APP13 "Photoshop 3.0") 8BIM resource walk. Strict: nil
-    /// when the payload does not parse completely - a resource list we
+    /// Photoshop IRB (APP13 "Photoshop 3.0") 8BIM resource walk, keeping
+    /// each resource's complete bytes (signature, id, Pascal name, size,
+    /// payload, pad). Strict: nil when the payload does not parse
+    /// completely, including a truncated final pad - a resource list we
     /// cannot walk refuses the write rather than passing partially checked.
-    private static func irbResources(_ payload: Data) -> [(id: Int, data: Data)]? {
+    private static func irbResources(_ payload: Data) -> [(id: Int, name: Data, payload: Data, bytes: Data)]? {
         let prefix = Data("Photoshop 3.0\0".utf8)
         let b = [UInt8](payload)
         guard b.count >= prefix.count, payload.prefix(prefix.count) == prefix else { return nil }
         var pos = prefix.count
-        var out: [(Int, Data)] = []
+        var out: [(Int, Data, Data, Data)] = []
         while pos < b.count {
             guard pos + 12 <= b.count,
                   b[pos] == 0x38 && b[pos + 1] == 0x42 && b[pos + 2] == 0x49 && b[pos + 3] == 0x4D else { return nil }
@@ -563,30 +563,33 @@ struct MetadataWriter {
             guard p + 4 <= b.count else { return nil }
             let size = Int(b[p]) << 24 | Int(b[p + 1]) << 16 | Int(b[p + 2]) << 8 | Int(b[p + 3])
             p += 4
-            guard p + size <= b.count else { return nil }
-            out.append((rid, Data(b[p..<(p + size)])))
-            p += size + (size % 2)
-            pos = p
+            let end = p + size + (size % 2)
+            guard end <= b.count else { return nil }
+            out.append((rid, Data(b[(pos + 7)..<(pos + 6 + nameLength)]), Data(b[p..<(p + size)]), Data(b[pos..<end])))
+            pos = end
         }
         return out
     }
 
-    private static func irbPayload(_ resources: [(id: Int, data: Data)]) -> Data {
-        var out = Data("Photoshop 3.0\0".utf8)
-        for (rid, payload) in resources {
-            out.append(contentsOf: [0x38, 0x42, 0x49, 0x4D, UInt8((rid >> 8) & 0xFF), UInt8(rid & 0xFF), 0, 0])
-            out.append(contentsOf: [UInt8((payload.count >> 24) & 0xFF), UInt8((payload.count >> 16) & 0xFF), UInt8((payload.count >> 8) & 0xFF), UInt8(payload.count & 0xFF)])
-            out.append(payload)
-            if payload.count % 2 != 0 { out.append(0) }
-        }
-        return out
-    }
-
-    /// IRB resources that can carry date or location payloads (IPTC-NAA,
-    /// Exif, XMP). Their semantics under a metadata change are unverifiable,
-    /// so a metadata-changing write on a file carrying any of them non-empty
-    /// refuses instead of trusting the writer's regeneration.
-    private static let irbTargetedResources: Set<Int> = [0x0404, 0x0422, 0x0424]
+    /// IRB resources whose Adobe-spec semantics are provably free of dates,
+    /// locations and user content, so byte-exact reattachment cannot
+    /// resurrect or depend on an edited field: JPEG quality (0x0406), grid
+    /// and guides (0x0408), print scale (0x0426), pixel aspect ratio
+    /// (0x0428). (Adobe Photoshop File Formats Specification, Image
+    /// Resources section.) Everything else refuses: IPTC-NAA (0x0404, which
+    /// carries IIM date datasets 2:55/2:60/2:62/2:63), Exif copies
+    /// (0x0422/0x0423), XMP (0x0424), global altitude (0x0419), thumbnails
+    /// (0x0409/0x040C, which can embed a full Exif APP1), the IPTC digest
+    /// (0x0425, an XMP<->IPTC sync marker that goes stale under edit) except
+    /// in the one verified form below, plug-in and unknown ids. The single
+    /// verified digest form is the writer-authored pair of an EMPTY IPTC
+    /// resource (zero IIM datasets, so provably no date/location or any
+    /// other content) plus a 0x0425 payload proven to be the MD5 of that
+    /// exact empty payload: the pair asserts only "XMP is in sync with no
+    /// IPTC content", an assertion no date/GPS edit can falsify. A non-empty
+    /// Pascal name never makes a resource void: names survive only as part
+    /// of the complete reattached bytes, never as a reason to keep or drop.
+    private static let irbPreservableResources: Set<Int> = [0x0406, 0x0408, 0x0426, 0x0428]
 
     /// Replaces the first genuine Photoshop IRB with the given payload;
     /// inserts one after the last APP0/APP1 when the file has none (the
@@ -665,10 +668,11 @@ struct MetadataWriter {
     ///    changes. MakerNote and private tags the writer drops refuse.
     /// 3. The XMP APP1 packet must equal the plan-verified corrected packet
     ///    (the PNG/TIFF carrier machinery).
-    /// 4. A Photoshop IRB is rebuilt from the source's own 8BIM resources
-    ///    byte-exact after the write and verified. Non-empty IPTC/Exif/XMP
-    ///    resources refuse: their date/location semantics under a metadata
-    ///    change are unverifiable. Malformed IRB refuses.
+    /// 4. A Photoshop IRB is restored from the source's complete 8BIM
+    ///    resource bytes and verified byte-exact. Only resources proven
+    ///    edit-independent are restored (see irbPreservableResources and
+    ///    the verified empty-IPTC + digest pair); anything else refuses.
+    ///    Malformed IRB refuses.
     private static func jpegWriteVerified(sourceData: Data, destinationURL: URL, imageSource: CGImageSource,
                                           date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?,
                                           removeLocation: Bool, operation: String) -> Bool {
@@ -682,26 +686,42 @@ struct MetadataWriter {
         guard let source = jpegSegments(sourceData) else {
             return refuse("source did not parse as JPEG")
         }
-        // Source IRB: strict parse; targeted non-empty resources refuse.
-        var sourceIRB: [(id: Int, data: Data)]?
+        // Source IRB: strict parse into complete resource bytes. Only
+        // provably edit-independent resources may be restored, as whole
+        // verified bytes; everything else refuses.
+        var sourceIRBPayload: Data?
+        var sourceIRBResources: [(id: Int, name: Data, payload: Data, bytes: Data)] = []
         for (marker, payload) in source.segments where marker == 0xED {
             if payload.prefix(irbPrefix.count) == irbPrefix {
                 guard let resources = irbResources(payload) else {
                     return refuse("malformed Photoshop IRB")
                 }
-                sourceIRB = resources
+                sourceIRBPayload = payload
+                sourceIRBResources = resources
                 break
             }
         }
-        if let resources = sourceIRB {
-            let targeted = resources.filter { irbTargetedResources.contains($0.id) && !$0.data.isEmpty }
-            guard targeted.isEmpty else {
-                return refuse("Photoshop IRB carries IPTC/Exif/XMP resources whose date/location semantics cannot be verified")
+        if let irbPayload = sourceIRBPayload {
+            let iptcResources = sourceIRBResources.filter { $0.id == 0x0404 }
+            guard iptcResources.count <= 1, iptcResources.allSatisfy({ $0.payload.isEmpty }) else {
+                return refuse("Photoshop IRB carries a non-empty IPTC-NAA resource whose date/location semantics cannot be verified")
             }
-            // Reattach the source's own resources byte-exact over whatever
-            // the writer staged, then verify below like any other field.
+            // A digest resource is preservable only as the verified MD5 of
+            // the empty IPTC payload it sits next to (MWG sync semantics);
+            // any other digest - or one without its IPTC - refuses.
+            let verifiedDigest = iptcResources.count == 1
+                ? Data(Insecure.MD5.hash(data: iptcResources[0].payload))
+                : nil
+            for resource in sourceIRBResources {
+                if irbPreservableResources.contains(resource.id) || resource.id == 0x0404 { continue }
+                if resource.id == 0x0425, let digest = verifiedDigest, resource.payload == digest { continue }
+                return refuse(String(format: "Photoshop IRB carries resource 0x%04X whose semantics under a metadata change are not proven edit-independent", resource.id))
+            }
+            // Every resource is provably edit-independent, so the source
+            // payload as a whole is safe to restore byte-exact over whatever
+            // the writer staged; it verifies below like any other field.
             guard let stagedBytes = try? Data(contentsOf: destinationURL),
-                  let replaced = jpegReplacingAPP13(stagedBytes, payload: irbPayload(resources)) else {
+                  let replaced = jpegReplacingAPP13(stagedBytes, payload: irbPayload) else {
                 return refuse("could not stage the source Photoshop IRB")
             }
             do {
@@ -715,8 +735,8 @@ struct MetadataWriter {
             return refuse("staged output did not parse as JPEG")
         }
         let stagedIRB = staged.segments.filter { $0.marker == 0xED && $0.payload.prefix(irbPrefix.count) == irbPrefix }.map { $0.payload }
-        if let resources = sourceIRB {
-            guard stagedIRB.contains(irbPayload(resources)) else {
+        if let irbPayload = sourceIRBPayload {
+            guard stagedIRB == [irbPayload] else {
                 return refuse("Photoshop IRB did not verify byte-exact")
             }
         } else {
@@ -803,8 +823,8 @@ struct MetadataWriter {
             }
         } else {
             guard stagedParts.xmp.count == 1,
-                  let stagedGraph = CGImageMetadataCreateFromXMPData(stagedParts.xmp[0].dropFirst(xmpPrefix.count)),
-                  let expectedGraph = CGImageMetadataCreateFromXMPData(expectedPacket) else {
+                  let stagedGraph = CGImageMetadataCreateFromXMPData(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count)) as CFData),
+                  let expectedGraph = CGImageMetadataCreateFromXMPData(expectedPacket as CFData) else {
                 return refuse("staged XMP packet failed verification")
             }
             let violations = xmpPlanViolations(source: expectedGraph, result: stagedGraph,
@@ -1081,64 +1101,368 @@ struct MetadataWriter {
 
     /// Top-level ISOBMFF box walk: (type, payload). Nil when the bytes do
     /// not parse as boxes.
-    private static func heicTopLevelBoxes(_ data: Data) -> [(type: String, payload: Data)]? {
+    /// ISOBMFF box walk over a byte range: (type, payload, payload range)
+    /// per box, the range expressed in the walked data's own coordinates.
+    /// Strict: nil on any structural violation.
+    private static func heicBoxes(_ data: Data, range: Range<Int>) -> [(type: String, payload: Data, range: Range<Int>)]? {
         let b = [UInt8](data)
-        guard b.count >= 8 else { return nil }
-        var boxes: [(String, Data)] = []
-        var pos = 0
-        while pos + 8 <= b.count {
+        guard range.lowerBound >= 0, range.upperBound <= b.count else { return nil }
+        var boxes: [(String, Data, Range<Int>)] = []
+        var pos = range.lowerBound
+        while pos + 8 <= range.upperBound {
             var size = Int(b[pos]) << 24 | Int(b[pos + 1]) << 16 | Int(b[pos + 2]) << 8 | Int(b[pos + 3])
-            let type = String(bytes: b[(pos + 4)..<(pos + 8)], encoding: .ascii) ?? "????"
+            guard let type = String(bytes: b[(pos + 4)..<(pos + 8)], encoding: .ascii) else { return nil }
             var header = 8
             if size == 1 {
-                guard pos + 16 <= b.count else { return nil }
+                guard pos + 16 <= range.upperBound else { return nil }
                 size = Int(b[pos + 8]) << 56 | Int(b[pos + 9]) << 48 | Int(b[pos + 10]) << 40 | Int(b[pos + 11]) << 32
                      | Int(b[pos + 12]) << 24 | Int(b[pos + 13]) << 16 | Int(b[pos + 14]) << 8 | Int(b[pos + 15])
                 header = 16
             } else if size == 0 {
-                size = b.count - pos
+                size = range.upperBound - pos
             }
-            guard size >= header, pos + size <= b.count else { return nil }
-            boxes.append((type, Data(b[(pos + header)..<(pos + size)])))
+            guard size >= header, pos + size <= range.upperBound else { return nil }
+            boxes.append((type, Data(b[(pos + header)..<(pos + size)]), (pos + header)..<(pos + size)))
             pos += size
         }
-        guard pos == b.count else { return nil }
+        guard pos == range.upperBound else { return nil }
         return boxes
     }
 
-    /// HEIC aux guard, refusal-only for now: any top-level box the writer is
-    /// not proven to regenerate (evidence run 41683971917: free/uuid are
-    /// dropped) must survive payload-exact, otherwise the write refuses.
-    /// Meta-item and aux-entity verification (iinf/iref/iloc) is the next
-    /// evidence cycle; unknown structures refuse rather than pass silently.
-    private static func heicAuxBoxesPreserved(source sourceData: Data, destinationURL: URL, operation: String) -> Bool {
-        let carried: Set<String> = ["ftyp", "meta", "mdat"]
-        guard let sourceBoxes = heicTopLevelBoxes(sourceData),
-              let stagedData = try? Data(contentsOf: destinationURL),
-              let stagedBoxes = heicTopLevelBoxes(stagedData) else {
-            FileHandle.standardError.write(Data("Refusing HEIC \(operation): source or staged output did not parse as boxes\n".utf8))
-            return false
+    /// pitm payload -> primary item id. Strict: version 0 or 1.
+    private static func heicPrimaryItem(_ payload: Data) -> Int? {
+        let b = [UInt8](payload)
+        guard b.count >= 6 else { return nil }
+        if b[0] == 0 { return Int(b[4]) << 8 | Int(b[5]) }
+        guard b[0] == 1, b.count >= 8 else { return nil }
+        return Int(b[4]) << 24 | Int(b[5]) << 16 | Int(b[6]) << 8 | Int(b[7])
+    }
+
+    /// iinf payload -> (id, item_type, mime content_type) per infe entry.
+    /// Strict: v2/v3 entries only - the finite shape the writer produces;
+    /// older or unknown entry forms refuse rather than pass half-parsed.
+    private static func heicIinfItems(_ payload: Data) -> [(id: Int, type: String, contentType: String?)]? {
+        let b = [UInt8](payload)
+        guard b.count >= 6 else { return nil }
+        let count: Int
+        let header: Int
+        if b[0] == 0 {
+            count = Int(b[4]) << 8 | Int(b[5]); header = 6
+        } else {
+            guard b.count >= 8 else { return nil }
+            count = Int(b[4]) << 24 | Int(b[5]) << 16 | Int(b[6]) << 8 | Int(b[7]); header = 8
         }
-        var byType: [String: [Data]] = [:]
-        for (type, payload) in stagedBoxes where !carried.contains(type) {
-            byType[type, default: []].append(payload)
-        }
-        var lostCounts: [String: Int] = [:]
-        for (type, payload) in sourceBoxes where !carried.contains(type) {
-            if let index = byType[type]?.firstIndex(of: payload) {
-                byType[type]?.remove(at: index)
+        guard let subs = heicBoxes(payload, range: header..<b.count), subs.count == count else { return nil }
+        var items: [(Int, String, String?)] = []
+        for sub in subs {
+            guard sub.type == "infe" else { return nil }
+            let p = [UInt8](sub.payload)
+            guard p.count >= 4 else { return nil }
+            let entryVersion = p[0]
+            guard entryVersion == 2 || entryVersion == 3 else { return nil }
+            var o = 4
+            let itemID: Int
+            if entryVersion == 2 {
+                guard o + 2 <= p.count else { return nil }
+                itemID = Int(p[o]) << 8 | Int(p[o + 1]); o += 2
             } else {
-                lostCounts[type, default: 0] += 1
+                guard o + 4 <= p.count else { return nil }
+                itemID = Int(p[o]) << 24 | Int(p[o + 1]) << 16 | Int(p[o + 2]) << 8 | Int(p[o + 3]); o += 4
+            }
+            guard o + 6 <= p.count else { return nil }
+            o += 2 // item_protection_index
+            guard let itemType = String(bytes: p[o..<(o + 4)], encoding: .ascii) else { return nil }
+            o += 4
+            guard o <= p.count, let nameEnd = p[o...].firstIndex(of: 0) else { return nil }
+            var contentType: String? = nil
+            if itemType == "mime" {
+                let cstart = nameEnd + 1
+                guard cstart <= p.count, let cend = p[cstart...].firstIndex(of: 0) else { return nil }
+                contentType = String(bytes: p[cstart..<cend], encoding: .utf8)
+            }
+            items.append((itemID, itemType, contentType))
+        }
+        return items
+    }
+
+    /// iref payload -> (reference type, from id, to ids) per reference.
+    /// Strict: v0 (16-bit ids) and v1 (32-bit ids); from_item_ID precedes
+    /// reference_count (ISO/IEC 14496-12 SingleItemTypeReferenceBox).
+    private static func heicReferences(_ payload: Data) -> [(type: String, from: Int, to: [Int])]? {
+        let b = [UInt8](payload)
+        guard b.count >= 4, b[0] <= 1 else { return nil }
+        let idLength = b[0] == 1 ? 4 : 2
+        guard let subs = heicBoxes(payload, range: 4..<b.count) else { return nil }
+        var refs: [(String, Int, [Int])] = []
+        for sub in subs {
+            let p = [UInt8](sub.payload)
+            var o = 0
+            while o < p.count {
+                guard o + idLength + 2 <= p.count else { return nil }
+                let from = idLength == 2 ? Int(p[o]) << 8 | Int(p[o + 1])
+                                         : Int(p[o]) << 24 | Int(p[o + 1]) << 16 | Int(p[o + 2]) << 8 | Int(p[o + 3])
+                o += idLength
+                let count = Int(p[o]) << 8 | Int(p[o + 1]); o += 2
+                guard o + count * idLength <= p.count else { return nil }
+                var tos: [Int] = []
+                for _ in 0..<count {
+                    tos.append(idLength == 2 ? Int(p[o]) << 8 | Int(p[o + 1])
+                                             : Int(p[o]) << 24 | Int(p[o + 1]) << 16 | Int(p[o + 2]) << 8 | Int(p[o + 3]))
+                    o += idLength
+                }
+                refs.append((sub.type, from, tos))
             }
         }
-        let lost = lostCounts.sorted { $0.key < $1.key }.map { "\($0.key) x\($0.value)" }
-        guard lost.isEmpty else {
-            FileHandle.standardError.write(Data("Refusing HEIC \(operation): output would lose or alter boxes [\(lost.joined(separator: ", "))]\n".utf8))
+        return refs
+    }
+
+    /// iloc payload -> (item id, construction method, extents) per item.
+    /// Strict: version 0-2, field sizes 0/4/8, trailing bytes refuse.
+    private static func heicExtents(_ payload: Data) -> [(id: Int, method: Int, extents: [(offset: Int, length: Int)])]? {
+        let b = [UInt8](payload)
+        guard b.count >= 8, b[0] <= 2 else { return nil }
+        let version = Int(b[0])
+        let offsetSize = Int(b[4] >> 4), lengthSize = Int(b[4] & 0xF)
+        let baseOffsetSize = Int(b[5] >> 4)
+        let indexSize = version >= 1 ? Int(b[5] & 0xF) : 0
+        for size in [offsetSize, lengthSize, baseOffsetSize, indexSize] {
+            guard size == 0 || size == 4 || size == 8 else { return nil }
+        }
+        var o = 6
+        let count: Int
+        if version < 2 {
+            guard o + 2 <= b.count else { return nil }
+            count = Int(b[o]) << 8 | Int(b[o + 1]); o += 2
+        } else {
+            guard o + 4 <= b.count else { return nil }
+            count = Int(b[o]) << 24 | Int(b[o + 1]) << 16 | Int(b[o + 2]) << 8 | Int(b[o + 3]); o += 4
+        }
+        var items: [(Int, Int, [(Int, Int)])] = []
+        for _ in 0..<count {
+            let idLength = version < 2 ? 2 : 4
+            guard o + idLength <= b.count else { return nil }
+            let itemID = idLength == 2 ? Int(b[o]) << 8 | Int(b[o + 1])
+                                       : Int(b[o]) << 24 | Int(b[o + 1]) << 16 | Int(b[o + 2]) << 8 | Int(b[o + 3])
+            o += idLength
+            var method = 0
+            if version >= 1 {
+                guard o + 2 <= b.count else { return nil }
+                method = Int(b[o + 1]) & 0xF
+                o += 2
+            }
+            guard o + 2 <= b.count else { return nil }
+            o += 2 // data_reference_index
+            var base = 0
+            if baseOffsetSize > 0 {
+                guard o + baseOffsetSize <= b.count else { return nil }
+                for i in 0..<baseOffsetSize { base = base << 8 | Int(b[o + i]) }
+                o += baseOffsetSize
+            }
+            guard o + 2 <= b.count else { return nil }
+            let extentCount = Int(b[o]) << 8 | Int(b[o + 1]); o += 2
+            var extents: [(Int, Int)] = []
+            for _ in 0..<extentCount {
+                if indexSize > 0 {
+                    guard o + indexSize <= b.count else { return nil }
+                    o += indexSize
+                }
+                guard o + offsetSize + lengthSize <= b.count else { return nil }
+                var offset = 0
+                for i in 0..<offsetSize { offset = offset << 8 | Int(b[o + i]) }
+                o += offsetSize
+                var length = 0
+                for i in 0..<lengthSize { length = length << 8 | Int(b[o + i]) }
+                o += lengthSize
+                extents.append((base + offset, length))
+            }
+            items.append((itemID, method, extents))
+        }
+        guard o == b.count else { return nil }
+        return items
+    }
+
+    /// HEIC write verification, fail-closed per actual input/output
+    /// (structure decoded in evidence runs 41683971917 and 41690332177):
+    /// - ftyp and any top-level box outside meta/mdat survive payload-exact
+    ///   per occurrence, and the output gains none.
+    /// - meta: version/flags payload-exact; hdlr/pitm/iinf/iref/iprp/dinf
+    ///   payload-exact; an unknown child refuses.
+    /// - Verified plain-still shape: exactly one hvc1 primary item; every
+    ///   other iinf item is Exif or mime 'application/rdf+xml'; iref holds
+    ///   only cdsc content references from those items to the primary, one
+    ///   per item. auxl/dimg/thmb references, unknown item types and any
+    ///   other reference shape refuse.
+    /// - iloc is verified structurally (extent offsets legitimately move):
+    ///   item ids match iinf exactly, construction method 0 only, every
+    ///   extent inside an mdat payload. The hvc1 payload is byte-exact; the
+    ///   Exif item's TIFF stream is compared tag by tag with intent
+    ///   exemptions only; the XMP item graph-matches the plan-verified
+    ///   corrected packet. idat-backed items refuse.
+    private static func heicWriteVerified(sourceData: Data, destinationURL: URL, imageSource: CGImageSource,
+                                          date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?,
+                                          removeLocation: Bool, operation: String) -> Bool {
+        func refuse(_ message: String) -> Bool {
+            FileHandle.standardError.write(Data("Refusing HEIC \(operation): \(message)\n".utf8))
             return false
         }
+        typealias Box = (type: String, payload: Data, range: Range<Int>)
+        let sortPayloads: ([Data]) -> [[UInt8]] = { $0.map { Array($0) }.sorted { $0.lexicographicallyPrecedes($1) } }
+        func multiset(_ boxes: [Box], excluding: Set<String>) -> [String: [Data]] {
+            var byType: [String: [Data]] = [:]
+            for box in boxes where !excluding.contains(box.type) {
+                byType[box.type, default: []].append(box.payload)
+            }
+            return byType
+        }
+        guard let sourceBoxes = heicBoxes(sourceData, range: 0..<sourceData.count),
+              let stagedData = try? Data(contentsOf: destinationURL),
+              let stagedBoxes = heicBoxes(stagedData, range: 0..<stagedData.count) else {
+            return refuse("source or staged output did not parse as boxes")
+        }
+        // Top level: ftyp and foreign boxes payload-exact, none gained.
+        let sourceTop = multiset(sourceBoxes, excluding: ["meta", "mdat"])
+        let stagedTop = multiset(stagedBoxes, excluding: ["meta", "mdat"])
+        for type in Set(sourceTop.keys).union(stagedTop.keys).sorted() {
+            guard sortPayloads(sourceTop[type] ?? []) == sortPayloads(stagedTop[type] ?? []) else {
+                return refuse("top-level box \(type) changed or was lost")
+            }
+        }
+        // Meta: one box each side, exact header, known children only, and
+        // every child but iloc payload-exact.
+        let sourceMetas = sourceBoxes.filter { $0.type == "meta" }
+        let stagedMetas = stagedBoxes.filter { $0.type == "meta" }
+        guard sourceMetas.count == 1, stagedMetas.count == 1,
+              sourceMetas[0].payload.count >= 4, stagedMetas[0].payload.count >= 4,
+              sourceMetas[0].payload.prefix(4) == stagedMetas[0].payload.prefix(4) else {
+            return refuse("meta box shape changed")
+        }
+        guard let sourceChildren = heicBoxes(sourceMetas[0].payload, range: 4..<sourceMetas[0].payload.count),
+              let stagedChildren = heicBoxes(stagedMetas[0].payload, range: 4..<stagedMetas[0].payload.count) else {
+            return refuse("meta children did not parse")
+        }
+        let knownChildren: Set<String> = ["hdlr", "pitm", "iinf", "iloc", "iprp", "iref", "dinf"]
+        for child in sourceChildren + stagedChildren where !knownChildren.contains(child.type) {
+            return refuse("unknown meta child \(child.type)")
+        }
+        let sourceExact = multiset(sourceChildren, excluding: ["iloc"])
+        let stagedExact = multiset(stagedChildren, excluding: ["iloc"])
+        for type in Set(sourceExact.keys).union(stagedExact.keys).sorted() {
+            guard sortPayloads(sourceExact[type] ?? []) == sortPayloads(stagedExact[type] ?? []) else {
+                return refuse("meta child \(type) changed")
+            }
+        }
+        // Verified plain-still shape from the source's (payload-exact) iinf,
+        // pitm and iref.
+        let sourceIinfs = sourceChildren.filter { $0.type == "iinf" }
+        guard sourceIinfs.count == 1, let items = heicIinfItems(sourceIinfs[0].payload) else {
+            return refuse("iinf did not parse")
+        }
+        let sourcePitms = sourceChildren.filter { $0.type == "pitm" }
+        guard sourcePitms.count == 1, let primary = heicPrimaryItem(sourcePitms[0].payload) else {
+            return refuse("pitm did not parse")
+        }
+        let primaries = items.filter { $0.type == "hvc1" }
+        guard primaries.count == 1, primaries[0].id == primary else {
+            return refuse("primary item shape is not a single hvc1 image")
+        }
+        for item in items {
+            if item.type == "hvc1" || item.type == "Exif" { continue }
+            if item.type == "mime", item.contentType == "application/rdf+xml" { continue }
+            return refuse("iinf item type \(item.type) is not a verified plain-still shape")
+        }
+        let nonPrimaryIDs = Set(items.filter { $0.id != primary }.map { $0.id })
+        let sourceIrefs = sourceChildren.filter { $0.type == "iref" }
+        if let irefBox = sourceIrefs.first {
+            guard sourceIrefs.count == 1, let refs = heicReferences(irefBox.payload) else {
+                return refuse("iref did not parse")
+            }
+            for ref in refs {
+                guard ref.type == "cdsc", ref.from != primary, !ref.to.isEmpty, ref.to.allSatisfy({ $0 == primary }) else {
+                    return refuse("iref carries a \(ref.type) reference outside the verified cdsc shape")
+                }
+            }
+            guard Set(refs.map { $0.from }) == nonPrimaryIDs else {
+                return refuse("metadata items without exactly one cdsc reference")
+            }
+        } else {
+            guard nonPrimaryIDs.isEmpty else {
+                return refuse("metadata items without cdsc references")
+            }
+        }
+        // iloc: structural verify, then per-item payload comparisons.
+        func itemPayloads(_ whole: Data, _ topBoxes: [Box], _ children: [Box]) -> [Int: Data]? {
+            let ilocs = children.filter { $0.type == "iloc" }
+            guard ilocs.count == 1, let located = heicExtents(ilocs[0].payload) else { return nil }
+            let mdatRanges = topBoxes.filter { $0.type == "mdat" }.map { $0.range }
+            guard !mdatRanges.isEmpty else { return nil }
+            let b = [UInt8](whole)
+            var out: [Int: Data] = [:]
+            for item in located {
+                guard item.method == 0 else { return nil }
+                var payload = Data()
+                for extent in item.extents {
+                    guard extent.offset >= 0, extent.length >= 0, extent.offset + extent.length <= b.count,
+                          mdatRanges.contains(where: { extent.offset >= $0.lowerBound && extent.offset + extent.length <= $0.upperBound }) else { return nil }
+                    payload.append(Data(b[extent.offset..<(extent.offset + extent.length)]))
+                }
+                out[item.id] = payload
+            }
+            return out
+        }
+        guard let sourcePayloads = itemPayloads(sourceData, sourceBoxes, sourceChildren),
+              let stagedPayloads = itemPayloads(stagedData, stagedBoxes, stagedChildren) else {
+            return refuse("iloc structure unsupported or extents outside mdat")
+        }
+        let itemIDs = Set(items.map { $0.id })
+        guard Set(sourcePayloads.keys) == itemIDs, Set(stagedPayloads.keys) == itemIDs else {
+            return refuse("iloc item ids do not match iinf")
+        }
+        guard sourcePayloads[primary] == stagedPayloads[primary] else {
+            return refuse("compressed image item was re-encoded")
+        }
+        for item in items where item.type == "Exif" {
+            guard let sourcePayload = sourcePayloads[item.id], let stagedPayload = stagedPayloads[item.id],
+                  sourcePayload.count >= 4, stagedPayload.count >= 4 else {
+                return refuse("Exif item shape changed")
+            }
+            let b0 = [UInt8](sourcePayload), b1 = [UInt8](stagedPayload)
+            let sourceOffset = Int(b0[0]) << 24 | Int(b0[1]) << 16 | Int(b0[2]) << 8 | Int(b0[3])
+            let stagedOffset = Int(b1[0]) << 24 | Int(b1[1]) << 16 | Int(b1[2]) << 8 | Int(b1[3])
+            guard 4 + sourceOffset <= b0.count, 4 + stagedOffset <= b1.count else {
+                return refuse("Exif item offset out of range")
+            }
+            guard let violations = tiffAuxTagViolations(sourceData: Data(b0[(4 + sourceOffset)...]),
+                                                        outputData: Data(b1[(4 + stagedOffset)...]),
+                                                        exempt: intentExemptions(date: date, removeDate: removeDate,
+                                                                                 latitude: latitude, longitude: longitude,
+                                                                                 removeLocation: removeLocation)) else {
+                return refuse("Exif item did not parse as TIFF")
+            }
+            guard violations.isEmpty else {
+                return refuse("Exif item would lose or alter tags [\(violations.joined(separator: ", "))]")
+            }
+        }
+        if items.contains(where: { $0.type == "mime" }) {
+            guard let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
+                                                          latitude: latitude, longitude: longitude, removeLocation: removeLocation),
+                  !expectedPacket.isEmpty else {
+                return refuse("corrected XMP failed preservation checks")
+            }
+            for item in items where item.type == "mime" {
+                guard let stagedPayload = stagedPayloads[item.id],
+                      let stagedGraph = CGImageMetadataCreateFromXMPData(stagedPayload as CFData),
+                      let expectedGraph = CGImageMetadataCreateFromXMPData(expectedPacket as CFData) else {
+                    return refuse("staged XMP item failed verification")
+                }
+                let violations = xmpPlanViolations(source: expectedGraph, result: stagedGraph,
+                                                   date: nil, removeDate: false, latitude: nil, longitude: nil, removeLocation: false)
+                guard violations.isEmpty else {
+                    return refuse("staged XMP item differs from the verified packet [\(violations.joined(separator: ", "))]")
+                }
+            }
+        }
         guard let sourceRGBA = rgbaData(sourceData), let stagedRGBA = rgbaData(stagedData), sourceRGBA == stagedRGBA else {
-            FileHandle.standardError.write(Data("Refusing HEIC \(operation): decoded pixels changed\n".utf8))
-            return false
+            return refuse("decoded pixels changed")
         }
         return true
     }

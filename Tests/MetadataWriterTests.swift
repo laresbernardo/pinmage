@@ -713,6 +713,32 @@ struct MetadataWriterTests {
         return out
     }
 
+    /// IRB builder with Pascal-name fields (the name survives in the
+    /// resource's complete bytes; a name never makes a resource void).
+    static func buildIRBNamed(_ resources: [(Int, Data, Data)]) -> Data {
+        var out = Data("Photoshop 3.0\0".utf8)
+        for (rid, name, payload) in resources {
+            out.append(contentsOf: [0x38, 0x42, 0x49, 0x4D])
+            out.append(UInt8((rid >> 8) & 0xFF)); out.append(UInt8(rid & 0xFF))
+            out.append(UInt8(name.count)); out.append(name)
+            if (1 + name.count) % 2 != 0 { out.append(0) }
+            out.append(UInt8((payload.count >> 24) & 0xFF)); out.append(UInt8((payload.count >> 16) & 0xFF))
+            out.append(UInt8((payload.count >> 8) & 0xFF)); out.append(UInt8(payload.count & 0xFF))
+            out.append(payload)
+            if payload.count % 2 != 0 { out.append(0) }
+        }
+        return out
+    }
+
+    /// In-place semantic patch: replace the first occurrence of one 4-byte
+    /// box/field marker with another of the same length.
+    static func replaceFirstBytes(_ data: Data, _ needle: String, _ replacement: String) -> Data? {
+        guard let range = data.range(of: Data(needle.utf8)) else { return nil }
+        var out = data
+        out.replaceSubrange(range, with: Data(replacement.utf8))
+        return out
+    }
+
     static func irbResources(_ payload: Data) -> [(Int, Data)]? {
         let prefix = Data("Photoshop 3.0\0".utf8)
         guard payload.count > prefix.count, payload.prefix(prefix.count) == prefix else { return nil }
@@ -1674,6 +1700,23 @@ struct MetadataWriterTests {
             try require(try Data(contentsOf: f) == before, "Refused HEIC write must leave the original intact")
         }
 
+        // HEIC verified-shape refusals: in-place semantic patches keep the
+        // box structure valid but leave the verified plain-still shape
+        // (single hvc1 primary + Exif/XMP items + cdsc references only).
+        for (label, needle, replacement) in [("non-cdsc reference", "cdsc", "dimg"),
+                                             ("aux reference", "cdsc", "auxl"),
+                                             ("unknown meta child", "hdlr", "xxxx")] {
+            let f = root.appendingPathComponent("aux-heic-shape-\(replacement).heic")
+            try fixtureWithMetadata(at: f, type: "public.heic" as CFString)
+            let patched = replaceFirstBytes(try Data(contentsOf: f), needle, replacement)
+            try require(patched != nil, "HEIC shape patch failed for \(label)")
+            try patched!.write(to: f)
+            let before = try Data(contentsOf: f)
+            try require(!update(f, f), "HEIC set must refuse a \(label)")
+            try require(!update(f, f, remove: true), "HEIC removal must refuse a \(label)")
+            try require(try Data(contentsOf: f) == before, "Refused HEIC write must leave the original intact")
+        }
+
 
         // M15 cycle 3 (deep-probe evidence, run 41690332177): the remaining
         // carve-outs proved lossy in CI - TIFF ICC is regenerated, JPEG Exif
@@ -1703,11 +1746,18 @@ struct MetadataWriterTests {
         try require(!update(jpgMaker, jpgMaker, remove: true), "JPEG removal must refuse a dropped MakerNote")
         try require(try Data(contentsOf: jpgMaker) == jpgMakerBefore, "Refused JPEG removal must leave the original intact")
 
-        // JPEG: an IRB with non-empty IPTC/Exif/XMP resources refuses any
-        // metadata change (date/location semantics unverifiable).
+        // JPEG IRB, verify-or-refuse (option A): only resources proven
+        // edit-independent reattach, as complete verified bytes - the
+        // Adobe-spec editor/print state ids (0x0406 quality, 0x0408 grid,
+        // 0x0426 print scale, 0x0428 pixel aspect) and the writer-authored
+        // empty-IPTC + MD5-verified digest pair. Everything else refuses,
+        // on both paths, leaving the original intact.
+        let md5Empty = Data([0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04,
+                             0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8, 0x42, 0x7e])
+        // Non-empty IPTC carries IIM date datasets: refuse set and removal.
         let jpgIRB = root.appendingPathComponent("aux-jpg-irb.jpg")
         try fixtureWithMetadata(at: jpgIRB, type: "public.jpeg" as CFString)
-        let targetedIRB = buildIRB([(0x03ED, Data(repeating: 0, count: 16)), (0x0404, Data("IPTC-DATED-2001".utf8))])
+        let targetedIRB = buildIRB([(0x0404, Data("IPTC-DATED-2001".utf8))])
         let withIRB = jpegReplacingAPP13(try Data(contentsOf: jpgIRB), payload: targetedIRB)
         try require(withIRB != nil, "JPEG IRB splice failed")
         try withIRB!.write(to: jpgIRB)
@@ -1715,11 +1765,67 @@ struct MetadataWriterTests {
         try require(!update(jpgIRB, jpgIRB, remove: true), "JPEG removal must refuse non-empty IPTC in the IRB")
         try require(!update(jpgIRB, jpgIRB), "JPEG set must refuse non-empty IPTC in the IRB")
         try require(try Data(contentsOf: jpgIRB) == jpgIRBBefore, "Refused JPEG IRB write must leave the original intact")
+        // Targeted or unverified resource ids refuse even with tiny payloads.
+        for (rid, payload) in [(0x0422, Data("Exif-copy".utf8)), (0x0423, Data("Exif3".utf8)),
+                               (0x0424, Data("<x/>".utf8)), (0x0419, Data([0, 0, 1, 0])),
+                               (0x040C, Data([0xFF, 0xD8, 0xFF])), (0x0FA0, Data("PLUGIN".utf8))] {
+            let hex = String(rid, radix: 16)
+            let f = root.appendingPathComponent("aux-jpg-irb-\(hex).jpg")
+            try fixtureWithMetadata(at: f, type: "public.jpeg" as CFString)
+            let crafted = jpegReplacingAPP13(try Data(contentsOf: f), payload: buildIRB([(rid, payload)]))
+            try require(crafted != nil, "JPEG IRB splice failed for \(hex)")
+            try crafted!.write(to: f)
+            let before = try Data(contentsOf: f)
+            try require(!update(f, f), "JPEG set must refuse IRB resource \(hex)")
+            try require(!update(f, f, remove: true), "JPEG removal must refuse IRB resource \(hex)")
+            try require(try Data(contentsOf: f) == before, "Refused JPEG IRB write must leave the original intact")
+        }
+        // A digest is preservable only as the verified MD5 of its empty
+        // IPTC: a wrong digest or a digest without its IPTC refuses.
+        for (i, bad) in [buildIRB([(0x0404, Data()), (0x0425, Data(repeating: 1, count: 16))]),
+                         buildIRB([(0x0425, md5Empty)])].enumerated() {
+            let f = root.appendingPathComponent("aux-jpg-irb-digest-\(i).jpg")
+            try fixtureWithMetadata(at: f, type: "public.jpeg" as CFString)
+            let crafted = jpegReplacingAPP13(try Data(contentsOf: f), payload: bad)
+            try require(crafted != nil, "JPEG IRB digest splice failed")
+            try crafted!.write(to: f)
+            let before = try Data(contentsOf: f)
+            try require(!update(f, f), "JPEG set must refuse an unverified IRB digest")
+            try require(!update(f, f, remove: true), "JPEG removal must refuse an unverified IRB digest")
+            try require(try Data(contentsOf: f) == before, "Refused JPEG IRB write must leave the original intact")
+        }
+        // Verified content reattaches as complete bytes - Pascal names and
+        // pads included: whitelisted editor state plus the empty-IPTC pair.
+        let jpgOK = root.appendingPathComponent("aux-jpg-irb-ok.jpg")
+        try fixtureWithMetadata(at: jpgOK, type: "public.jpeg" as CFString)
+        let okIRB = buildIRBNamed([(0x0406, Data("Quality".utf8), Data([0, 3, 1, 0, 1])),
+                                   (0x0404, Data("Caption".utf8), Data()),
+                                   (0x0425, Data(), md5Empty)])
+        let withOK = jpegReplacingAPP13(try Data(contentsOf: jpgOK), payload: okIRB)
+        try require(withOK != nil, "JPEG IRB whitelist splice failed")
+        try withOK!.write(to: jpgOK)
+        try require(update(jpgOK, jpgOK), "JPEG set must transport verified IRB resources")
+        try require(update(jpgOK, jpgOK, remove: true), "JPEG removal must transport verified IRB resources")
+        let okAfter = try Data(contentsOf: jpgOK)
+        let okAfterIRB = jpegInventory(okAfter)?.filter { $0.0 == "FFED" }.first?.2
+        try require(okAfterIRB == okIRB, "Verified IRB must survive byte-exact, names included")
+        // Malformed IRB (truncated final pad) refuses.
+        let jpgBad = root.appendingPathComponent("aux-jpg-irb-trunc.jpg")
+        try fixtureWithMetadata(at: jpgBad, type: "public.jpeg" as CFString)
+        var truncIRB = buildIRB([(0x0406, Data([1, 2, 3]))])
+        truncIRB.removeLast()
+        let withBad = jpegReplacingAPP13(try Data(contentsOf: jpgBad), payload: truncIRB)
+        try require(withBad != nil, "JPEG IRB truncate splice failed")
+        try withBad!.write(to: jpgBad)
+        let badBefore = try Data(contentsOf: jpgBad)
+        try require(!update(jpgBad, jpgBad), "JPEG set must refuse a malformed IRB")
+        try require(try Data(contentsOf: jpgBad) == badBefore, "Refused JPEG IRB write must leave the original intact")
 
         // JPEG happy path (copy-write route, evidence runs 41686881879 +
-        // 41690332177): the ImageIO-authored IRB (empty IPTC + digest) is
-        // reattached byte-exact, entropy and pixels are transported, and the
-        // intended date/GPS values verify.
+        // 41690332177): the writer-authored IRB - an empty IPTC resource
+        // plus its MD5-verified digest, the one pair proven metadata-free -
+        // is restored byte-exact, entropy and pixels are transported, and
+        // the intended date/GPS values verify.
         for remove in [true, false] {
             let f = root.appendingPathComponent("aux-jpg-happy-\(remove ? "remove" : "set").jpg")
             try fixtureWithMetadata(at: f, type: "public.jpeg" as CFString)
