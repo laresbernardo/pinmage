@@ -565,7 +565,8 @@ struct MetadataWriter {
             p += 4
             let end = p + size + (size % 2)
             guard end <= b.count else { return nil }
-            out.append((rid, Data(b[(pos + 7)..<(pos + 6 + nameLength)]), Data(b[p..<(p + size)]), Data(b[pos..<end])))
+            let nameData = nameLength > 0 ? Data(b[(pos + 7)..<(pos + 6 + nameLength)]) : Data()
+            out.append((rid, nameData, Data(b[p..<(p + size)]), Data(b[pos..<end])))
             pos = end
         }
         return out
