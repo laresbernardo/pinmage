@@ -2620,7 +2620,7 @@ struct MetadataWriter {
             if let decoded = CGImageSourceCreateImageAtIndex(colorSource, 0, nil), let space = decoded.colorSpace {
                 decodedName = space.name as String?
                 if decodedName == nil {
-                    icc = CGColorSpaceCopyICCData(space) as Data?
+                    icc = space.copyICCData() as Data?
                 }
             }
             return (property, decodedName, icc)
