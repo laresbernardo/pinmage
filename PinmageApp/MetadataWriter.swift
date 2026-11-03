@@ -352,8 +352,12 @@ struct MetadataWriter {
                         return false
                     }
                     // Verify the staged file carries exactly the intended packet
-                    // (none, when the removals emptied it).
-                    let expected: [Data] = packet.isEmpty ? [] : [packet]
+                    // (none, when the removals emptied it). Chunk payloads
+                    // include the iTXt header (keyword, NUL, flags, two empty
+                    // NUL-terminated strings), so the expected payload is the
+                    // same header the splice wrote plus the packet bytes.
+                    let carrierHeader = Array("\(xmpITXtKeyword)\0".utf8) + [0, 0, 0, 0]
+                    let expected: [Data] = packet.isEmpty ? [] : [Data(carrierHeader + [UInt8](packet))]
                     guard let finalData = try? Data(contentsOf: destinationURL),
                           let finalChunks = pngChunks(finalData),
                           (finalChunks["iTXt"] ?? []).filter(isXMPCarrierPayload) == expected else {
