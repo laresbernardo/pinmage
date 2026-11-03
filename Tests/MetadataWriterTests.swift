@@ -1421,6 +1421,34 @@ struct MetadataWriterTests {
         }
     }
 
+    /// M18: a Display-P3 HEIC keeps its color space through a transport
+    /// write. The byte-exact item/iprp carriers are the transport guarantee;
+    /// this readback is the independent runtime assertion (plan-vs-delta
+    /// reconciliation: bounded to P3, no HDR claim).
+    static func runP3HEICProbe(root: URL) throws {
+        let p3heic = root.appendingPathComponent("m18-p3.heic")
+        guard let p3 = CGColorSpace(name: CGColorSpace.displayP3),
+              let context = CGContext(data: nil, width: 8, height: 6, bitsPerComponent: 8, bytesPerRow: 32,
+                                      space: p3, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let image = context.makeImage(),
+              let dest = CGImageDestinationCreateWithURL(p3heic as CFURL, "public.heic" as CFString, 1, nil) else {
+            throw NSError(domain: "Fixtures", code: 5, userInfo: [NSLocalizedDescriptionKey: "P3 HEIC fixture creation failed"])
+        }
+        CGImageDestinationAddImage(dest, image, nil)
+        try require(CGImageDestinationFinalize(dest), "P3 HEIC fixture finalize")
+        try require(MetadataWriter.updateImageMetadata(sourceURL: p3heic, destinationURL: p3heic,
+                                                       date: Date(timeIntervalSince1970: 981173106), removeDate: false,
+                                                       latitude: nil, longitude: nil, removeLocation: false),
+                    "P3 HEIC date set must pass")
+        guard let source = CGImageSourceCreateWithURL(p3heic as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "P3 HEIC output must read back"])
+        }
+        let colorSpace = props[kCGImagePropertyColorSpace] as? String ?? "untagged"
+        FileHandle.standardError.write(Data("M18 probe: P3 HEIC output color space = \(colorSpace)\n".utf8))
+        try require(colorSpace.contains("P3"), "P3 HEIC color space must survive, got \(colorSpace)")
+    }
+
     /// M18: lawfully-licensed public camera fixtures (CC BY-SA 4.0,
     /// ianare/exif-py; fetched by CI with pinned SHA-256). Skipped when
     /// PINMAGE_FIXTURES_DIR is unset, enforced when set.
@@ -2398,6 +2426,7 @@ struct MetadataWriterTests {
         try runHEICEmptyPacketProbe(root: root)
         try run16BitProbe(root: root)
         try runPngSuiteProbe(root: root)
+        try runP3HEICProbe(root: root)
         try runPublicFixtureProbe(root: root)
         try runLargeHEICProbe(root: root)
         // M18 (B3): the IPTC presence check and its removal exemptions.

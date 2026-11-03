@@ -16,7 +16,7 @@ struct MetadataWriter {
     final class RefusalNote {
         private(set) var reason: String?
         func record(_ message: String) {
-            if reason == nil { reason = message }
+            if reason == nil { reason = message.trimmingCharacters(in: .whitespacesAndNewlines) }
         }
     }
 
@@ -970,7 +970,8 @@ struct MetadataWriter {
                 return refuse("XMP APP1 carrier lost")
             }
             guard let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
-                                                           latitude: latitude, longitude: longitude, removeLocation: removeLocation),
+                                                           latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                                                           refusalNote: refusalNote),
                   !expectedPacket.isEmpty,
                   let stagedGraph = CGImageMetadataCreateFromXMPData(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count)) as CFData),
                   let expectedGraph = CGImageMetadataCreateFromXMPData(expectedPacket as CFData) else {
@@ -987,7 +988,8 @@ struct MetadataWriter {
             }
             var expectedMap: [String: CGImageMetadataTag] = [:]
             if let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
-                                                       latitude: latitude, longitude: longitude, removeLocation: removeLocation),
+                                                       latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                                                       refusalNote: refusalNote),
                !expectedPacket.isEmpty,
                let expectedGraph = CGImageMetadataCreateFromXMPData(expectedPacket as CFData) {
                 expectedMap = metadataTagMap(expectedGraph)
@@ -1336,7 +1338,8 @@ struct MetadataWriter {
         if sourceHas700 { exempt["IFD0", default: []].insert(700) }
         if sourceHas700 {
             guard let packet = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
-                                                  latitude: latitude, longitude: longitude, removeLocation: removeLocation) else {
+                                                  latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                                                  refusalNote: refusalNote) else {
                 recordRefusal(refusalNote, "Refusing TIFF \(operation): corrected XMP failed preservation checks\n")
                 return false
             }
@@ -1895,7 +1898,8 @@ struct MetadataWriter {
     /// verification then decides the write as before.
     private static func heicRestoringXmpItem(stagedData: Data, imageSource: CGImageSource,
                                              date: Date?, removeDate: Bool,
-                                             latitude: Double?, longitude: Double?, removeLocation: Bool) -> Data? {
+                                             latitude: Double?, longitude: Double?, removeLocation: Bool,
+                                             refusalNote: RefusalNote? = nil) -> Data? {
         guard let boxes = heicBoxes(stagedData, range: 0..<stagedData.count),
               boxes.allSatisfy({ $0.type == "ftyp" || $0.type == "meta" || $0.type == "mdat" }) else { return nil }
         let metas = boxes.filter { $0.type == "meta" }
@@ -1906,7 +1910,8 @@ struct MetadataWriter {
         let mimeIDs = items.filter { $0.type == "mime" && $0.contentType == "application/rdf+xml" }.map { $0.id }
         guard mimeIDs.count == 1 else { return nil }
         guard let corrected = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
-                                                 latitude: latitude, longitude: longitude, removeLocation: removeLocation) else { return nil }
+                                                 latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                                                 refusalNote: refusalNote) else { return nil }
         // A removal can empty the packet: splice the minimal well-formed
         // empty packet so the mime item carries no metadata instead of
         // refusing (S2). The verifier asserts the staged item reparses to a
@@ -2226,7 +2231,8 @@ struct MetadataWriter {
         if let patched = heicRestoringXmpItem(stagedData: stagedData, imageSource: imageSource,
                                               date: date, removeDate: removeDate,
                                               latitude: latitude, longitude: longitude,
-                                              removeLocation: removeLocation), patched != stagedData {
+                                              removeLocation: removeLocation,
+                                              refusalNote: refusalNote), patched != stagedData {
             do {
                 try patched.write(to: destinationURL)
                 stagedData = patched
@@ -2516,7 +2522,8 @@ struct MetadataWriter {
         let mimeItemIDs = items.filter { $0.type == "mime" }.map { $0.id } + (addedMimeID.map { [$0] } ?? [])
         if !mimeItemIDs.isEmpty {
             guard let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
-                                                          latitude: latitude, longitude: longitude, removeLocation: removeLocation) else {
+                                                          latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                                                          refusalNote: refusalNote) else {
                 return refuse("corrected XMP failed preservation checks")
             }
             for mimeID in mimeItemIDs {
@@ -2597,6 +2604,19 @@ struct MetadataWriter {
         // Pixel transport is proven by the byte-exact comparisons above
         // (the entropy-coded stream / image item payload): a decoded-pixel
         // compare here would add cost, not assurance (B4).
+        // Color readback: redundant with the byte-exact item/iprp carriers by
+        // construction, kept as an independent runtime assertion that the
+        // transport did not remap color (HDR/color scope stays bounded to
+        // what the carriers carry; nothing here extends it).
+        let sourceColor = (CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any])?[kCGImagePropertyColorSpace] as? String
+        guard let stagedColorSource = CGImageSourceCreateWithData(stagedData as CFData, nil),
+              let stagedColorProps = CGImageSourceCopyPropertiesAtIndex(stagedColorSource, 0, nil) as? [CFString: Any] else {
+            return refuse("staged output color properties unreadable")
+        }
+        let stagedColor = stagedColorProps[kCGImagePropertyColorSpace] as? String
+        guard sourceColor == stagedColor else {
+            return refuse("color space changed (\(sourceColor ?? "untagged") -> \(stagedColor ?? "untagged"))")
+        }
         return true
     }
 
@@ -2865,7 +2885,8 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
         // An empty packet means nothing survived the plan, so the carrier is
         // dropped rather than written empty.
         guard let packet = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
-                                              latitude: latitude, longitude: longitude, removeLocation: removeLocation),
+                                              latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                                              refusalNote: refusalNote),
               let staged = try? Data(contentsOf: destinationURL),
               let replaced = pngReplacingXMPCarrier(staged, correctedPacket: packet.isEmpty ? nil : packet) else {
             recordRefusal(refusalNote, "Refusing PNG \(operation): could not build or stage the corrected XMP packet\n")
@@ -3135,7 +3156,7 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
     /// Empty data means no tags survived the plan (drop the carrier); nil
     /// means the source metadata could not be read, transformed or
     /// serialized - callers treat nil as a refusal, never as "no XMP needed".
-    private static func correctedXMPPacket(imageSource: CGImageSource, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool) -> Data? {
+    private static func correctedXMPPacket(imageSource: CGImageSource, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool, refusalNote: RefusalNote? = nil) -> Data? {
         // Mirror the writer's own construction (updateImageMetadata): a
         // source without a readable metadata graph starts from an EMPTY
         // mutable graph, not from a refusal.
@@ -3144,7 +3165,10 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
         if let source = CGImageSourceCopyMetadataAtIndex(imageSource, 0, nil) {
             // A graph exists but cannot be read: refuse. Existing metadata
             // must never be silently treated as empty.
-            guard let copy = CGImageMetadataCreateMutableCopy(source) else { return nil }
+            guard let copy = CGImageMetadataCreateMutableCopy(source) else {
+                recordRefusal(refusalNote, "source XMP graph could not be made mutable")
+                return nil
+            }
             sourceMetadata = source
             mutableMetadata = copy
         } else {
@@ -3155,7 +3179,10 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
                 let carrierKeys = [kCGImagePropertyExifDictionary as String,
                                    kCGImagePropertyGPSDictionary as String,
                                    kCGImagePropertyIPTCDictionary as String]
-                if carrierKeys.contains(where: { properties[$0] != nil }) { return nil }
+                if carrierKeys.contains(where: { properties[$0] != nil }) {
+                    recordRefusal(refusalNote, "source carries metadata dictionaries but no readable XMP graph")
+                    return nil
+                }
             }
             let empty = CGImageMetadataCreateMutable()
             sourceMetadata = empty
@@ -3164,6 +3191,7 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
         guard applyMetadataPlan(mutableMetadata, date: date, removeDate: removeDate,
                                 latitude: latitude, longitude: longitude, removeLocation: removeLocation,
                                 refusalNote: refusalNote) else {
+            recordRefusal(refusalNote, "the metadata plan could not be applied to the XMP graph")
             return nil
         }
         var tagCount = 0
@@ -3172,15 +3200,21 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
             return true
         }
         guard tagCount > 0 else { return Data() }
-        guard let xmpData = CGImageMetadataCreateXMPData(mutableMetadata, nil) else { return nil }
+        guard let xmpData = CGImageMetadataCreateXMPData(mutableMetadata, nil) else {
+            recordRefusal(refusalNote, "corrected XMP graph failed to serialize")
+            return nil
+        }
         // Serialization success is not retention: the packet must parse back
         // into a graph that provably preserves every untouched source property.
-        guard let reparsed = CGImageMetadataCreateFromXMPData(xmpData) else { return nil }
+        guard let reparsed = CGImageMetadataCreateFromXMPData(xmpData) else {
+            recordRefusal(refusalNote, "serialized XMP packet did not reparse")
+            return nil
+        }
         let violations = xmpPlanViolations(source: sourceMetadata, result: reparsed, date: date,
                                            removeDate: removeDate, latitude: latitude,
                                            longitude: longitude, removeLocation: removeLocation)
         guard violations.isEmpty else {
-            FileHandle.standardError.write(Data("Refusing write: corrected XMP failed preservation checks [\(violations.joined(separator: ", "))]\n".utf8))
+            recordRefusal(refusalNote, "corrected XMP failed preservation checks [\(violations.joined(separator: ", "))]")
             return nil
         }
         return xmpData as Data
