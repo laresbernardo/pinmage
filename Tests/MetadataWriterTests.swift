@@ -214,7 +214,7 @@ struct MetadataWriterTests {
             Scenario(name: "remove-location-only", date: nil, removeDate: false, lat: nil, lon: nil, removeLocation: true),
             Scenario(name: "set-location-only", date: nil, removeDate: false, lat: 12.5, lon: -45.25, removeLocation: false),
         ]
-        let formats: [(String, CFString)] = [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")]
+        let formats: [(String, CFString)] = [("png", "public.png" as CFString), ("jpg", "public.jpeg" as CFString), ("tiff", "public.tiff" as CFString), ("heic", "public.heic" as CFString)]
         let env = ProcessInfo.processInfo.environment
         let outDir = env["PRESERVATION_ARTIFACT_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? root
         try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
