@@ -1927,16 +1927,18 @@ struct MetadataWriter {
                 return refuse("metadata items without cdsc references")
             }
         }
-        // ImageIO ADDS an XMP mime item when the source had none and the
-        // plan sets metadata (observed run 41710548605: plain 8x6 fixture,
-        // staged iinf gained a mime application/rdf+xml infe). This is an
-        // admission, not an exemption: every source infe entry must survive
-        // byte-exact inside the staged iinf, at most one entry may be added
-        // and it must parse as mime application/rdf+xml; any added iref
-        // reference must be that item's cdsc link to the primary image item;
-        // the added item's payload is graph-checked against the verified
-        // corrected packet below (after the splice it IS that packet,
-        // byte-exact). Anything else refuses.
+        // ImageIO ADDS metadata items when the source had none and the plan
+        // sets metadata (observed runs 41710548605 + 41716235473: plain 8x6
+        // fixture, staged iinf gained an Exif item and a mime
+        // application/rdf+xml item). This is an admission, not an exemption:
+        // every source infe entry must survive byte-exact inside the staged
+        // iinf; added entries may only be ONE mime application/rdf+xml item
+        // and ONE Exif item; any added iref reference must be an added
+        // item's cdsc link to the primary image item; the mime item's
+        // payload is graph-checked against the verified corrected packet
+        // (after the splice it IS that packet, byte-exact) and the Exif
+        // item's TIFF content is checked tag by tag against the intent
+        // below. Anything else refuses.
         let stagedIinfs = stagedChildren.filter { $0.type == "iinf" }
         guard stagedIinfs.count == 1,
               let stagedItems = heicIinfItems(stagedIinfs[0].payload),
@@ -1952,21 +1954,30 @@ struct MetadataWriter {
             remainingInfe.remove(at: index)
         }
         var addedMimeID: Int? = nil
+        var addedExifID: Int? = nil
         if !remainingInfe.isEmpty {
             let sourceIDs = Set(items.map { $0.id })
             let added = stagedItems.filter { !sourceIDs.contains($0.id) }
-            guard remainingInfe.count == 1, added.count == 1,
-                  added[0].type == "mime", added[0].contentType == "application/rdf+xml",
-                  Set(stagedItems.map { $0.id }).count == stagedItems.count else {
-                // Self-evidencing: the next diagnosis needs the real staged
-                // item list, not a guess about what ImageIO added.
-                func itemDesc(_ list: [(id: Int, type: String, contentType: String?)]) -> String {
-                    list.map { "id=\($0.id):\($0.type):\($0.contentType ?? "-")" }.joined(separator: ",")
-                }
-                return refuse("staged iinf adds items outside one verified XMP carrier (extras=\(remainingInfe.count) source=[\(itemDesc(items))] staged=[\(itemDesc(stagedItems))])")
+            // Self-evidencing: a refusal names the real staged item list,
+            // not a guess about what ImageIO added.
+            func itemDesc(_ list: [(id: Int, type: String, contentType: String?)]) -> String {
+                list.map { "id=\($0.id):\($0.type):\($0.contentType ?? "-")" }.joined(separator: ",")
             }
-            addedMimeID = added[0].id
+            guard remainingInfe.count == added.count,
+                  Set(stagedItems.map { $0.id }).count == stagedItems.count else {
+                return refuse("staged iinf structure outside the verified carriers (extras=\(remainingInfe.count) source=[\(itemDesc(items))] staged=[\(itemDesc(stagedItems))])")
+            }
+            for entry in added {
+                if entry.type == "mime", entry.contentType == "application/rdf+xml", addedMimeID == nil {
+                    addedMimeID = entry.id
+                } else if entry.type == "Exif", addedExifID == nil {
+                    addedExifID = entry.id
+                } else {
+                    return refuse("staged iinf adds items outside the verified XMP/Exif carriers (source=[\(itemDesc(items))] staged=[\(itemDesc(stagedItems))])")
+                }
+            }
         }
+        let addedItemIDs = Set([addedMimeID, addedExifID].compactMap { $0 })
         // iref: source reference boxes stay byte-exact; the only admissible
         // staged addition is the cdsc link from the added XMP item to the
         // primary image item.
@@ -2006,7 +2017,7 @@ struct MetadataWriter {
             remainingRefs.remove(at: index)
         }
         for extra in remainingRefs {
-            guard let addedID = addedMimeID, extra.type == "cdsc",
+            guard !addedItemIDs.isEmpty, extra.type == "cdsc",
                   let stagedIref = stagedIrefs.first else {
                 return refuse("staged iref adds references without an added XMP item")
             }
@@ -2021,7 +2032,7 @@ struct MetadataWriter {
             context.append(contentsOf: extra.type.utf8)
             context.append(contentsOf: extra.bytes)
             guard let parsed = heicReferences(context), parsed.count == 1,
-                  parsed[0].type == "cdsc", parsed[0].from == addedID,
+                  parsed[0].type == "cdsc", addedItemIDs.contains(parsed[0].from),
                   parsed[0].to.count == 1, parsed[0].to[0] == primary else {
                 return refuse("staged iref adds a reference outside the verified cdsc shape")
             }
@@ -2052,7 +2063,7 @@ struct MetadataWriter {
         }
         let itemIDs = Set(items.map { $0.id })
         var expectedStagedIDs = itemIDs
-        if let addedID = addedMimeID { expectedStagedIDs.insert(addedID) }
+        expectedStagedIDs.formUnion(addedItemIDs)
         guard Set(sourcePayloads.keys) == itemIDs, Set(stagedPayloads.keys) == expectedStagedIDs else {
             return refuse("iloc item ids do not match iinf")
         }
@@ -2079,6 +2090,137 @@ struct MetadataWriter {
             }
             guard violations.isEmpty else {
                 return refuse("Exif item would lose or alter tags [\(violations.joined(separator: ", "))]")
+            }
+        }
+        // An added Exif item carries the intent in TIFF form (observed run
+        // 41716235473: IFD0 Orientation=1, DateTime, TileWidth/TileLength
+        // equal the decoded dimensions; ExifIFD DateTimeOriginal/
+        // DateTimeDigitized; GPSIFD ref+rational coordinates). Admission
+        // rule: every tag must be an intent tag holding the requested value
+        // or a positively verified synthesized value; when the plan sets a
+        // date or location every corresponding tag must be present; unknown
+        // tags, unknown or chained IFDs, and intent values that do not
+        // match all refuse.
+        if let addedExifID = addedExifID {
+            guard let exifPayload = stagedPayloads[addedExifID], exifPayload.count >= 4 else {
+                return refuse("added Exif item shape changed")
+            }
+            let eb = [UInt8](exifPayload)
+            let exifTiffOffset = Int(eb[0]) << 24 | Int(eb[1]) << 16 | Int(eb[2]) << 8 | Int(eb[3])
+            guard 4 + exifTiffOffset <= eb.count else {
+                return refuse("added Exif item offset out of range")
+            }
+            guard let addedTIFF = tiffIFDs(Data(eb[(4 + exifTiffOffset)...])) else {
+                return refuse("added Exif item did not parse as TIFF")
+            }
+            typealias TIFFEntry = (tag: Int, type: Int, count: Int, value: Data?, raw: Data)
+            let little = addedTIFF.little
+            func exifASCII(_ entry: TIFFEntry) -> String? {
+                guard entry.type == 2, let v = entry.value else { return nil }
+                var bytes = [UInt8](v)
+                while bytes.last == 0 { bytes.removeLast() }
+                return String(bytes: bytes, encoding: .utf8)
+            }
+            func exifUInt(_ entry: TIFFEntry) -> Int? {
+                guard let v = entry.value else { return nil }
+                let vb = [UInt8](v)
+                if entry.type == 3, vb.count == 2 {
+                    return little ? Int(vb[0]) | Int(vb[1]) << 8 : Int(vb[0]) << 8 | Int(vb[1])
+                }
+                if entry.type == 4, vb.count == 4 {
+                    return little ? Int(vb[0]) | Int(vb[1]) << 8 | Int(vb[2]) << 16 | Int(vb[3]) << 24
+                                  : Int(vb[0]) << 24 | Int(vb[1]) << 16 | Int(vb[2]) << 8 | Int(vb[3])
+                }
+                return nil
+            }
+            func exifRationalDegrees(_ entry: TIFFEntry) -> Double? {
+                guard entry.type == 5, entry.count >= 1, entry.count <= 3,
+                      let v = entry.value, v.count == 8 * entry.count else { return nil }
+                let vb = [UInt8](v)
+                func u32(_ o: Int) -> Int {
+                    little ? Int(vb[o]) | Int(vb[o + 1]) << 8 | Int(vb[o + 2]) << 16 | Int(vb[o + 3]) << 24
+                           : Int(vb[o]) << 24 | Int(vb[o + 1]) << 16 | Int(vb[o + 2]) << 8 | Int(vb[o + 3])
+                }
+                var result = 0.0
+                var divisor = 1.0
+                for i in 0..<entry.count {
+                    let denominator = u32(8 * i + 4)
+                    guard denominator != 0 else { return nil }
+                    result += Double(u32(8 * i)) / Double(denominator) / divisor
+                    divisor *= 60
+                }
+                return result
+            }
+            let wantDate = date != nil && !removeDate
+            let wantLocation = latitude != nil && longitude != nil && !removeLocation
+            let tiffDateFormatter = DateFormatter()
+            tiffDateFormatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+            let expectedDate = wantDate ? date.map { tiffDateFormatter.string(from: $0) } : nil
+            let stagedProps = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
+            let pixelWidth = (stagedProps?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue
+            let pixelHeight = (stagedProps?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue
+            var addedTags: Set<String> = []
+            for (label, entries, next) in addedTIFF.ifds {
+                guard next == 0 else {
+                    return refuse("added Exif item chains IFDs")
+                }
+                for entry in entries {
+                    addedTags.insert("\(label)#\(entry.tag)")
+                    switch (label, entry.tag) {
+                    case ("IFD0", 274):
+                        guard exifUInt(entry) == 1 else {
+                            return refuse("added Exif Orientation is not 1")
+                        }
+                    case ("IFD0", 306), ("IFD0>34665", 36867), ("IFD0>34665", 36868):
+                        guard let expected = expectedDate, exifASCII(entry) == expected else {
+                            return refuse("added Exif date tag \(entry.tag) does not carry the intent date")
+                        }
+                    case ("IFD0", 322):
+                        guard let width = pixelWidth, exifUInt(entry) == width else {
+                            return refuse("added Exif TileWidth is not the image width")
+                        }
+                    case ("IFD0", 323):
+                        guard let height = pixelHeight, exifUInt(entry) == height else {
+                            return refuse("added Exif TileLength is not the image height")
+                        }
+                    case ("IFD0", 34665), ("IFD0", 34853):
+                        continue // sub-IFD contents are checked by label
+                    case ("IFD0>34853", 1):
+                        guard let lat = latitude, wantLocation,
+                              exifASCII(entry) == (lat >= 0 ? "N" : "S") else {
+                            return refuse("added Exif GPSLatitudeRef does not match the intent")
+                        }
+                    case ("IFD0>34853", 2):
+                        guard let lat = latitude, wantLocation,
+                              let degrees = exifRationalDegrees(entry), abs(degrees - abs(lat)) < 1e-9 else {
+                            return refuse("added Exif GPSLatitude does not match the intent")
+                        }
+                    case ("IFD0>34853", 3):
+                        guard let lon = longitude, wantLocation,
+                              exifASCII(entry) == (lon >= 0 ? "E" : "W") else {
+                            return refuse("added Exif GPSLongitudeRef does not match the intent")
+                        }
+                    case ("IFD0>34853", 4):
+                        guard let lon = longitude, wantLocation,
+                              let degrees = exifRationalDegrees(entry), abs(degrees - abs(lon)) < 1e-9 else {
+                            return refuse("added Exif GPSLongitude does not match the intent")
+                        }
+                    default:
+                        return refuse("added Exif item carries unverified tag \(entry.tag) at \(label)")
+                    }
+                }
+            }
+            if wantDate {
+                guard addedTags.contains("IFD0#306"), addedTags.contains("IFD0>34665#36867"),
+                      addedTags.contains("IFD0>34665#36868") else {
+                    return refuse("added Exif item misses the intent date")
+                }
+            }
+            if wantLocation {
+                guard addedTags.contains("IFD0>34853#1"), addedTags.contains("IFD0>34853#2"),
+                      addedTags.contains("IFD0>34853#3"), addedTags.contains("IFD0>34853#4") else {
+                    return refuse("added Exif item misses the intent location")
+                }
             }
         }
         let mimeItemIDs = items.filter { $0.type == "mime" }.map { $0.id } + (addedMimeID.map { [$0] } ?? [])

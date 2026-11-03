@@ -1677,17 +1677,23 @@ struct MetadataWriterTests {
         for (ext, uti) in [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")] {
             let written = root.appendingPathComponent("intent.\(ext)")
             try fixture(at: written, type: uti as CFString)
-            try require(update(written, written), "Intent write failed for \(ext)")
-            let good = MetadataWriter.WritePlan(date: when, removeDate: false, latitude: 40.4, longitude: -3.7, removeLocation: false)
-            try require(MetadataWriter.verifyIntent(good, in: written), "Readback rejected a correct write in \(ext)")
-            let wrongDate = MetadataWriter.WritePlan(date: when.addingTimeInterval(86_400), removeDate: false, latitude: nil, longitude: nil, removeLocation: false)
-            try require(!MetadataWriter.verifyIntent(wrongDate, in: written), "Readback accepted a wrong date in \(ext)")
-            let wrongPlace = MetadataWriter.WritePlan(date: nil, removeDate: false, latitude: 10, longitude: 10, removeLocation: false)
-            try require(!MetadataWriter.verifyIntent(wrongPlace, in: written), "Readback accepted a wrong location in \(ext)")
-            let notRemoved = MetadataWriter.WritePlan(date: nil, removeDate: true, latitude: nil, longitude: nil, removeLocation: true)
-            try require(!MetadataWriter.verifyIntent(notRemoved, in: written), "Readback accepted surviving date/GPS in \(ext)")
-            try require(update(written, written, remove: true), "Intent removal failed for \(ext)")
-            try require(MetadataWriter.verifyIntent(notRemoved, in: written), "Readback rejected a correct removal in \(ext)")
+            let intentWrote = update(written, written)
+            check(intentWrote, "Intent write failed for \(ext)")
+            if intentWrote {
+                let good = MetadataWriter.WritePlan(date: when, removeDate: false, latitude: 40.4, longitude: -3.7, removeLocation: false)
+                check(MetadataWriter.verifyIntent(good, in: written), "Readback rejected a correct write in \(ext)")
+                let wrongDate = MetadataWriter.WritePlan(date: when.addingTimeInterval(86_400), removeDate: false, latitude: nil, longitude: nil, removeLocation: false)
+                check(!MetadataWriter.verifyIntent(wrongDate, in: written), "Readback accepted a wrong date in \(ext)")
+                let wrongPlace = MetadataWriter.WritePlan(date: nil, removeDate: false, latitude: 10, longitude: 10, removeLocation: false)
+                check(!MetadataWriter.verifyIntent(wrongPlace, in: written), "Readback accepted a wrong location in \(ext)")
+                let notRemoved = MetadataWriter.WritePlan(date: nil, removeDate: true, latitude: nil, longitude: nil, removeLocation: true)
+                check(!MetadataWriter.verifyIntent(notRemoved, in: written), "Readback accepted surviving date/GPS in \(ext)")
+                let intentRemoved = update(written, written, remove: true)
+                check(intentRemoved, "Intent removal failed for \(ext)")
+                if intentRemoved {
+                    check(MetadataWriter.verifyIntent(notRemoved, in: written), "Readback rejected a correct removal in \(ext)")
+                }
+            }
         }
         let alias = root.appendingPathComponent("alias.png")
         try fm.createSymbolicLink(at: alias, withDestinationURL: source)
