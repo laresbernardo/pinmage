@@ -2607,15 +2607,43 @@ struct MetadataWriter {
         // Color readback: redundant with the byte-exact item/iprp carriers by
         // construction, kept as an independent runtime assertion that the
         // transport did not remap color (HDR/color scope stays bounded to
-        // what the carriers carry; nothing here extends it).
-        let sourceColor = (CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any])?[kCGImagePropertyColorSpace] as? String
-        guard let stagedColorSource = CGImageSourceCreateWithData(stagedData as CFData, nil),
-              let stagedColorProps = CGImageSourceCopyPropertiesAtIndex(stagedColorSource, 0, nil) as? [CFString: Any] else {
-            return refuse("staged output color properties unreadable")
+        // what the carriers carry; nothing here extends it). ImageIO
+        // declares no kCGImagePropertyColorSpace constant; the "ColorSpace"
+        // property key is carrier-dependent, so an unexposed property falls
+        // back to the decoded image's color space (name, then ICC bytes),
+        // and any remaining gap refuses instead of passing vacuously.
+        func colorIdentity(_ colorSource: CGImageSource) -> (property: String?, decodedName: String?, icc: Data?) {
+            let colorProps = CGImageSourceCopyPropertiesAtIndex(colorSource, 0, nil) as? [CFString: Any]
+            let property = colorProps?["ColorSpace" as CFString] as? String
+            var decodedName: String? = nil
+            var icc: Data? = nil
+            if let decoded = CGImageSourceCreateImageAtIndex(colorSource, 0, nil), let space = decoded.colorSpace {
+                decodedName = space.name as String?
+                if decodedName == nil {
+                    icc = CGColorSpaceCopyICCData(space) as Data?
+                }
+            }
+            return (property, decodedName, icc)
         }
-        let stagedColor = stagedColorProps[kCGImagePropertyColorSpace] as? String
-        guard sourceColor == stagedColor else {
-            return refuse("color space changed (\(sourceColor ?? "untagged") -> \(stagedColor ?? "untagged"))")
+        let sourceColor = colorIdentity(imageSource)
+        guard let stagedColorSource = CGImageSourceCreateWithData(stagedData as CFData, nil) else {
+            return refuse("staged output unreadable for color readback")
+        }
+        let stagedColor = colorIdentity(stagedColorSource)
+        if let sourceProperty = sourceColor.property, let stagedProperty = stagedColor.property {
+            guard sourceProperty == stagedProperty else {
+                return refuse("color space changed (\(sourceProperty) -> \(stagedProperty))")
+            }
+        } else if let sourceName = sourceColor.decodedName, let stagedName = stagedColor.decodedName {
+            guard sourceName == stagedName else {
+                return refuse("color space changed (\(sourceName) -> \(stagedName))")
+            }
+        } else if let sourceICC = sourceColor.icc, let stagedICC = stagedColor.icc {
+            guard sourceICC == stagedICC else {
+                return refuse("color profile changed (ICC bytes differ)")
+            }
+        } else {
+            return refuse("color space unverifiable (property unexposed and no decodable profile)")
         }
         return true
     }

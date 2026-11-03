@@ -1444,9 +1444,21 @@ struct MetadataWriterTests {
               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
             throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "P3 HEIC output must read back"])
         }
-        let colorSpace = props[kCGImagePropertyColorSpace] as? String ?? "untagged"
-        FileHandle.standardError.write(Data("M18 probe: P3 HEIC output color space = \(colorSpace)\n".utf8))
-        try require(colorSpace.contains("P3"), "P3 HEIC color space must survive, got \(colorSpace)")
+        // Establish the actual exposed color signal: the carrier-dependent
+        // "ColorSpace" property when ImageIO surfaces it, otherwise the
+        // decoded image's color space name. A nil property is not a pass:
+        // the probe records which signal it observed and asserts on it.
+        let exposed = props["ColorSpace" as CFString] as? String
+        var decodedName = "unavailable"
+        if let outImage = CGImageSourceCreateImageAtIndex(source, 0, nil), let space = outImage.colorSpace, let name = space.name as String? {
+            decodedName = name
+        }
+        FileHandle.standardError.write(Data("M18 probe: P3 HEIC color signal: property=\(exposed ?? "unexposed") decoded=\(decodedName)\n".utf8))
+        if let exposed = exposed {
+            try require(exposed.contains("P3"), "P3 HEIC color space property must survive, got \(exposed)")
+        } else {
+            try require(decodedName.contains("P3"), "P3 HEIC decoded color space must survive, got \(decodedName)")
+        }
     }
 
     /// M18: lawfully-licensed public camera fixtures (CC BY-SA 4.0,
