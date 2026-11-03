@@ -782,7 +782,7 @@ struct MetadataWriter {
     private static func metadataTagMap(_ metadata: CGImageMetadata) -> [String: CGImageMetadataTag] {
         var map: [String: CGImageMetadataTag] = [:]
         CGImageMetadataEnumerateTagsUsingBlock(metadata, nil, [kCGImageMetadataEnumerateRecursively: true] as CFDictionary) { path, tag in
-            if let tag { map[path as String] = tag }
+            map[path as String] = tag
             return true
         }
         return map
@@ -818,7 +818,7 @@ struct MetadataWriter {
                 }
                 return true
             }
-            guard let tag, let resultTag = resultTags[fullPath] else {
+            guard let resultTag = resultTags[fullPath] else {
                 violations.append("lost \(fullPath)")
                 return true
             }
@@ -873,7 +873,7 @@ struct MetadataWriter {
         guard let xmpData = CGImageMetadataCreateXMPData(mutableMetadata, nil) else { return nil }
         // Serialization success is not retention: the packet must parse back
         // into a graph that provably preserves every untouched source property.
-        guard let reparsed = CGImageMetadataCreateFromXMPData(xmpData, nil) else { return nil }
+        guard let reparsed = CGImageMetadataCreateFromXMPData(xmpData) else { return nil }
         let violations = xmpPlanViolations(source: sourceMetadata, result: reparsed, date: date,
                                            removeDate: removeDate, latitude: latitude,
                                            longitude: longitude, removeLocation: removeLocation)
