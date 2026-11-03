@@ -968,7 +968,7 @@ struct MetadataWriterTests {
             let f = probeRoot.appendingPathComponent("deep-icc-\(name).tiff")
             try? fixtureWithMetadata(at: f, type: "public.tiff" as CFString)
             if let data = try? Data(contentsOf: f),
-               let spliced = spliceTIFFTag(data, tag: 34675, payload: Data("DEEPPROBE-FAKE-ICC-PROFILE".utf8)) {
+               let spliced = spliceTIFFTag(data, tag: 34675, type: 7, payload: Data("DEEPPROBE-FAKE-ICC-PROFILE".utf8)) {
                 try? spliced.write(to: f)
                 let beforeLines = tiffInventory(spliced)?.filter { $0.contains("tag=34675") } ?? ["no-34675"]
                 let ok = update(f, f, remove: remove)
