@@ -185,11 +185,137 @@ struct MetadataWriterTests {
             latitude: remove ? nil : 40.4, longitude: remove ? nil : -3.7, removeLocation: remove)
     }
 
+
+    /// M15b diagnostics probe (diagnostic-only; no production or assertion
+    /// change). Runs BEFORE the suite and never throws: every scenario x format
+    /// case executes independently and appends its evidence to a per-case file
+    /// in PRESERVATION_ARTIFACT_DIR, even when the production write refuses or
+    /// a step fails. For each case it records (a) the ACTUAL production
+    /// updateImageMetadata result plus before/after bytes and properties, and
+    /// (b) for PNG a GRAPH SIMULATION that replicates the correctedXMPPacket
+    /// steps (source graph -> applyMetadataPlan -> CGImageMetadataCreateXMPData
+    /// -> CGImageMetadataCreateFromXMPData -> xmpPlanViolations) so the exact
+    /// requested/transformed/serialized/reparsed values and paths are visible
+    /// instead of hidden behind the first aborting require().
+    static func runDiagnosticsProbe(root: URL) {
+        struct Scenario {
+            let name: String
+            let date: Date?
+            let removeDate: Bool
+            let lat: Double?
+            let lon: Double?
+            let removeLocation: Bool
+        }
+        let scenarios = [
+            Scenario(name: "set-date-remove-location", date: Date(timeIntervalSince1970: 1_700_000_000), removeDate: false, lat: nil, lon: nil, removeLocation: true),
+            Scenario(name: "set-location-remove-date", date: nil, removeDate: true, lat: 12.5, lon: -45.25, removeLocation: false),
+            Scenario(name: "set-date-only", date: Date(timeIntervalSince1970: 1_700_000_000), removeDate: false, lat: nil, lon: nil, removeLocation: false),
+            Scenario(name: "remove-date-only", date: nil, removeDate: true, lat: nil, lon: nil, removeLocation: false),
+            Scenario(name: "remove-location-only", date: nil, removeDate: false, lat: nil, lon: nil, removeLocation: true),
+            Scenario(name: "set-location-only", date: nil, removeDate: false, lat: 12.5, lon: -45.25, removeLocation: false),
+        ]
+        let formats: [(String, CFString)] = [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")]
+        let env = ProcessInfo.processInfo.environment
+        let outDir = env["PRESERVATION_ARTIFACT_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? root
+        try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let probeRoot = root.appendingPathComponent("probe", isDirectory: true)
+        try? FileManager.default.createDirectory(at: probeRoot, withIntermediateDirectories: true)
+        for scenario in scenarios {
+            for (ext, uti) in formats {
+                var report: [String] = []
+                report.append("scenario=\(scenario.name) format=\(ext)")
+                report.append("requested: date=\(String(describing: scenario.date)) removeDate=\(scenario.removeDate) lat=\(String(describing: scenario.lat)) lon=\(String(describing: scenario.lon)) removeLocation=\(scenario.removeLocation)")
+                let file = probeRoot.appendingPathComponent("probe-\(scenario.name).\(ext)")
+                do {
+                    try fixtureWithMetadata(at: file, type: uti)
+                    report.append("fixture: created")
+                } catch {
+                    report.append("fixture: FAILED \(error.localizedDescription)")
+                    try? report.joined(separator: "\n").write(to: outDir.appendingPathComponent("probe-\(scenario.name)-\(ext).txt"), atomically: true, encoding: .utf8)
+                    continue
+                }
+                if let src = CGImageSourceCreateWithURL(file as CFURL, nil),
+                   let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
+                    report.append("PROPERTIES BEFORE: exif=\(props[kCGImagePropertyExifDictionary] ?? [:]) tiff=\(props[kCGImagePropertyTIFFDictionary] ?? [:]) gps=\(props[kCGImagePropertyGPSDictionary] ?? [:])")
+                }
+                let before = try? Data(contentsOf: file)
+                let ok = MetadataWriter.updateImageMetadata(sourceURL: file, destinationURL: file,
+                    date: scenario.date, removeDate: scenario.removeDate,
+                    latitude: scenario.lat, longitude: scenario.lon, removeLocation: scenario.removeLocation)
+                let after = try? Data(contentsOf: file)
+                report.append("PRODUCTION updateImageMetadata -> \(ok); output exists=\(FileManager.default.fileExists(atPath: file.path)) bytesChanged=\(before != after)")
+                if let src = CGImageSourceCreateWithURL(file as CFURL, nil),
+                   let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
+                    report.append("PROPERTIES AFTER: exif=\(props[kCGImagePropertyExifDictionary] ?? [:]) tiff=\(props[kCGImagePropertyTIFFDictionary] ?? [:]) gps=\(props[kCGImagePropertyGPSDictionary] ?? [:])")
+                }
+                if ext == "png" {
+                    report.append(contentsOf: simulateCorrectedXMPPacket(probeRoot: probeRoot, scenario: (scenario.name, scenario.date, scenario.removeDate, scenario.lat, scenario.lon, scenario.removeLocation)))
+                }
+                try? report.joined(separator: "\n").write(to: outDir.appendingPathComponent("probe-\(scenario.name)-\(ext).txt"), atomically: true, encoding: .utf8)
+            }
+        }
+    }
+
+    /// Graph-level mirror of the production correctedXMPPacket steps, run on a
+    /// FRESH fixture (independent of the production write above). Diagnostic
+    /// only: it documents what the transform/serialize/reparse stages produce;
+    /// the authoritative production outcome is the updateImageMetadata result
+    /// recorded separately.
+    static func simulateCorrectedXMPPacket(probeRoot: URL, scenario: (name: String, date: Date?, removeDate: Bool, lat: Double?, lon: Double?, removeLocation: Bool)) -> [String] {
+        var report: [String] = []
+        let simFile = probeRoot.appendingPathComponent("probe-sim-\(scenario.name).png")
+        do { try fixtureWithMetadata(at: simFile, type: "public.png" as CFString) } catch {
+            report.append("GRAPH SIMULATION: fixture failed \(error.localizedDescription)")
+            return report
+        }
+        guard let src = CGImageSourceCreateWithURL(simFile as CFURL, nil),
+              let sourceMetadata = CGImageSourceCopyMetadataAtIndex(src, 0, nil),
+              let mutable = CGImageMetadataCreateMutableCopy(sourceMetadata) else {
+            report.append("GRAPH SIMULATION UNAVAILABLE (source metadata read failed)")
+            return report
+        }
+        report.append("GRAPH SIMULATION (mirrors correctedXMPPacket steps; not the production write itself)")
+        report.append("SOURCE GRAPH:\n" + dumpMetadataGraph(sourceMetadata))
+        let applied = MetadataWriter.applyMetadataPlan(mutable, date: scenario.date, removeDate: scenario.removeDate,
+            latitude: scenario.lat, longitude: scenario.lon, removeLocation: scenario.removeLocation)
+        report.append("applyMetadataPlan -> \(applied)")
+        report.append("TRANSFORMED GRAPH:\n" + dumpMetadataGraph(mutable))
+        guard let xmpData = CGImageMetadataCreateXMPData(mutable, nil) else {
+            report.append("SERIALIZE FAILED (CGImageMetadataCreateXMPData returned nil)")
+            return report
+        }
+        report.append("SERIALIZED XMP PACKET (\((xmpData as Data).count) bytes):\n" + (String(data: xmpData as Data, encoding: .utf8) ?? "<non-utf8>"))
+        guard let reparsed = CGImageMetadataCreateFromXMPData(xmpData) else {
+            report.append("REPARSE FAILED (CGImageMetadataCreateFromXMPData returned nil)")
+            return report
+        }
+        report.append("REPARSED GRAPH:\n" + dumpMetadataGraph(reparsed))
+        let violations = MetadataWriter.xmpPlanViolations(source: sourceMetadata, result: reparsed,
+            date: scenario.date, removeDate: scenario.removeDate,
+            latitude: scenario.lat, longitude: scenario.lon, removeLocation: scenario.removeLocation)
+        report.append("VIOLATIONS: \(violations.isEmpty ? "none" : violations.joined(separator: "; "))")
+        return report
+    }
+
+    /// Path = value (+ qualifiers) per enumerated tag, same enumeration
+    /// options the production verifier uses (nil = default recursion).
+    static func dumpMetadataGraph(_ metadata: CGImageMetadata) -> String {
+        var lines: [String] = []
+        CGImageMetadataEnumerateTagsUsingBlock(metadata, nil, nil) { path, tag in
+            let value = CGImageMetadataTagCopyValue(tag)
+            let qualifiers = CGImageMetadataTagCopyQualifiers(tag)
+            lines.append("  \(path as String) = \(String(describing: value)) | qualifiers: \(String(describing: qualifiers))")
+            return true
+        }
+        return lines.sorted().joined(separator: "\n")
+    }
+
     static func main() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("PinmageTests-\(UUID().uuidString)")
         try fm.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? fm.removeItem(at: root) }
+        runDiagnosticsProbe(root: root)
         let source = root.appendingPathComponent("original.png")
         try fixture(at: source, type: "public.png" as CFString)
         let original = try Data(contentsOf: source)
