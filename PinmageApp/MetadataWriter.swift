@@ -266,9 +266,11 @@ struct MetadataWriter {
             // suite asserts raw RGBA equality). Source data not represented in
             // the properties dictionary - custom ancillary chunks, embedded
             // profiles handled outside the image's color space, or auxiliary
-            // images - is not carried over; for PNG the aux-chunk guard below
-            // refuses the write instead of silently dropping it (M15b, per the
-            // reject-what-we-cannot-verify rule). TIFF aux tags beyond the
+            // images - is not carried over; for PNG the XMP carrier is
+            // corrected and re-spliced below, and any other uncarried aux
+            // chunk refuses the write instead of being silently dropped
+            // (M15b, per the reject-what-we-cannot-verify rule). TIFF aux
+            // tags beyond the
             // properties dictionaries remain a documented gap. Multi-frame
             // sources are refused at this function's entry (M15).
             guard let decodedImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
@@ -318,7 +320,49 @@ struct MetadataWriter {
                 return false
             }
             if utiString == "public.png" {
-                guard pngAuxChunksPreserved(source: sourceData, destinationURL: destinationURL, operation: "removal") else { return false }
+                // XMP correction: the rewrite must not silently drop the
+                // source XMP packet (v3 CI: "output would lose or alter
+                // chunks [iTXt x1]") nor carry it stale - removed dates/GPS
+                // would survive inside XMP, the M17 bug. Replace it with the
+                // corrected packet built from the source's own metadata.
+                guard let sourceChunks = pngChunks(sourceData) else {
+                    FileHandle.standardError.write(Data("Refusing PNG removal: source did not parse as PNG\n".utf8))
+                    return false
+                }
+                let sourceXMP = (sourceChunks["iTXt"] ?? []).filter(isXMPCarrierPayload)
+                guard sourceXMP.count <= 1 else {
+                    FileHandle.standardError.write(Data("Refusing PNG removal: multiple XMP packets\n".utf8))
+                    return false
+                }
+                var xmpHandled = false
+                if !sourceXMP.isEmpty {
+                    // An empty packet means nothing survived the removals, so
+                    // the carrier is dropped rather than written empty.
+                    guard let packet = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
+                                                          latitude: latitude, longitude: longitude, removeLocation: removeLocation),
+                          let staged = try? Data(contentsOf: destinationURL),
+                          let replaced = pngReplacingXMPCarrier(staged, correctedPacket: packet.isEmpty ? nil : packet) else {
+                        FileHandle.standardError.write(Data("Refusing PNG removal: could not build or stage the corrected XMP packet\n".utf8))
+                        return false
+                    }
+                    do {
+                        try replaced.write(to: destinationURL)
+                    } catch {
+                        FileHandle.standardError.write(Data("Refusing PNG removal: could not stage the corrected XMP packet\n".utf8))
+                        return false
+                    }
+                    // Verify the staged file carries exactly the intended packet
+                    // (none, when the removals emptied it).
+                    let expected: [Data] = packet.isEmpty ? [] : [packet]
+                    guard let finalData = try? Data(contentsOf: destinationURL),
+                          let finalChunks = pngChunks(finalData),
+                          (finalChunks["iTXt"] ?? []).filter(isXMPCarrierPayload) == expected else {
+                        FileHandle.standardError.write(Data("Refusing PNG removal: corrected XMP packet did not verify\n".utf8))
+                        return false
+                    }
+                    xmpHandled = true
+                }
+                guard pngAuxChunksPreserved(source: sourceData, destinationURL: destinationURL, operation: "removal", xmpHandled: xmpHandled) else { return false }
             }
             // M15b, tag level: this branch rebuilds metadata from the
             // properties dictionary, so every source tag the dictionary
@@ -398,77 +442,9 @@ struct MetadataWriter {
             mutableMetadata = CGImageMetadataCreateMutable()
         }
         
-        // Removal: ImageIO has no remove-by-image-property API, so the real
-        // XMP paths are discovered by recursive enumeration (no namespace
-        // guessing) and then deleted. A date removal deletes every capture-date
-        // representation (EXIF DateTimeOriginal/Digitized, TIFF DateTime); a
-        // location removal deletes every GPS tag (exif:GPS* and nested members).
-        // Metadata must not be modified during enumeration, so paths are
-        // collected first and removed afterwards.
-        if removeDate || removeLocation {
-            var pathsToRemove: [String] = []
-            let enumerateOptions = [kCGImageMetadataEnumerateRecursively: true] as CFDictionary
-            CGImageMetadataEnumerateTagsUsingBlock(mutableMetadata, nil, enumerateOptions) { path, _ in
-                let fullPath = path as String
-                let leaf = fullPath.components(separatedBy: "/").last ?? fullPath
-                let tagName = leaf.components(separatedBy: ":").last ?? leaf
-                // MWG mapping (ImageIO header guidance): TIFF/EXIF DateTime
-                // (tag 0x0132) lives in XMP as xmp:ModifyDate - removing the
-                // approved TIFF DateTime criterion requires removing it here
-                // (CI: "TIFF DateTime survived removal in heic" without it).
-                if (removeDate && ["DateTimeOriginal", "DateTimeDigitized", "DateTime", "DateCreated", "CreateDate", "ModifyDate"].contains(tagName))
-                    || (removeLocation && tagName.hasPrefix("GPS")) {
-                    pathsToRemove.append(fullPath)
-                }
-                return true
-            }
-            for removePath in pathsToRemove {
-                // Fail closed: a tag that cannot be removed must not publish.
-                guard CGImageMetadataRemoveTagWithPath(mutableMetadata, nil, removePath as CFString) else {
-                    FileHandle.standardError.write(Data("Failed to remove metadata tag: \(removePath)\n".utf8))
-                    return false
-                }
-            }
-        }
-        
-        // Date set: writes the standard EXIF/TIFF XMP tags (registered
-        // prefixes), which read back into the EXIF/TIFF property dictionaries.
-        // Fail closed if any write cannot be created.
-        if !removeDate, let date = date {
-            let formatter = DateFormatter()
-            // XMP date values must be in XMP form (YYYY-MM-DDThh:mm:ss); the
-            // EXIF layout "yyyy:MM:dd HH:mm:ss" is not parseable as XMP and the
-            // tag is dropped on readback (CI: "Date missing in png", while
-            // numeric GPS tags mapped fine).
-            formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
-            let dateString = formatter.string(from: date)
-            // MWG mappings (ImageIO header guidance): EXIF DateTimeOriginal
-            // lives in XMP as photoshop:DateCreated, DateTimeDigitized as
-            // xmp:CreateDate, TIFF DateTime as xmp:ModifyDate. The exif:/tiff:
-            // XMP tags are written too for readers that consume them, but
-            // ImageIO's own property-dictionary readback follows the MWG
-            // mapping (CI: exif:DateTimeOriginal alone read back as missing).
-            guard CGImageMetadataSetValueWithPath(mutableMetadata, nil, "photoshop:DateCreated" as CFString, dateString as CFString),
-                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "xmp:CreateDate" as CFString, dateString as CFString),
-                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeOriginal" as CFString, dateString as CFString),
-                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeDigitized" as CFString, dateString as CFString),
-                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "tiff:DateTime" as CFString, dateString as CFString) else {
-                FileHandle.standardError.write(Data("Failed to set date metadata\n".utf8))
-                return false
-            }
-        }
-        
-        // GPS set: EXIF GPS tags in XMP live in the exif namespace as
-        // exif:GPS*; "gps:" is not a registered XMP prefix, so
-        // SetValueWithPath would fail to create it.
-        if !removeLocation, let lat = latitude, let lon = longitude {
-            guard CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:GPSLatitude" as CFString, abs(lat) as CFNumber),
-                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:GPSLatitudeRef" as CFString, (lat >= 0 ? "N" : "S") as CFString),
-                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:GPSLongitude" as CFString, abs(lon) as CFNumber),
-                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:GPSLongitudeRef" as CFString, (lon >= 0 ? "E" : "W") as CFString) else {
-                FileHandle.standardError.write(Data("Failed to set GPS metadata\n".utf8))
-                return false
-            }
+        guard applyMetadataPlan(mutableMetadata, date: date, removeDate: removeDate,
+                                latitude: latitude, longitude: longitude, removeLocation: removeLocation) else {
+            return false
         }
         
         // Write the image with the updated metadata properties dictionary.
@@ -559,15 +535,22 @@ struct MetadataWriter {
     /// Aux-chunk loss between two PNG byte streams: each source occurrence of
     /// a chunk the writer is not proven to reproduce needs an identical
     /// payload in the output (multiset match; order between chunks is not
-    /// significant). Returns the lost or altered chunks as "type xN", empty
-    /// when everything survived, nil when either stream is not a PNG.
-    static func pngLostAuxChunks(source: Data, output: Data) -> [String]? {
+    /// significant). When xmpHandled is set, XMP-carrier iTXt payloads are
+    /// excluded both sides because the caller verified the corrected packet
+    /// itself. Returns the lost or altered chunks as "type xN", empty when
+    /// everything survived, nil when either stream is not a PNG.
+    static func pngLostAuxChunks(source: Data, output: Data, xmpHandled: Bool = false) -> [String]? {
         guard let sourceChunks = pngChunks(source),
               let outputChunks = pngChunks(output) else { return nil }
         var lost: [String] = []
         for (type, payloads) in sourceChunks where !pngCarriedChunkTypes.contains(type) {
-            var unmatched = payloads
-            for candidate in outputChunks[type] ?? [] {
+            // When the rebuild path corrected the XMP carrier, those payloads
+            // are verified separately (exact corrected packet); other iTXt
+            // keywords still compare payload-exact.
+            let sourcePayloads = xmpHandled && type == "iTXt" ? payloads.filter { !isXMPCarrierPayload($0) } : payloads
+            let outputPayloads = xmpHandled && type == "iTXt" ? (outputChunks[type] ?? []).filter { !isXMPCarrierPayload($0) } : (outputChunks[type] ?? [])
+            var unmatched = sourcePayloads
+            for candidate in outputPayloads {
                 if let index = unmatched.firstIndex(of: candidate) { unmatched.remove(at: index) }
             }
             if !unmatched.isEmpty { lost.append("\(type) x\(unmatched.count)") }
@@ -577,9 +560,9 @@ struct MetadataWriter {
 
     /// M15b: a PNG write must never silently drop or alter an aux chunk. Fails
     /// closed on any loss or on bytes that do not parse as PNG.
-    private static func pngAuxChunksPreserved(source sourceData: Data, destinationURL: URL, operation: String) -> Bool {
+    private static func pngAuxChunksPreserved(source sourceData: Data, destinationURL: URL, operation: String, xmpHandled: Bool = false) -> Bool {
         guard let outputData = try? Data(contentsOf: destinationURL),
-              let lost = pngLostAuxChunks(source: sourceData, output: outputData) else {
+              let lost = pngLostAuxChunks(source: sourceData, output: outputData, xmpHandled: xmpHandled) else {
             FileHandle.standardError.write(Data("Refusing PNG \(operation): source or staged output did not parse as PNG\n".utf8))
             return false
         }
@@ -588,6 +571,317 @@ struct MetadataWriter {
             return false
         }
         return true
+    }
+
+    // MARK: - XMP carrier correction (PNG rebuild path)
+
+    /// The PNG XMP carrier: an iTXt chunk whose keyword is this string,
+    /// uncompressed (XMP Specification Part 3).
+    private static let xmpITXtKeyword = "XML:com.adobe.xmp"
+
+    /// The one metadata transformation both write paths share: removal by
+    /// enumerated XMP path (no namespace guessing), then sets in XMP form.
+    /// Fail closed on any tag that cannot be removed or created.
+    static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool) -> Bool {
+        // Removal: ImageIO has no remove-by-image-property API, so the real
+        // XMP paths are discovered by recursive enumeration (no namespace
+        // guessing) and then deleted. A date removal deletes every capture-date
+        // representation (EXIF DateTimeOriginal/Digitized, TIFF DateTime); a
+        // location removal deletes every GPS tag (exif:GPS* and nested members).
+        // Metadata must not be modified during enumeration, so paths are
+        // collected first and removed afterwards.
+        if removeDate || removeLocation {
+            var pathsToRemove: [String] = []
+            let enumerateOptions = [kCGImageMetadataEnumerateRecursively: true] as CFDictionary
+            CGImageMetadataEnumerateTagsUsingBlock(mutableMetadata, nil, enumerateOptions) { path, _ in
+                let fullPath = path as String
+                let leaf = fullPath.components(separatedBy: "/").last ?? fullPath
+                let tagName = leaf.components(separatedBy: ":").last ?? leaf
+                // MWG mapping (ImageIO header guidance): TIFF/EXIF DateTime
+                // (tag 0x0132) lives in XMP as xmp:ModifyDate - removing the
+                // approved TIFF DateTime criterion requires removing it here
+                // (CI: "TIFF DateTime survived removal in heic" without it).
+                if isRemovalTarget(tagName, removeDate: removeDate, removeLocation: removeLocation) {
+                    pathsToRemove.append(fullPath)
+                }
+                return true
+            }
+            for removePath in pathsToRemove {
+                // Fail closed: a tag that cannot be removed must not publish.
+                guard CGImageMetadataRemoveTagWithPath(mutableMetadata, nil, removePath as CFString) else {
+                    FileHandle.standardError.write(Data("Failed to remove metadata tag: \(removePath)\n".utf8))
+                    return false
+                }
+            }
+        }
+
+        // Date set: writes the standard EXIF/TIFF XMP tags (registered
+        // prefixes), which read back into the EXIF/TIFF property dictionaries.
+        // Fail closed if any write cannot be created.
+        if !removeDate, let date = date {
+            let formatter = DateFormatter()
+            // XMP date values must be in XMP form (YYYY-MM-DDThh:mm:ss); the
+            // EXIF layout "yyyy:MM:dd HH:mm:ss" is not parseable as XMP and the
+            // tag is dropped on readback (CI: "Date missing in png", while
+            // numeric GPS tags mapped fine).
+            formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+            let dateString = formatter.string(from: date)
+            // MWG mappings (ImageIO header guidance): EXIF DateTimeOriginal
+            // lives in XMP as photoshop:DateCreated, DateTimeDigitized as
+            // xmp:CreateDate, TIFF DateTime as xmp:ModifyDate. The exif:/tiff:
+            // XMP tags are written too for readers that consume them, but
+            // ImageIO's own property-dictionary readback follows the MWG
+            // mapping (CI: exif:DateTimeOriginal alone read back as missing).
+            guard CGImageMetadataSetValueWithPath(mutableMetadata, nil, "photoshop:DateCreated" as CFString, dateString as CFString),
+                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "xmp:CreateDate" as CFString, dateString as CFString),
+                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeOriginal" as CFString, dateString as CFString),
+                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeDigitized" as CFString, dateString as CFString),
+                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "tiff:DateTime" as CFString, dateString as CFString) else {
+                FileHandle.standardError.write(Data("Failed to set date metadata\n".utf8))
+                return false
+            }
+        }
+
+        // GPS set: EXIF GPS tags in XMP live in the exif namespace as
+        // exif:GPS*; "gps:" is not a registered XMP prefix, so
+        // SetValueWithPath would fail to create it.
+        if !removeLocation, let lat = latitude, let lon = longitude {
+            guard CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:GPSLatitude" as CFString, abs(lat) as CFNumber),
+                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:GPSLatitudeRef" as CFString, (lat >= 0 ? "N" : "S") as CFString),
+                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:GPSLongitude" as CFString, abs(lon) as CFNumber),
+                  CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:GPSLongitudeRef" as CFString, (lon >= 0 ? "E" : "W") as CFString) else {
+                FileHandle.standardError.write(Data("Failed to set GPS metadata\n".utf8))
+                return false
+            }
+        }
+        return true
+    }
+
+    /// True when an iTXt payload is the uncompressed XMP carrier. Payload
+    /// layout: keyword, NUL, compression flag, compression method, language
+    /// tag NUL, translated keyword NUL, then UTF-8 text.
+    private static func isXMPCarrierPayload(_ payload: Data) -> Bool {
+        let prefix = Array("\(xmpITXtKeyword)\0".utf8)
+        let bytes = [UInt8](payload)
+        guard bytes.count > prefix.count + 4, Array(bytes.prefix(prefix.count)) == prefix else { return false }
+        return bytes[prefix.count] == 0 && bytes[prefix.count + 1] == 0
+    }
+
+    /// PNG CRC (zlib CRC-32 over chunk type + payload) and chunk assembly,
+    /// shared by the XMP surgery and the tests.
+    static func pngCRC32(_ bytes: [UInt8]) -> UInt32 {
+        var crc: UInt32 = 0xFFFFFFFF
+        for byte in bytes {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 { crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320 : crc >> 1 }
+        }
+        return crc ^ 0xFFFFFFFF
+    }
+
+    static func pngChunkBytes(type: String, payload: Data) -> [UInt8]? {
+        let typeBytes = Array(type.utf8)
+        guard typeBytes.count == 4 else { return nil }
+        let payloadBytes = [UInt8](payload)
+        let length = UInt32(payloadBytes.count)
+        var chunk: [UInt8] = [UInt8((length >> 24) & 0xFF), UInt8((length >> 16) & 0xFF), UInt8((length >> 8) & 0xFF), UInt8(length & 0xFF)]
+        chunk += typeBytes
+        chunk += payloadBytes
+        let crc = pngCRC32(typeBytes + payloadBytes)
+        chunk += [UInt8((crc >> 24) & 0xFF), UInt8((crc >> 16) & 0xFF), UInt8((crc >> 8) & 0xFF), UInt8(crc & 0xFF)]
+        return chunk
+    }
+
+    /// Byte-level surgery on a finished PNG: drop every XMP-carrier iTXt and,
+    /// when a corrected packet is given, insert it as a fresh iTXt before
+    /// IEND. Returns nil when the bytes are not a well-formed PNG. Chunk
+    /// surgery is what the removal rewrite needs: ImageIO synthesizes XMP only
+    /// from the properties it is given, so preserving the source packet's
+    /// unrelated content requires carrying the packet ourselves.
+    static func pngReplacingXMPCarrier(_ data: Data, correctedPacket: Data?) -> Data? {
+        let signature: [UInt8] = [137, 80, 78, 71, 13, 10, 26, 10]
+        let bytes = [UInt8](data)
+        guard bytes.count >= signature.count + 12,
+              Array(bytes.prefix(signature.count)) == signature else { return nil }
+        var out: [UInt8] = signature
+        var offset = signature.count
+        var sawIEND = false
+        while offset + 12 <= bytes.count {
+            let length = Int(bytes[offset]) << 24 | Int(bytes[offset + 1]) << 16
+                | Int(bytes[offset + 2]) << 8 | Int(bytes[offset + 3])
+            let typeEnd = offset + 8
+            let dataEnd = typeEnd + length
+            guard let type = String(bytes: bytes[(offset + 4)..<typeEnd], encoding: .ascii),
+                  dataEnd + 4 <= bytes.count else { return nil }
+            let payload = Data(bytes[typeEnd..<dataEnd])
+            if type == "IEND" {
+                if let packet = correctedPacket {
+                    var payloadBytes: [UInt8] = Array("\(xmpITXtKeyword)\0".utf8)
+                    payloadBytes += [0, 0, 0, 0]
+                    payloadBytes += [UInt8](packet)
+                    guard let chunk = pngChunkBytes(type: "iTXt", payload: Data(payloadBytes)) else { return nil }
+                    out += chunk
+                }
+                sawIEND = true
+            }
+            // XMP-carrier iTXt chunks are replaced, not copied.
+            if !(type == "iTXt" && isXMPCarrierPayload(payload)) {
+                out += bytes[offset..<(dataEnd + 4)]
+            }
+            offset = dataEnd + 4
+            if type == "IEND" { break }
+        }
+        guard sawIEND else { return nil }
+        return Data(out)
+    }
+
+    /// The M17 removal predicate, shared by the metadata transform and the
+    /// preservation invariant: a date removal deletes every capture-date
+    /// representation (the CI-proven alias set: EXIF DateTimeOriginal and
+    /// DateTimeDigitized, TIFF DateTime, and the MWG-mapped XMP names
+    /// DateCreated, CreateDate, ModifyDate - any namespace); a location
+    /// removal deletes every GPS tag (leaf names with the GPS prefix,
+    /// including nested members). Tags outside this set are not removal
+    /// targets; nonstandard aliases are a documented residual.
+    private static func isRemovalTarget(_ leaf: String, removeDate: Bool, removeLocation: Bool) -> Bool {
+        (removeDate && ["DateTimeOriginal", "DateTimeDigitized", "DateTime", "DateCreated", "CreateDate", "ModifyDate"].contains(leaf))
+            || (removeLocation && leaf.hasPrefix("GPS"))
+    }
+
+    /// The XMP paths a plan sets, with their expected values. Mirrors the sets
+    /// in applyMetadataPlan; the invariant checks them by value.
+    private static func plannedSetValues(date: Date?, latitude: Double?, longitude: Double?) -> [String: CFTypeRef] {
+        var expected: [String: CFTypeRef] = [:]
+        if let date = date {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+            let dateString = formatter.string(from: date)
+            for path in ["photoshop:DateCreated", "xmp:CreateDate", "exif:DateTimeOriginal", "exif:DateTimeDigitized", "tiff:DateTime"] {
+                expected[path] = dateString as CFString
+            }
+        }
+        if let lat = latitude, let lon = longitude {
+            expected["exif:GPSLatitude"] = abs(lat) as CFNumber
+            expected["exif:GPSLatitudeRef"] = (lat >= 0 ? "N" : "S") as CFString
+            expected["exif:GPSLongitude"] = abs(lon) as CFNumber
+            expected["exif:GPSLongitudeRef"] = (lon >= 0 ? "E" : "W") as CFString
+        }
+        return expected
+    }
+
+    /// CFEqual with a string-form tolerance: a number may round-trip through
+    /// XMP as a string without losing information.
+    private static func metadataValuesEqual(_ a: CFTypeRef?, _ b: CFTypeRef?) -> Bool {
+        switch (a, b) {
+        case let (a?, b?): return CFEqual(a, b) || String(describing: a) == String(describing: b)
+        case (nil, nil): return true
+        default: return false
+        }
+    }
+
+    /// Every enumerated tag of a metadata graph, keyed by full path.
+    private static func metadataTagMap(_ metadata: CGImageMetadata) -> [String: CGImageMetadataTag] {
+        var map: [String: CGImageMetadataTag] = [:]
+        CGImageMetadataEnumerateTagsUsingBlock(metadata, nil, [kCGImageMetadataEnumerateRecursively: true] as CFDictionary) { path, tag in
+            if let tag { map[path as String] = tag }
+            return true
+        }
+        return map
+    }
+
+    /// The enforced preservation invariant between the source graph and the
+    /// round-tripped corrected graph (serialize + reparse - insertion of a
+    /// packet never proves retention). Returns violations; empty means:
+    /// - no removal-target leaf survives anywhere in the result, at any path;
+    /// - every untouched source tag is present at its path with equal value
+    ///   and equal qualifiers (nested/array content included via CFEqual);
+    /// - every planned set tag carries the requested value.
+    /// Tags the source graph never exposes remain outside this invariant -
+    /// that gap is documented, not claimed solved.
+    static func xmpPlanViolations(source: CGImageMetadata, result: CGImageMetadata, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool) -> [String] {
+        let resultTags = metadataTagMap(result)
+        let plannedSets = plannedSetValues(date: removeDate ? nil : date,
+                                           latitude: removeLocation ? nil : latitude,
+                                           longitude: removeLocation ? nil : longitude)
+        var violations: [String] = []
+        CGImageMetadataEnumerateTagsUsingBlock(source, nil, [kCGImageMetadataEnumerateRecursively: true] as CFDictionary) { path, tag in
+            let fullPath = path as String
+            let leaf = fullPath.components(separatedBy: "/").last ?? fullPath
+            let tagName = leaf.components(separatedBy: ":").last ?? leaf
+            if isRemovalTarget(tagName, removeDate: removeDate, removeLocation: removeLocation) {
+                return true // the result-side sweep below catches survivors
+            }
+            if let expected = plannedSets[fullPath] {
+                guard let resultTag = resultTags[fullPath],
+                      metadataValuesEqual(CGImageMetadataTagCopyValue(resultTag), expected) else {
+                    violations.append("set value missing or wrong at \(fullPath)")
+                    return true
+                }
+                return true
+            }
+            guard let tag, let resultTag = resultTags[fullPath] else {
+                violations.append("lost \(fullPath)")
+                return true
+            }
+            if !metadataValuesEqual(CGImageMetadataTagCopyValue(tag), CGImageMetadataTagCopyValue(resultTag)) {
+                violations.append("altered \(fullPath)")
+            }
+            if !metadataValuesEqual(CGImageMetadataTagCopyQualifiers(tag), CGImageMetadataTagCopyQualifiers(resultTag)) {
+                violations.append("qualifiers changed at \(fullPath)")
+            }
+            return true
+        }
+        // Planned sets are verified whether or not the source carried the tag:
+        // a write must not publish a requested value that never landed.
+        for (path, expected) in plannedSets {
+            guard let resultTag = resultTags[path],
+                  metadataValuesEqual(CGImageMetadataTagCopyValue(resultTag), expected) else {
+                violations.append("set value missing or wrong at \(path)")
+                continue
+            }
+        }
+        // A removal target anywhere in the result - including a path the
+        // source never used - means stale data survived the correction.
+        for path in resultTags.keys {
+            let leaf = path.components(separatedBy: "/").last ?? path
+            let tagName = leaf.components(separatedBy: ":").last ?? leaf
+            if isRemovalTarget(tagName, removeDate: removeDate, removeLocation: removeLocation) {
+                violations.append("stale removal target at \(path)")
+            }
+        }
+        return violations.sorted()
+    }
+
+    /// The corrected XMP packet for a rebuild-path write: the source's full
+    /// metadata graph (unknown namespaces preserved) with the requested
+    /// removals and sets applied, serialized with ImageIO's own XMP writer.
+    /// Empty data means no tags survived the plan (drop the carrier); nil
+    /// means the source metadata could not be read, transformed or
+    /// serialized - callers treat nil as a refusal, never as "no XMP needed".
+    private static func correctedXMPPacket(imageSource: CGImageSource, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool) -> Data? {
+        guard let sourceMetadata = CGImageSourceCopyMetadataAtIndex(imageSource, 0, nil),
+              let mutableMetadata = CGImageMetadataCreateMutableCopy(sourceMetadata),
+              applyMetadataPlan(mutableMetadata, date: date, removeDate: removeDate,
+                                latitude: latitude, longitude: longitude, removeLocation: removeLocation) else {
+            return nil
+        }
+        var tagCount = 0
+        CGImageMetadataEnumerateTagsUsingBlock(mutableMetadata, nil, [kCGImageMetadataEnumerateRecursively: true] as CFDictionary) { _, _ in
+            tagCount += 1
+            return true
+        }
+        guard tagCount > 0 else { return Data() }
+        guard let xmpData = CGImageMetadataCreateXMPData(mutableMetadata, nil) else { return nil }
+        // Serialization success is not retention: the packet must parse back
+        // into a graph that provably preserves every untouched source property.
+        guard let reparsed = CGImageMetadataCreateFromXMPData(xmpData, nil) else { return nil }
+        let violations = xmpPlanViolations(source: sourceMetadata, result: reparsed, date: date,
+                                           removeDate: removeDate, latitude: latitude,
+                                           longitude: longitude, removeLocation: removeLocation)
+        guard violations.isEmpty else {
+            FileHandle.standardError.write(Data("Refusing write: corrected XMP failed preservation checks [\(violations.joined(separator: ", "))]\n".utf8))
+            return nil
+        }
+        return xmpData as Data
     }
 
     /// Tags a rebuild-from-properties write must not lose. Returns the missing

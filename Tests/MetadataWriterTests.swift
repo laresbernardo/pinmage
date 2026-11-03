@@ -129,34 +129,39 @@ struct MetadataWriterTests {
         return (orientation, tiffOrientation, dpiWidth, dpiHeight, colorSpaceName, gpsPresent, datePresent)
     }
 
-    /// PNG CRC (zlib CRC-32 over chunk type + payload), used to splice test chunks.
-    static func pngCRC32(_ bytes: [UInt8]) -> UInt32 {
-        var crc: UInt32 = 0xFFFFFFFF
-        for byte in bytes {
-            crc ^= UInt32(byte)
-            for _ in 0..<8 { crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320 : crc >> 1 }
-        }
-        return crc ^ 0xFFFFFFFF
-    }
-
     /// Splices an extra chunk before IEND, so tests can prove aux handling on a
     /// source the ImageIO fixtures do not build. Rewrites the file in place.
     static func appendPNGChunk(_ url: URL, type: String, payload: [UInt8]) throws {
         var bytes = [UInt8](try Data(contentsOf: url))
-        let typeBytes = Array(type.utf8)
-        try require(typeBytes.count == 4, "PNG chunk type must be 4 ASCII bytes")
         // IEND is the final 12 bytes: zero length, "IEND", CRC.
         try require(bytes.count >= 12 && Array(bytes[(bytes.count - 8)..<(bytes.count - 4)]) == Array("IEND".utf8),
                     "PNG fixture missing its trailing IEND")
-        var chunk: [UInt8] = []
-        let length = UInt32(payload.count)
-        chunk += [UInt8((length >> 24) & 0xFF), UInt8((length >> 16) & 0xFF), UInt8((length >> 8) & 0xFF), UInt8(length & 0xFF)]
-        chunk += typeBytes
-        chunk += payload
-        let crc = pngCRC32(typeBytes + payload)
-        chunk += [UInt8((crc >> 24) & 0xFF), UInt8((crc >> 16) & 0xFF), UInt8((crc >> 8) & 0xFF), UInt8(crc & 0xFF)]
+        guard let chunk = MetadataWriter.pngChunkBytes(type: type, payload: Data(payload)) else {
+            throw NSError(domain: "Fixtures", code: 4, userInfo: [NSLocalizedDescriptionKey: "Bad test chunk type"])
+        }
         bytes.insert(contentsOf: chunk, at: bytes.count - 12)
         try Data(bytes).write(to: url)
+    }
+
+    /// Reads the XMP packet text of a PNG file, or nil when it has no
+    /// uncompressed XMP-carrier iTXt chunk.
+    static func xmpPacketString(_ url: URL) throws -> String? {
+        guard let chunks = MetadataWriter.pngChunks(try Data(contentsOf: url)) else { return nil }
+        let prefix = Array("XML:com.adobe.xmp\0".utf8)
+        for payload in chunks["iTXt"] ?? [] {
+            let bytes = [UInt8](payload)
+            if bytes.count > prefix.count + 4, Array(bytes.prefix(prefix.count)) == prefix,
+               bytes[prefix.count] == 0, bytes[prefix.count + 1] == 0 {
+                var index = prefix.count + 2
+                while index < bytes.count, bytes[index] != 0 { index += 1 } // language tag
+                index += 1
+                while index < bytes.count, bytes[index] != 0 { index += 1 } // translated keyword
+                index += 1
+                guard index <= bytes.count else { return nil }
+                return String(bytes: bytes[index...], encoding: .utf8)
+            }
+        }
+        return nil
     }
 
     /// Renders an image file to raw RGBA bytes so tests can prove re-encoding
@@ -260,6 +265,16 @@ struct MetadataWriterTests {
             let tiff = props?[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
             try require(tiff?[kCGImagePropertyTIFFDateTime] == nil, "TIFF DateTime survived removal in \(ext)")
             try require(props?[kCGImagePropertyGPSDictionary] == nil, "GPS dictionary survived removal in \(ext)")
+            if ext == "png" {
+                // M15b XMP correction: the carrier is either gone (nothing
+                // survived) or holds a corrected packet. It must never carry
+                // the removed values - stale XMP is the M17 bug.
+                if let packet = try xmpPacketString(photo) {
+                    try require(!packet.contains("2001-02-03") && !packet.contains("2001:02:03"),
+                                "Removed date survived in png XMP packet")
+                    try require(!packet.contains("GPSLatitude"), "Removed GPS survived in png XMP packet")
+                }
+            }
         }
         // Preservation through the PNG/TIFF removal rewrite: orientation, DPI
         // and color profile must survive; date/GPS must not. When an artifact
@@ -393,6 +408,75 @@ struct MetadataWriterTests {
         try require(MetadataWriter.droppedUntouchedTags(source: tagSource, output: noGps,
             removeDate: true, removeLocation: false) == ["GPS.Latitude"],
                     "Dropped GPS tag not reported when location removal was not requested")
+
+        // XMP transform + ImageIO serialization: requested removals are gone
+        // from the packet, untouched tags survive. Uses registered prefixes so
+        // SetValueWithPath creates the tags.
+        let planMetadata = CGImageMetadataCreateMutable()
+        try require(CGImageMetadataSetValueWithPath(planMetadata, nil, "photoshop:DateCreated" as CFString, "2001-02-03T04:05:06" as CFString), "Fixture DateCreated write failed")
+        try require(CGImageMetadataSetValueWithPath(planMetadata, nil, "exif:GPSLatitude" as CFString, 40.4 as CFNumber), "Fixture GPS write failed")
+        try require(CGImageMetadataSetValueWithPath(planMetadata, nil, "tiff:Model" as CFString, "TestCamera" as CFString), "Fixture Model write failed")
+        try require(MetadataWriter.applyMetadataPlan(planMetadata, date: nil, removeDate: true,
+            latitude: nil, longitude: nil, removeLocation: true), "Metadata plan failed")
+        guard let packetData = CGImageMetadataCreateXMPData(planMetadata, nil),
+              let packetText = String(data: packetData as Data, encoding: .utf8) else {
+            throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "XMP serialization failed"])
+        }
+        try require(!packetText.contains("DateCreated") && !packetText.contains("GPSLatitude"),
+                    "Removed tags survived XMP serialization")
+        try require(packetText.contains("TestCamera"), "Untouched tag lost in XMP serialization")
+
+        // The preservation invariant itself: the round-tripped graph must
+        // provably keep every untouched source property, or the write refuses.
+        func makeGraph(_ model: String?, date: Bool, gps: Bool) -> CGMutableImageMetadata {
+            let g = CGImageMetadataCreateMutable()
+            if date { _ = CGImageMetadataSetValueWithPath(g, nil, "photoshop:DateCreated" as CFString, "2001-02-03T04:05:06" as CFString) }
+            if gps { _ = CGImageMetadataSetValueWithPath(g, nil, "exif:GPSLatitude" as CFString, 40.4 as CFNumber) }
+            if let model { _ = CGImageMetadataSetValueWithPath(g, nil, "tiff:Model" as CFString, model as CFString) }
+            return g
+        }
+        let invariantSource = makeGraph("TestCamera", date: true, gps: true)
+        // Good result: date/GPS removed, Model intact.
+        try require(MetadataWriter.xmpPlanViolations(source: invariantSource,
+            result: makeGraph("TestCamera", date: false, gps: false),
+            date: nil, removeDate: true, latitude: nil, longitude: nil, removeLocation: true).isEmpty,
+                    "Invariant rejected a correct removal")
+        // Lost untouched tag.
+        try require(MetadataWriter.xmpPlanViolations(source: invariantSource,
+            result: makeGraph(nil, date: false, gps: false),
+            date: nil, removeDate: true, latitude: nil, longitude: nil, removeLocation: true) == ["lost tiff:Model"],
+                    "Invariant missed a lost untouched tag")
+        // Altered untouched value.
+        try require(MetadataWriter.xmpPlanViolations(source: invariantSource,
+            result: makeGraph("OtherCamera", date: false, gps: false),
+            date: nil, removeDate: true, latitude: nil, longitude: nil, removeLocation: true) == ["altered tiff:Model"],
+                    "Invariant missed an altered untouched tag")
+        // Stale removal target, anywhere in the result.
+        let stale = MetadataWriter.xmpPlanViolations(source: invariantSource,
+            result: makeGraph("TestCamera", date: true, gps: false),
+            date: nil, removeDate: true, latitude: nil, longitude: nil, removeLocation: true)
+        try require(stale == ["stale removal target at photoshop:DateCreated"],
+                    "Invariant missed a surviving removal target, got \(stale)")
+        // Planned sets verified by value: date set must carry the new value.
+        let setSource = makeGraph("TestCamera", date: false, gps: false)
+        let withSet = CGImageMetadataCreateMutable()
+        _ = CGImageMetadataSetValueWithPath(withSet, nil, "tiff:Model" as CFString, "TestCamera" as CFString)
+        try require(MetadataWriter.applyMetadataPlan(withSet, date: Date(timeIntervalSince1970: 1_700_000_000),
+            removeDate: false, latitude: nil, longitude: nil, removeLocation: false), "Set plan failed")
+        let when = Date(timeIntervalSince1970: 1_700_000_000)
+        try require(MetadataWriter.xmpPlanViolations(source: setSource, result: withSet,
+            date: when, removeDate: false, latitude: nil, longitude: nil, removeLocation: false).isEmpty,
+                    "Invariant rejected a correct set")
+        let wrongSet = CGImageMetadataCreateMutable()
+        _ = CGImageMetadataSetValueWithPath(wrongSet, nil, "tiff:Model" as CFString, "TestCamera" as CFString)
+        _ = CGImageMetadataSetValueWithPath(wrongSet, nil, "photoshop:DateCreated" as CFString, "1999-01-01T00:00:00" as CFString)
+        _ = CGImageMetadataSetValueWithPath(wrongSet, nil, "xmp:CreateDate" as CFString, "1999-01-01T00:00:00" as CFString)
+        _ = CGImageMetadataSetValueWithPath(wrongSet, nil, "exif:DateTimeOriginal" as CFString, "1999-01-01T00:00:00" as CFString)
+        _ = CGImageMetadataSetValueWithPath(wrongSet, nil, "exif:DateTimeDigitized" as CFString, "1999-01-01T00:00:00" as CFString)
+        _ = CGImageMetadataSetValueWithPath(wrongSet, nil, "tiff:DateTime" as CFString, "1999-01-01T00:00:00" as CFString)
+        let wrongViolations = MetadataWriter.xmpPlanViolations(source: setSource, result: wrongSet,
+            date: when, removeDate: false, latitude: nil, longitude: nil, removeLocation: false)
+        try require(!wrongViolations.isEmpty, "Invariant accepted a wrong set value")
 
         let multi = root.appendingPathComponent("multipage.tiff")
         try fixture(at: multi, type: "public.tiff" as CFString, frames: 2)
