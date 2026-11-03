@@ -129,6 +129,36 @@ struct MetadataWriterTests {
         return (orientation, tiffOrientation, dpiWidth, dpiHeight, colorSpaceName, gpsPresent, datePresent)
     }
 
+    /// PNG CRC (zlib CRC-32 over chunk type + payload), used to splice test chunks.
+    static func pngCRC32(_ bytes: [UInt8]) -> UInt32 {
+        var crc: UInt32 = 0xFFFFFFFF
+        for byte in bytes {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 { crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320 : crc >> 1 }
+        }
+        return crc ^ 0xFFFFFFFF
+    }
+
+    /// Splices an extra chunk before IEND, so tests can prove aux handling on a
+    /// source the ImageIO fixtures do not build. Rewrites the file in place.
+    static func appendPNGChunk(_ url: URL, type: String, payload: [UInt8]) throws {
+        var bytes = [UInt8](try Data(contentsOf: url))
+        let typeBytes = Array(type.utf8)
+        try require(typeBytes.count == 4, "PNG chunk type must be 4 ASCII bytes")
+        // IEND is the final 12 bytes: zero length, "IEND", CRC.
+        try require(bytes.count >= 12 && Array(bytes[(bytes.count - 8)..<(bytes.count - 4)]) == Array("IEND".utf8),
+                    "PNG fixture missing its trailing IEND")
+        var chunk: [UInt8] = []
+        let length = UInt32(payload.count)
+        chunk += [UInt8((length >> 24) & 0xFF), UInt8((length >> 16) & 0xFF), UInt8((length >> 8) & 0xFF), UInt8(length & 0xFF)]
+        chunk += typeBytes
+        chunk += payload
+        let crc = pngCRC32(typeBytes + payload)
+        chunk += [UInt8((crc >> 24) & 0xFF), UInt8((crc >> 16) & 0xFF), UInt8((crc >> 8) & 0xFF), UInt8(crc & 0xFF)]
+        bytes.insert(contentsOf: chunk, at: bytes.count - 12)
+        try Data(bytes).write(to: url)
+    }
+
     /// Renders an image file to raw RGBA bytes so tests can prove re-encoding
     /// never changed a single pixel, independent of container bytes.
     static func pixelData(_ url: URL) throws -> [UInt8]? {
@@ -277,6 +307,92 @@ struct MetadataWriterTests {
             try require(after.colorSpaceName == before.colorSpaceName, "Color profile lost in \(ext) removal rewrite (before \(String(describing: before.colorSpaceName)) after \(String(describing: after.colorSpaceName)))")
             try require(!after.gpsPresent && !after.datePresent, "Removal incomplete in \(ext) preservation pass")
         }
+
+        // M15b: a PNG carrying aux chunks outside the writer's carried set
+        // (oFFs position data, private chunks) must never lose them silently.
+        // The removal rewrite cannot reproduce them, so the write is refused
+        // and the original stays untouched; a copy attempt leaves no output.
+        // The set path may transport the chunk untouched - accept transport or
+        // refusal, never silent loss.
+        for (chunkType, payload) in [("oFFs", [UInt8]([0, 0, 0, 1, 0, 0, 0, 2, 1])), ("prVt", [UInt8]([9, 8, 7]))] {
+            let aux = root.appendingPathComponent("aux-\(chunkType).png")
+            try fixtureWithMetadata(at: aux, type: "public.png" as CFString)
+            try appendPNGChunk(aux, type: chunkType, payload: payload)
+            try require(MetadataWriter.pngChunkTypeCounts(try Data(contentsOf: aux))?[chunkType] == 1,
+                        "Spliced \(chunkType) missing before the write")
+            let auxBytes = try Data(contentsOf: aux)
+            try require(!update(aux, aux, remove: true),
+                        "PNG removal must refuse an uncarried \(chunkType) chunk")
+            try require(try Data(contentsOf: aux) == auxBytes,
+                        "Refused PNG removal changed the original")
+            let auxCopy = root.appendingPathComponent("aux-\(chunkType)-copy.png")
+            try require(!update(aux, auxCopy, remove: true),
+                        "PNG removal copy must refuse an uncarried \(chunkType) chunk")
+            try require(!fm.fileExists(atPath: auxCopy.path),
+                        "Refused PNG removal left a copy")
+            let setSucceeded = update(aux, aux)
+            if setSucceeded {
+                try require(MetadataWriter.pngChunkTypeCounts(try Data(contentsOf: aux))?[chunkType] == 1,
+                            "PNG set silently dropped \(chunkType)")
+            } else {
+                try require(try Data(contentsOf: aux) == auxBytes,
+                            "Refused PNG set changed the original")
+            }
+        }
+        // The guard parses strictly: truncated PNG bytes are not a valid inventory.
+        try require(MetadataWriter.pngChunkTypeCounts(Data([1, 2, 3])) == nil,
+                    "Chunk parser accepted non-PNG bytes")
+        // Loss comparison is payload-exact per occurrence: a chunk that
+        // survives with altered bytes counts as lost, and partial
+        // disappearance of repeated chunks is caught.
+        let altA = root.appendingPathComponent("alt-a.png")
+        try fixture(at: altA, type: "public.png" as CFString)
+        try appendPNGChunk(altA, type: "prVt", payload: [9, 8, 7])
+        try appendPNGChunk(altA, type: "prVt", payload: [1, 1, 1])
+        let altABytes = try Data(contentsOf: altA)
+        let altB = root.appendingPathComponent("alt-b.png")
+        try fm.copyItem(at: altA, to: altB)
+        try require(MetadataWriter.pngLostAuxChunks(source: altABytes, output: try Data(contentsOf: altB)) == [],
+                    "Identical files reported aux loss")
+        try fixture(at: altB, type: "public.png" as CFString)
+        try appendPNGChunk(altB, type: "prVt", payload: [9, 8, 8])
+        try require(MetadataWriter.pngLostAuxChunks(source: altABytes, output: try Data(contentsOf: altB)) == ["prVt x2"],
+                    "Altered or missing payloads not reported as lost")
+        try appendPNGChunk(altB, type: "prVt", payload: [9, 8, 7])
+        try require(MetadataWriter.pngLostAuxChunks(source: altABytes, output: try Data(contentsOf: altB)) == ["prVt x1"],
+                    "Partial disappearance of repeated chunks not reported")
+
+        // M15b, tag level: a rebuild-from-properties removal must not drop
+        // source tags beyond the requested removals (presence, not values).
+        let tagSource: [CFString: Any] = [
+            kCGImagePropertyExifDictionary: [kCGImagePropertyExifDateTimeOriginal: "2001:02:03 04:05:06",
+                                             kCGImagePropertyExifMakerNote: [1, 2]],
+            kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFDateTime: "2001:02:03 04:05:06",
+                                             kCGImagePropertyTIFFOrientation: 6],
+            kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 40.4],
+        ]
+        try require(MetadataWriter.droppedUntouchedTags(source: tagSource, output: tagSource,
+            removeDate: true, removeLocation: true).isEmpty,
+                    "Requested removals reported as dropped untouched tags")
+        let stripped: [CFString: Any] = [kCGImagePropertyExifDictionary: [CFString: Any](), kCGImagePropertyTIFFDictionary: [CFString: Any]()]
+        try require(MetadataWriter.droppedUntouchedTags(source: tagSource, output: stripped,
+            removeDate: true, removeLocation: true) == ["EXIF.MakerNote"],
+                    "Dropped untouched tags not reported")
+        // Orientation is exempt from the tag check (ImageIO may relocate it
+        // between dictionaries); the preservation test asserts its value.
+        var noOrientation = tagSource
+        var tiffOnly = tagSource[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+        tiffOnly.removeValue(forKey: kCGImagePropertyTIFFDateTime)
+        tiffOnly.removeValue(forKey: kCGImagePropertyTIFFOrientation)
+        noOrientation[kCGImagePropertyTIFFDictionary] = tiffOnly
+        try require(MetadataWriter.droppedUntouchedTags(source: tagSource, output: noOrientation,
+            removeDate: true, removeLocation: true).isEmpty,
+                    "Relocated orientation must not refuse the write")
+        var noGps = tagSource
+        noGps.removeValue(forKey: kCGImagePropertyGPSDictionary)
+        try require(MetadataWriter.droppedUntouchedTags(source: tagSource, output: noGps,
+            removeDate: true, removeLocation: false) == ["GPS.Latitude"],
+                    "Dropped GPS tag not reported when location removal was not requested")
 
         let multi = root.appendingPathComponent("multipage.tiff")
         try fixture(at: multi, type: "public.tiff" as CFString, frames: 2)

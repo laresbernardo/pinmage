@@ -262,12 +262,15 @@ struct MetadataWriter {
         if isRemoval && (utiString == "public.png" || utiString == "public.tiff") {
             // Decode + re-encode removal for losslessly re-encodable formats:
             // the output carries only the metadata in this dictionary.
-            // CAVEAT (unverified): raw pixels are expected to round-trip
-            // exactly for PNG/TIFF (the suite asserts raw RGBA equality), but
-            // source data not represented in the properties dictionary -
-            // custom ancillary chunks, embedded profiles handled outside the
-            // image's color space, or auxiliary images - is not carried over.
-            // Multi-frame sources are refused at this function's entry (M15).
+            // Raw pixels are expected to round-trip exactly for PNG/TIFF (the
+            // suite asserts raw RGBA equality). Source data not represented in
+            // the properties dictionary - custom ancillary chunks, embedded
+            // profiles handled outside the image's color space, or auxiliary
+            // images - is not carried over; for PNG the aux-chunk guard below
+            // refuses the write instead of silently dropping it (M15b, per the
+            // reject-what-we-cannot-verify rule). TIFF aux tags beyond the
+            // properties dictionaries remain a documented gap. Multi-frame
+            // sources are refused at this function's entry (M15).
             guard let decodedImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
                 FileHandle.standardError.write(Data("Failed to decode image for removal write\n".utf8))
                 return false
@@ -314,6 +317,26 @@ struct MetadataWriter {
                 FileHandle.standardError.write(Data("Failed to finalize image destination\n".utf8))
                 return false
             }
+            if utiString == "public.png" {
+                guard pngAuxChunksPreserved(source: sourceData, destinationURL: destinationURL, operation: "removal") else { return false }
+            }
+            // M15b, tag level: this branch rebuilds metadata from the
+            // properties dictionary, so every source tag the dictionary
+            // surfaces must come back unless the request removed it. Applies
+            // to PNG and TIFF; tags the dictionary never surfaces remain a
+            // documented gap. Values are not compared: ImageIO may normalize
+            // representations without losing information.
+            guard let sourceProps = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
+                  let stagedSource = CGImageSourceCreateWithURL(destinationURL as CFURL, nil),
+                  let stagedProps = CGImageSourceCopyPropertiesAtIndex(stagedSource, 0, nil) as? [CFString: Any] else {
+                FileHandle.standardError.write(Data("Refusing \(utiString) removal: could not read back staged metadata\n".utf8))
+                return false
+            }
+            let droppedTags = droppedUntouchedTags(source: sourceProps, output: stagedProps, removeDate: removeDate, removeLocation: removeLocation)
+            guard droppedTags.isEmpty else {
+                FileHandle.standardError.write(Data("Refusing \(utiString) removal: output would drop untouched tags [\(droppedTags.joined(separator: ", "))]\n".utf8))
+                return false
+            }
             return true
         }
         
@@ -352,6 +375,11 @@ struct MetadataWriter {
             guard CGImageDestinationFinalize(imageDestination) else {
                 FileHandle.standardError.write(Data("Failed to finalize image destination\n".utf8))
                 return false
+            }
+            if utiString == "public.png" {
+                // AddImageFromSource may transport every chunk untouched; the
+                // guard accepts transport and refuses only a real loss.
+                guard pngAuxChunksPreserved(source: sourceData, destinationURL: destinationURL, operation: "set") else { return false }
             }
             return true
         }
@@ -477,6 +505,126 @@ struct MetadataWriter {
         return true
     }
     
+    // MARK: - M15b PNG aux-chunk fidelity
+
+    /// Chunk types a PNG write is proven to reproduce, so their absence from a
+    /// re-encoded output is not by itself a loss:
+    /// - IHDR/PLTE/IDAT/IEND are structural. Decoding consumes PLTE and tRNS:
+    ///   the re-encode writes truecolor pixels and carries transparency in the
+    ///   alpha channel, which the pixel-equality tests prove.
+    /// - eXIf round-trips through the EXIF/TIFF/GPS property dictionaries
+    ///   (asserted by the write and removal tests; on the rebuild path its
+    ///   contents are guarded tag by tag, below); pHYs as DPIWidth/DPIHeight
+    ///   and iCCP/sRGB/gAMA/cHRM as the decoded color space (both asserted by
+    ///   the preservation test).
+    /// Every other chunk type carries information the writer cannot represent.
+    /// The guard requires each occurrence of such a chunk to survive with its
+    /// exact payload; anything less is a silent loss or alteration.
+    private static let pngCarriedChunkTypes: Set<String> = [
+        "IHDR", "PLTE", "IDAT", "IEND", "tRNS",
+        "eXIf", "pHYs", "iCCP", "sRGB", "gAMA", "cHRM",
+    ]
+
+    /// Every chunk's payload in a PNG byte stream, grouped by type in file
+    /// order, or nil when the bytes are not a well-formed PNG (bad signature,
+    /// truncated chunk or a missing IEND). Payloads, not just types: a
+    /// transported chunk with altered bytes is a loss, and repeated chunks
+    /// (sPLT, private chunks) each carry data.
+    static func pngChunks(_ data: Data) -> [String: [Data]]? {
+        let signature: [UInt8] = [137, 80, 78, 71, 13, 10, 26, 10]
+        let bytes = [UInt8](data)
+        guard bytes.count >= signature.count + 12,
+              Array(bytes.prefix(signature.count)) == signature else { return nil }
+        var chunks: [String: [Data]] = [:]
+        var offset = signature.count
+        while offset + 12 <= bytes.count {
+            let length = Int(bytes[offset]) << 24 | Int(bytes[offset + 1]) << 16
+                | Int(bytes[offset + 2]) << 8 | Int(bytes[offset + 3])
+            let typeEnd = offset + 8
+            let dataEnd = typeEnd + length
+            guard let type = String(bytes: bytes[(offset + 4)..<typeEnd], encoding: .ascii),
+                  dataEnd + 4 <= bytes.count else { return nil }
+            chunks[type, default: []].append(Data(bytes[typeEnd..<dataEnd]))
+            offset = dataEnd + 4
+            if type == "IEND" { return chunks }
+        }
+        return nil
+    }
+
+    /// Occurrence count per chunk type, derived from pngChunks.
+    static func pngChunkTypeCounts(_ data: Data) -> [String: Int]? {
+        pngChunks(data)?.mapValues { $0.count }
+    }
+
+    /// Aux-chunk loss between two PNG byte streams: each source occurrence of
+    /// a chunk the writer is not proven to reproduce needs an identical
+    /// payload in the output (multiset match; order between chunks is not
+    /// significant). Returns the lost or altered chunks as "type xN", empty
+    /// when everything survived, nil when either stream is not a PNG.
+    static func pngLostAuxChunks(source: Data, output: Data) -> [String]? {
+        guard let sourceChunks = pngChunks(source),
+              let outputChunks = pngChunks(output) else { return nil }
+        var lost: [String] = []
+        for (type, payloads) in sourceChunks where !pngCarriedChunkTypes.contains(type) {
+            var unmatched = payloads
+            for candidate in outputChunks[type] ?? [] {
+                if let index = unmatched.firstIndex(of: candidate) { unmatched.remove(at: index) }
+            }
+            if !unmatched.isEmpty { lost.append("\(type) x\(unmatched.count)") }
+        }
+        return lost.sorted()
+    }
+
+    /// M15b: a PNG write must never silently drop or alter an aux chunk. Fails
+    /// closed on any loss or on bytes that do not parse as PNG.
+    private static func pngAuxChunksPreserved(source sourceData: Data, destinationURL: URL, operation: String) -> Bool {
+        guard let outputData = try? Data(contentsOf: destinationURL),
+              let lost = pngLostAuxChunks(source: sourceData, output: outputData) else {
+            FileHandle.standardError.write(Data("Refusing PNG \(operation): source or staged output did not parse as PNG\n".utf8))
+            return false
+        }
+        guard lost.isEmpty else {
+            FileHandle.standardError.write(Data("Refusing PNG \(operation): output would lose or alter chunks [\(lost.joined(separator: ", "))]\n".utf8))
+            return false
+        }
+        return true
+    }
+
+    /// Tags a rebuild-from-properties write must not lose. Returns the missing
+    /// tag names; empty means every source tag the properties dictionary
+    /// surfaced is present in the output, apart from the removals the request
+    /// asked for. Presence only: ImageIO may normalize a tag's value
+    /// representation without losing its information. Tags the properties
+    /// dictionary never surfaces are outside this check and remain a
+    /// documented gap.
+    static func droppedUntouchedTags(source: [CFString: Any], output: [CFString: Any], removeDate: Bool, removeLocation: Bool) -> [String] {
+        var dropped: [String] = []
+        let sourceExif = source[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+        let outputExif = output[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+        let dateKeys: [CFString] = [kCGImagePropertyExifDateTimeOriginal, kCGImagePropertyExifDateTimeDigitized]
+        for key in sourceExif.keys where !(removeDate && dateKeys.contains(key)) {
+            if outputExif[key] == nil { dropped.append("EXIF.\(key)") }
+        }
+        let sourceTiff = source[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+        let outputTiff = output[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+        // Orientation is exempt: ImageIO may relocate it between the TIFF
+        // dictionary and the format-native location (PNG evidence: the
+        // TIFF-dict orientation lands in the eXIf chunk). Its value is
+        // asserted separately through the top-level kCGImagePropertyOrientation
+        // by the preservation test.
+        for key in sourceTiff.keys where !(removeDate && key == kCGImagePropertyTIFFDateTime)
+            && key != kCGImagePropertyTIFFOrientation {
+            if outputTiff[key] == nil { dropped.append("TIFF.\(key)") }
+        }
+        if !removeLocation, let sourceGps = source[kCGImagePropertyGPSDictionary] as? [CFString: Any] {
+            let outputGps = output[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
+            for key in sourceGps.keys where outputGps[key] == nil {
+                dropped.append("GPS.\(key)")
+            }
+        }
+        return dropped.sorted()
+    }
+
     static func readExistingCoordinates(from url: URL) -> (latitude: Double, longitude: Double)? {
         guard let sourceData = try? Data(contentsOf: url),
               let imageSource = CGImageSourceCreateWithData(sourceData as CFData, nil),
