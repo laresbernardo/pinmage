@@ -1390,7 +1390,7 @@ struct MetadataWriterTests {
                 return nil
             }
             let dst = root.appendingPathComponent(name)
-            try FileManager.default.copyItem(at: src, at: dst)
+            try FileManager.default.copyItem(at: src, to: dst)
             return dst
         }
         let date = Date(timeIntervalSince1970: 981173106)
@@ -1472,7 +1472,7 @@ struct MetadataWriterTests {
         let fdir = URL(fileURLWithPath: dir)
         func staged(_ name: String, as local: String? = nil) throws -> URL {
             let dst = root.appendingPathComponent(local ?? name)
-            try FileManager.default.copyItem(at: fdir.appendingPathComponent(name), at: dst)
+            try FileManager.default.copyItem(at: fdir.appendingPathComponent(name), to: dst)
             return dst
         }
         let date = Date(timeIntervalSince1970: 981173106)
@@ -2246,14 +2246,14 @@ struct MetadataWriterTests {
         }
 
         // TIFF: a stale XMP carrier (tag 700) is corrected or dropped, never carried stale.
-        let tiff700 = root.appendingPathComponent("aux-tiff-700.tiff")
-        try fixtureWithMetadata(at: tiff700, type: "public.tiff" as CFString)
+        let tiff700URL = root.appendingPathComponent("aux-tiff-700.tiff")
+        try fixtureWithMetadata(at: tiff700URL, type: "public.tiff" as CFString)
         let stalePacket = Data("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmp:CreateDate=\"2001-02-03T04:05:06\"/></rdf:RDF></x:xmpmeta>".utf8)
-        let with700 = spliceTIFFTag(try Data(contentsOf: tiff700), tag: 700, type: 7, payload: stalePacket)
+        let with700 = spliceTIFFTag(try Data(contentsOf: tiff700URL), tag: 700, type: 7, payload: stalePacket)
         try require(with700 != nil, "TIFF tag-700 splice failed")
-        try with700!.write(to: tiff700)
-        try require(update(tiff700, tiff700, remove: true), "TIFF removal with a stale XMP carrier must correct or drop it, not refuse")
-        let tiff700Bytes = try Data(contentsOf: tiff700)
+        try with700!.write(to: tiff700URL)
+        try require(update(tiff700URL, tiff700URL, remove: true), "TIFF removal with a stale XMP carrier must correct or drop it, not refuse")
+        let tiff700Bytes = try Data(contentsOf: tiff700URL)
         try require(tiff700Bytes.range(of: Data("2001:02:03".utf8)) == nil, "Stale XMP date (native form) survived TIFF removal")
         try require(tiff700Bytes.range(of: Data("2001-02-03".utf8)) == nil, "Stale XMP date (packet form) survived TIFF removal")
 
