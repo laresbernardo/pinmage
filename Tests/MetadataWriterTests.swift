@@ -685,6 +685,317 @@ struct MetadataWriterTests {
         return out
     }
 
+
+    // MARK: - M15 cycle-3 deep probe (diagnostic-only)
+
+    /// Full-hex dump of the JPEG segments whose contents decide guard shape.
+    static func jpegSegmentDump(_ data: Data) -> [String] {
+        guard let inv = jpegInventory(data) else { return ["unparseable"] }
+        return inv.map { name, len, payload in
+            if ["FFE0", "FFE1", "FFE2", "FFED", "FFEE", "FFDB"].contains(name) {
+                return "\(name) len=\(len) hex=\(hexPrefix(payload, 320))"
+            }
+            return "\(name) len=\(len)"
+        }
+    }
+
+    static func buildIRB(_ resources: [(Int, Data)]) -> Data {
+        var out = Data("Photoshop 3.0\0".utf8)
+        for (rid, payload) in resources {
+            out.append(contentsOf: [0x38, 0x42, 0x49, 0x4D])
+            out.append(UInt8((rid >> 8) & 0xFF)); out.append(UInt8(rid & 0xFF))
+            out.append(0); out.append(0)
+            out.append(UInt8((payload.count >> 24) & 0xFF)); out.append(UInt8((payload.count >> 16) & 0xFF))
+            out.append(UInt8((payload.count >> 8) & 0xFF)); out.append(UInt8(payload.count & 0xFF))
+            out.append(payload)
+            if payload.count % 2 != 0 { out.append(0) }
+        }
+        return out
+    }
+
+    static func irbResources(_ payload: Data) -> [(Int, Data)]? {
+        let prefix = Data("Photoshop 3.0\0".utf8)
+        guard payload.count > prefix.count, payload.prefix(prefix.count) == prefix else { return nil }
+        let b = [UInt8](payload)
+        var pos = prefix.count
+        var out: [(Int, Data)] = []
+        while pos + 12 <= b.count {
+            guard b[pos] == 0x38 && b[pos + 1] == 0x42 && b[pos + 2] == 0x49 && b[pos + 3] == 0x4D else { return out }
+            let rid = Int(b[pos + 4]) << 8 | Int(b[pos + 5])
+            var p = pos + 6
+            let nameLen = Int(b[p]); p += 1 + nameLen
+            if (1 + nameLen) % 2 != 0 { p += 1 }
+            guard p + 4 <= b.count else { return nil }
+            let size = Int(b[p]) << 24 | Int(b[p + 1]) << 16 | Int(b[p + 2]) << 8 | Int(b[p + 3])
+            p += 4
+            guard p + size <= b.count else { return nil }
+            out.append((rid, Data(b[p..<(p + size)])))
+            p += size + (size % 2)
+            pos = p
+        }
+        return out
+    }
+
+    /// Replaces the first genuine Photoshop IRB (APP13) with the given
+    /// payload; inserts one before SOS when the file has none.
+    static func jpegReplacingAPP13(_ data: Data, payload: Data) -> Data? {
+        let b = [UInt8](data)
+        guard b.count >= 4, b[0] == 0xFF, b[1] == 0xD8 else { return nil }
+        var out = Data([0xFF, 0xD8])
+        var pos = 2
+        var replaced = false
+        while pos + 1 < b.count {
+            guard b[pos] == 0xFF else { return nil }
+            let segStart = pos
+            while pos < b.count && b[pos] == 0xFF { pos += 1 }
+            guard pos < b.count else { return nil }
+            let m = b[pos]; pos += 1
+            if m == 0xD8 || m == 0xD9 || m == 0x01 || (m >= 0xD0 && m <= 0xD7) {
+                out.append(Data(b[segStart..<pos]))
+                if m == 0xD9 { return out }
+                continue
+            }
+            guard pos + 2 <= b.count else { return nil }
+            let len = Int(b[pos]) << 8 | Int(b[pos + 1])
+            guard len >= 2, pos + len <= b.count else { return nil }
+            if m == 0xDA {
+                if !replaced {
+                    let plen = payload.count + 2
+                    out.append(contentsOf: [0xFF, 0xED, UInt8((plen >> 8) & 0xFF), UInt8(plen & 0xFF)])
+                    out.append(payload)
+                }
+                out.append(Data(b[segStart...]))
+                return out
+            }
+            if m == 0xED && !replaced,
+               Data(b[(pos + 2)..<(pos + len)]).prefix(14) == Data("Photoshop 3.0\0".utf8) {
+                let plen = payload.count + 2
+                out.append(contentsOf: [0xFF, 0xED, UInt8((plen >> 8) & 0xFF), UInt8(plen & 0xFF)])
+                out.append(payload)
+                replaced = true
+            } else {
+                out.append(Data(b[segStart..<(pos + len)]))
+            }
+            pos += len
+        }
+        return nil
+    }
+
+    /// Inserts raw marker segments before SOS.
+    static func spliceJPEGMarkers(_ data: Data, _ inserts: [(UInt8, Data)]) -> Data? {
+        let b = [UInt8](data)
+        guard b.count >= 4, b[0] == 0xFF, b[1] == 0xD8 else { return nil }
+        var pos = 2
+        var sosAt: Int?
+        while pos + 1 < b.count {
+            guard b[pos] == 0xFF else { return nil }
+            while pos < b.count && b[pos] == 0xFF { pos += 1 }
+            guard pos < b.count else { return nil }
+            let m = b[pos]; pos += 1
+            if m == 0xDA { sosAt = pos - 2; break }
+            if m == 0xD8 || m == 0xD9 || m == 0x01 || (m >= 0xD0 && m <= 0xD7) { continue }
+            guard pos + 2 <= b.count else { return nil }
+            let len = Int(b[pos]) << 8 | Int(b[pos + 1])
+            guard len >= 2, pos + len <= b.count else { return nil }
+            pos += len
+        }
+        guard let cut = sosAt else { return nil }
+        var out = Data(b[0..<cut])
+        for (marker, payload) in inserts {
+            let len = payload.count + 2
+            out.append(contentsOf: [0xFF, marker, UInt8((len >> 8) & 0xFF), UInt8(len & 0xFF)])
+            out.append(payload)
+        }
+        out.append(Data(b[cut...]))
+        return out
+    }
+
+    /// Splices a tag into the JPEG Exif APP1 payload (TIFF structure after
+    /// the 6-byte Exif header).
+    static func spliceJPEGExifTag(_ data: Data, tag: Int, payload: Data) -> Data? {
+        let b = [UInt8](data)
+        guard b.count >= 4, b[0] == 0xFF, b[1] == 0xD8 else { return nil }
+        var out = Data()
+        var pos = 0
+        var done = false
+        while pos + 1 < b.count {
+            guard b[pos] == 0xFF else { return nil }
+            let segStart = pos
+            while pos < b.count && b[pos] == 0xFF { pos += 1 }
+            guard pos < b.count else { return nil }
+            let m = b[pos]; pos += 1
+            if m == 0xD8 || m == 0xD9 || m == 0x01 || (m >= 0xD0 && m <= 0xD7) {
+                out.append(Data(b[segStart..<pos]))
+                if m == 0xD9 { return done ? out : nil }
+                continue
+            }
+            guard pos + 2 <= b.count else { return nil }
+            let len = Int(b[pos]) << 8 | Int(b[pos + 1])
+            guard len >= 2, pos + len <= b.count else { return nil }
+            if m == 0xDA {
+                out.append(Data(b[segStart...]))
+                return done ? out : nil
+            }
+            let payloadStart = pos + 2
+            let segPayload = Data(b[payloadStart..<(pos + len)])
+            if m == 0xE1 && !done && segPayload.prefix(6) == Data("Exif\0\0".utf8),
+               let spliced = spliceTIFFTag(segPayload.dropFirst(6), tag: tag, type: 7, payload: payload) {
+                var newPayload = Data("Exif\0\0".utf8)
+                newPayload.append(spliced)
+                let newLen = newPayload.count + 2
+                out.append(contentsOf: [0xFF, 0xE1, UInt8((newLen >> 8) & 0xFF), UInt8(newLen & 0xFF)])
+                out.append(newPayload)
+                done = true
+            } else {
+                out.append(Data(b[segStart..<(pos + len)]))
+            }
+            pos += len
+        }
+        return nil
+    }
+
+    /// The XMP packet carried in the JPEG XMP APP1 segment, if any.
+    static func jpegXMPPacket(_ data: Data) -> String? {
+        guard let inv = jpegInventory(data) else { return nil }
+        let xmpPrefix = Data("http://ns.adobe.com/xap/1.0/\0".utf8)
+        for (name, _, payload) in inv where name == "FFE1" {
+            if payload.prefix(xmpPrefix.count) == xmpPrefix {
+                return String(data: payload.dropFirst(xmpPrefix.count), encoding: .utf8)
+            }
+        }
+        return nil
+    }
+
+    /// Per-resource IRB survival report against the source IRB.
+    static func irbReport(source: Data, output: Data) -> [String] {
+        guard let inv = jpegInventory(output) else { return ["output unparseable"] }
+        let srcResources = irbResources(source) ?? []
+        var lines: [String] = ["source IRB resources: \(srcResources.map { String(format: "0x%04X len=%d hex=%@", $0.0, $0.1.count, hexPrefix($0.1, 40)) }.joined(separator: " | "))"]
+        let outAPP13s = inv.filter { $0.0 == "FFED" }
+        for (i, seg) in outAPP13s.enumerated() {
+            if let res = irbResources(seg.2) {
+                lines.append("output IRB[\(i)] resources: \(res.map { String(format: "0x%04X len=%d hex=%@", $0.0, $0.1.count, hexPrefix($0.1, 40)) }.joined(separator: " | "))")
+            } else {
+                lines.append("output FFED[\(i)] non-IRB len=\(seg.1) hex=\(hexPrefix(seg.2, 40))")
+            }
+        }
+        let outPayloads = outAPP13s.flatMap { irbResources($0.2) ?? [] }.map { $0.1 }
+        for (rid, payload) in srcResources {
+            lines.append("resource \(String(format: "0x%04X", rid)): \(outPayloads.contains(payload) ? "SURVIVED-EXACT" : "MISSING-OR-ALTERED")")
+        }
+        return lines
+    }
+
+    /// Cycle-3 evidence for the remaining unverified surfaces: IRB resource
+    /// survival on both JPEG routes, APP2/APP14 survival and ordering, Exif
+    /// MakerNote/private-tag survival in JPEG APP1, TIFF ICC carry vs
+    /// regenerate, XMP unrelated-field round-trip, DQT/entropy on the plain
+    /// set, HEIC meta children on removal. Diagnostic only: never throws.
+    static func runDeepProbe(root: URL) {
+        let outDir = ProcessInfo.processInfo.environment["PRESERVATION_ARTIFACT_DIR"].map { URL(fileURLWithPath: $0) }
+        let probeRoot = root.appendingPathComponent("deepprobe", isDirectory: true)
+        try? FileManager.default.createDirectory(at: probeRoot, withIntermediateDirectories: true)
+        var report: [String] = []
+
+        // A/B: plain set + removal with full payload dumps.
+        for (name, remove) in [("set", false), ("remove", true)] {
+            let f = probeRoot.appendingPathComponent("deep-plain-\(name).jpg")
+            try? fixtureWithMetadata(at: f, type: "public.jpeg" as CFString)
+            if let before = try? Data(contentsOf: f) {
+                let ok = update(f, f, remove: remove)
+                let after = (try? Data(contentsOf: f)) ?? Data()
+                report.append("== jpg-plain-\(name): ok=\(ok) entropyEqual=\(jpegEntropyData(before) == jpegEntropyData(after))")
+                report.append("BEFORE: " + jpegSegmentDump(before).joined(separator: " ; "))
+                report.append("AFTER: " + jpegSegmentDump(after).joined(separator: " ; "))
+                if let x = jpegXMPPacket(before) { report.append("XMP-BEFORE: \(x)") }
+                if let x = jpegXMPPacket(after) { report.append("XMP-AFTER: \(x)") }
+            }
+        }
+
+        // C: crafted genuine-format IRB through both routes.
+        let resolution = Data([0x00, 0x48, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x48, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01])
+        let irb = buildIRB([
+            (0x03ED, resolution),
+            (0x0404, Data("IPTC-DATED-2001-02-03".utf8)),
+            (0x0424, Data("<x:xmpmeta>STALE-XMP-IN-IRB-2001</x:xmpmeta>".utf8)),
+            (0x0FA0, Data("DEEPPROBE-UNKNOWNRES".utf8)),
+        ])
+        for (name, remove) in [("set", false), ("remove", true)] {
+            let f = probeRoot.appendingPathComponent("deep-irb-\(name).jpg")
+            try? fixtureWithMetadata(at: f, type: "public.jpeg" as CFString)
+            if let data = try? Data(contentsOf: f), let spliced = jpegReplacingAPP13(data, payload: irb) {
+                try? spliced.write(to: f)
+                let ok = update(f, f, remove: remove)
+                let after = (try? Data(contentsOf: f)) ?? Data()
+                report.append("== jpg-irb-\(name): ok=\(ok)")
+                report.append(contentsOf: irbReport(source: irb, output: after))
+            }
+        }
+
+        // D: APP2 (fake ICC) + APP14 (Adobe transform) through both routes.
+        let app14 = Data("Adobe".utf8) + Data([0x00, 0x65, 0x00, 0x00, 0x00, 0x00, 0x01])
+        for (name, remove) in [("set", false), ("remove", true)] {
+            let f = probeRoot.appendingPathComponent("deep-app2-\(name).jpg")
+            try? fixtureWithMetadata(at: f, type: "public.jpeg" as CFString)
+            if let data = try? Data(contentsOf: f),
+               let spliced = spliceJPEGMarkers(data, [(0xE2, Data("DEEPPROBE-FAKEICC".utf8)), (0xEE, app14)]) {
+                try? spliced.write(to: f)
+                let ok = update(f, f, remove: remove)
+                let after = (try? Data(contentsOf: f)) ?? Data()
+                report.append("== jpg-app2app14-\(name): ok=\(ok)")
+                report.append("AFTER: " + jpegSegmentDump(after).joined(separator: " ; "))
+            }
+        }
+
+        // E: MakerNote + private tag inside JPEG Exif APP1, removal route.
+        let fExif = probeRoot.appendingPathComponent("deep-exif-remove.jpg")
+        try? fixtureWithMetadata(at: fExif, type: "public.jpeg" as CFString)
+        if let data = try? Data(contentsOf: fExif),
+           let spliced1 = spliceJPEGExifTag(data, tag: 37500, payload: Data("DEEPPROBE-MAKERNOTE".utf8)),
+           let spliced2 = spliceJPEGExifTag(spliced1, tag: 65000, payload: Data("DEEPPROBE-EXIFPRIV".utf8)) {
+            try? spliced2.write(to: fExif)
+            let beforeInv = jpegInventory(spliced2)?.filter { $0.0 == "FFE1" }.first.map { hexPrefix($0.2, 400) } ?? "none"
+            let ok = update(fExif, fExif, remove: true)
+            let after = (try? Data(contentsOf: fExif)) ?? Data()
+            let afterInv = jpegInventory(after)?.filter { $0.0 == "FFE1" }.first.map { hexPrefix($0.2, 400) } ?? "none"
+            report.append("== jpg-exif-remove: ok=\(ok)")
+            report.append("EXIF-BEFORE: \(beforeInv)")
+            report.append("EXIF-AFTER: \(afterInv)")
+        }
+
+        // F: TIFF ICC carry vs regenerate on both paths.
+        for (name, remove) in [("set", false), ("remove", true)] {
+            let f = probeRoot.appendingPathComponent("deep-icc-\(name).tiff")
+            try? fixtureWithMetadata(at: f, type: "public.tiff" as CFString)
+            if let data = try? Data(contentsOf: f),
+               let spliced = spliceTIFFTag(data, tag: 34675, payload: Data("DEEPPROBE-FAKE-ICC-PROFILE".utf8)) {
+                try? spliced.write(to: f)
+                let beforeLines = tiffInventory(spliced)?.filter { $0.contains("tag=34675") } ?? ["no-34675"]
+                let ok = update(f, f, remove: remove)
+                let after = (try? Data(contentsOf: f)) ?? Data()
+                let afterLines = tiffInventory(after)?.filter { $0.contains("tag=34675") } ?? ["no-34675"]
+                report.append("== tiff-icc-\(name): ok=\(ok)")
+                report.append("ICC-BEFORE: \(beforeLines.joined(separator: " | "))")
+                report.append("ICC-AFTER: \(afterLines.joined(separator: " | "))")
+            }
+        }
+
+        // G: HEIC meta children on the removal path.
+        let fHeic = probeRoot.appendingPathComponent("deep-remove.heic")
+        try? fixtureWithMetadata(at: fHeic, type: "public.heic" as CFString)
+        if let before = try? Data(contentsOf: fHeic) {
+            report.append("== heic-remove-before: " + heicMetaChildHex(before).joined(separator: " | "))
+            let ok = update(fHeic, fHeic, remove: true)
+            let after = (try? Data(contentsOf: fHeic)) ?? Data()
+            report.append("== heic-remove: ok=\(ok)")
+            report.append("== heic-remove-after: " + heicMetaChildHex(after).joined(separator: " | "))
+        }
+
+        if let outDir = outDir {
+            try? report.joined(separator: "\n").write(to: outDir.appendingPathComponent("deepprobe-report.txt"), atomically: true, encoding: .utf8)
+        }
+    }
+
     // MARK: - M15 cycle-2 route probe (diagnostic-only)
 
     /// Settles two open questions with byte evidence: (1) whether the JPEG
@@ -870,6 +1181,7 @@ struct MetadataWriterTests {
         runDiagnosticsProbe(root: root)
         runAuxTransportProbe(root: root)
         runRouteProbe(root: root)
+        runDeepProbe(root: root)
         let source = root.appendingPathComponent("original.png")
         try fixture(at: source, type: "public.png" as CFString)
         let original = try Data(contentsOf: source)
