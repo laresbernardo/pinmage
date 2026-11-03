@@ -1199,6 +1199,88 @@ struct MetadataWriterTests {
         }
     }
 
+    // MARK: - Added-Exif TIFF builder (verification boundary tests)
+
+    static func be16(_ v: Int) -> [UInt8] { [UInt8((v >> 8) & 0xFF), UInt8(v & 0xFF)] }
+    static func be32(_ v: Int) -> [UInt8] { be16((v >> 16) & 0xFFFF) + be16(v & 0xFFFF) }
+
+    /// Assembles a minimal big-endian Exif TIFF matching the shape ImageIO
+    /// emitted in run 41716235473: IFD0 (+ optional ExifIFD/GPSIFD reached
+    /// through pointer tags 34665/34853), out-of-line values appended after
+    /// all directories. `extraIFD0` injects raw extra entries (tag, type,
+    /// payload) for unknown/duplicate tag cases.
+    static func addedExifTIFF(
+        orientation: Int? = 1,
+        dateTime: String? = nil,
+        tileWidth: Int? = nil,
+        tileHeight: Int? = nil,
+        exifIFDDates: [String]? = nil,
+        gpsLatRef: String? = nil,
+        gpsLat: [(Int, Int)]? = nil,
+        gpsLonRef: String? = nil,
+        gpsLon: [(Int, Int)]? = nil,
+        extraIFD0: [(Int, Int, [UInt8])] = []
+    ) -> Data {
+        func ascii(_ str: String) -> [UInt8] { Array(str.utf8) + [0] }
+        func rationals(_ rs: [(Int, Int)]) -> [UInt8] {
+            var out: [UInt8] = []
+            for (n, d) in rs { out += be32(n) + be32(d) }
+            return out
+        }
+        func typeSize(_ t: Int) -> Int {
+            switch t { case 3: return 2; case 4: return 4; case 5: return 8; default: return 1 }
+        }
+        var ifd0: [(Int, Int, [UInt8])] = []
+        if let orientation = orientation { ifd0.append((274, 3, be16(orientation))) }
+        if let dateTime = dateTime { ifd0.append((306, 2, ascii(dateTime))) }
+        if let tileWidth = tileWidth { ifd0.append((322, 4, be32(tileWidth))) }
+        if let tileHeight = tileHeight { ifd0.append((323, 4, be32(tileHeight))) }
+        var exifIFD: [(Int, Int, [UInt8])] = []
+        if let exifIFDDates = exifIFDDates {
+            for (i, d) in exifIFDDates.enumerated() { exifIFD.append((36867 + i, 2, ascii(d))) }
+        }
+        var gpsIFD: [(Int, Int, [UInt8])] = []
+        if let gpsLatRef = gpsLatRef { gpsIFD.append((1, 2, ascii(gpsLatRef))) }
+        if let gpsLat = gpsLat { gpsIFD.append((2, 5, rationals(gpsLat))) }
+        if let gpsLonRef = gpsLonRef { gpsIFD.append((3, 2, ascii(gpsLonRef))) }
+        if let gpsLon = gpsLon { gpsIFD.append((4, 5, rationals(gpsLon))) }
+        if !exifIFD.isEmpty { ifd0.append((34665, 4, [0, 0, 0, 0])) }
+        if !gpsIFD.isEmpty { ifd0.append((34853, 4, [0, 0, 0, 0])) }
+        ifd0 += extraIFD0
+        func ifdSize(_ entries: [(Int, Int, [UInt8])]) -> Int { 2 + 12 * entries.count + 4 }
+        let ifd0Offset = 8
+        let exifOffset = ifd0Offset + ifdSize(ifd0)
+        let gpsOffset = exifOffset + (exifIFD.isEmpty ? 0 : ifdSize(exifIFD))
+        var dataOffset = gpsOffset + (gpsIFD.isEmpty ? 0 : ifdSize(gpsIFD))
+        ifd0 = ifd0.map { entry in
+            if entry.0 == 34665, entry.1 == 4 { return (34665, 4, be32(exifOffset)) }
+            if entry.0 == 34853, entry.1 == 4 { return (34853, 4, be32(gpsOffset)) }
+            return entry
+        }
+        var dataArea: [UInt8] = []
+        func renderIFD(_ entries: [(Int, Int, [UInt8])]) -> [UInt8] {
+            var out = be16(entries.count)
+            for (tag, type, payload) in entries.sorted(by: { $0.0 < $1.0 }) {
+                out += be16(tag) + be16(type) + be32(payload.count / typeSize(type))
+                if payload.count <= 4 {
+                    out += payload + Array(repeating: 0, count: 4 - payload.count)
+                } else {
+                    out += be32(dataOffset)
+                    dataArea += payload
+                    dataOffset += payload.count
+                }
+            }
+            out += be32(0)
+            return out
+        }
+        var tiff: [UInt8] = [0x4D, 0x4D, 0x00, 0x2A] + be32(ifd0Offset)
+        tiff += renderIFD(ifd0)
+        if !exifIFD.isEmpty { tiff += renderIFD(exifIFD) }
+        if !gpsIFD.isEmpty { tiff += renderIFD(gpsIFD) }
+        tiff += dataArea
+        return Data(tiff)
+    }
+
     static func main() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("PinmageTests-\(UUID().uuidString)")
@@ -1244,6 +1326,102 @@ struct MetadataWriterTests {
         try require(!MetadataWriter.metadataTagValuesEqual(path: "exif:GPSLatitude", "40,24N" as CFString, (-40.4) as CFNumber), "GPS sign mismatch must not compare equal")
         try require(!MetadataWriter.metadataTagValuesEqual(path: "exif:GPSLatitude", "40,24N" as CFString, "40,24S" as CFString), "GPS hemisphere mismatch must not compare equal")
         try require(!MetadataWriter.metadataTagValuesEqual(path: "exif:GPSLatitude", "40,24N" as CFString, "41,24N" as CFString), "GPS different coordinate must not compare equal")
+
+        // Added-Exif carrier verification: the real observed payload shape
+        // (run 41716235473, non-canonical seconds == 60) plus boundary,
+        // normalization and refusal cases. TIFF GPS rationals are compared
+        // numerically with explicit bounds; the XMP string parser above
+        // stays strictly canonical - an intentional asymmetry.
+        let exifIntentDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let exifFmt = DateFormatter()
+        exifFmt.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        let exifDateString = exifFmt.string(from: exifIntentDate)
+        func exifVerdict(_ tiff: Data, date: Date? = nil, removeDate: Bool = false,
+                         lat: Double? = nil, lon: Double? = nil, removeLocation: Bool = false,
+                         width: Int? = 8, height: Int? = 6, sourceOrientation: Int? = nil) -> Bool {
+            MetadataWriter.verifyAddedExifCarrier(
+                tiff: tiff, date: date, removeDate: removeDate,
+                latitude: lat, longitude: lon, removeLocation: removeLocation,
+                pixelWidth: width, pixelHeight: height, sourceOrientation: sourceOrientation).ok
+        }
+        let realExifPayload = addedExifTIFF(
+            orientation: 1, dateTime: exifDateString, tileWidth: 8, tileHeight: 6,
+            exifIFDDates: [exifDateString, exifDateString],
+            gpsLatRef: "N", gpsLat: [(40, 1), (23, 1), (6000, 100)],
+            gpsLonRef: "W", gpsLon: [(3, 1), (42, 1), (0, 1)])
+        check(exifVerdict(realExifPayload, date: exifIntentDate, lat: 40.4, lon: -3.7),
+              "added Exif: real observed payload (seconds == 60) must verify")
+        let canonicalExifPayload = addedExifTIFF(
+            orientation: 1, dateTime: exifDateString, tileWidth: 8, tileHeight: 6,
+            exifIFDDates: [exifDateString, exifDateString],
+            gpsLatRef: "N", gpsLat: [(40, 1), (24, 1), (0, 1)],
+            gpsLonRef: "W", gpsLon: [(3, 1), (42, 1), (0, 1)])
+        check(exifVerdict(canonicalExifPayload, date: exifIntentDate, lat: 40.4, lon: -3.7),
+              "added Exif: canonical 40/24/0 must normalize to the same degrees")
+        check(!exifVerdict(addedExifTIFF(orientation: 1, dateTime: exifDateString, tileWidth: 8, tileHeight: 6,
+                                         exifIFDDates: [exifDateString, exifDateString],
+                                         gpsLatRef: "N", gpsLat: [(40, 1), (23, 1), (60, 0)],
+                                         gpsLonRef: "W", gpsLon: [(3, 1), (42, 1), (0, 1)]),
+                           date: exifIntentDate, lat: 40.4, lon: -3.7),
+              "added Exif: zero rational denominator must refuse")
+        check(!exifVerdict(addedExifTIFF(orientation: 1, dateTime: exifDateString, tileWidth: 8, tileHeight: 6,
+                                         exifIFDDates: [exifDateString, exifDateString],
+                                         gpsLatRef: "N", gpsLat: [(4_294_967_295, 1), (0, 1), (0, 1)],
+                                         gpsLonRef: "W", gpsLon: [(3, 1), (42, 1), (0, 1)]),
+                           date: exifIntentDate, lat: 40.4, lon: -3.7),
+              "added Exif: overflowing rational numerator must refuse")
+        check(!exifVerdict(addedExifTIFF(orientation: 1, dateTime: exifDateString, tileWidth: 8, tileHeight: 6,
+                                         exifIFDDates: [exifDateString, exifDateString],
+                                         gpsLatRef: "N", gpsLat: [(91, 1), (0, 1), (0, 1)],
+                                         gpsLonRef: "W", gpsLon: [(3, 1), (42, 1), (0, 1)]),
+                           date: exifIntentDate, lat: 91, lon: -3.7),
+              "added Exif: out-of-axis latitude must refuse")
+        check(!exifVerdict(addedExifTIFF(orientation: 1, dateTime: exifDateString, tileWidth: 8, tileHeight: 6,
+                                         exifIFDDates: [exifDateString, exifDateString],
+                                         gpsLatRef: "S", gpsLat: [(40, 1), (24, 1), (0, 1)],
+                                         gpsLonRef: "W", gpsLon: [(3, 1), (42, 1), (0, 1)]),
+                           date: exifIntentDate, lat: 40.4, lon: -3.7),
+              "added Exif: hemisphere mismatch must refuse")
+        check(!exifVerdict(addedExifTIFF(orientation: 1, dateTime: exifDateString, tileWidth: 8, tileHeight: 6,
+                                         exifIFDDates: [exifDateString, exifDateString],
+                                         gpsLatRef: "N", gpsLat: [(40, 1), (25, 1), (0, 1)],
+                                         gpsLonRef: "W", gpsLon: [(3, 1), (42, 1), (0, 1)]),
+                           date: exifIntentDate, lat: 40.4, lon: -3.7),
+              "added Exif: different coordinate must refuse")
+        // Orientation preservation: a source orientation must round-trip,
+        // never be silently reset to 1 or dropped; with no source
+        // orientation only the synthesized default 1 admits.
+        let orientedPayload = addedExifTIFF(orientation: 6, tileWidth: 8, tileHeight: 6)
+        check(exifVerdict(orientedPayload, sourceOrientation: 6),
+              "added Exif: source Orientation 6 preserved must verify")
+        check(!exifVerdict(orientedPayload, sourceOrientation: 3),
+              "added Exif: Orientation reset relative to source must refuse")
+        check(!exifVerdict(addedExifTIFF(orientation: nil, tileWidth: 8, tileHeight: 6), sourceOrientation: 6),
+              "added Exif: dropped source Orientation must refuse")
+        check(!exifVerdict(addedExifTIFF(orientation: 2, tileWidth: 8, tileHeight: 6)),
+              "added Exif: synthesized Orientation != 1 without source orientation must refuse")
+        check(!exifVerdict(addedExifTIFF(orientation: 1, dateTime: "2020:01:01 00:00:00", tileWidth: 8, tileHeight: 6,
+                                         exifIFDDates: [exifDateString, exifDateString],
+                                         gpsLatRef: "N", gpsLat: [(40, 1), (24, 1), (0, 1)],
+                                         gpsLonRef: "W", gpsLon: [(3, 1), (42, 1), (0, 1)]),
+                           date: exifIntentDate, lat: 40.4, lon: -3.7),
+              "added Exif: wrong date value must refuse")
+        check(!exifVerdict(realExifPayload, removeDate: true, removeLocation: true),
+              "added Exif: intent metadata present under removal must refuse")
+        check(exifVerdict(addedExifTIFF(orientation: 1, tileWidth: 8, tileHeight: 6)),
+              "added Exif: synthesized-only payload with empty intent must verify")
+        check(!exifVerdict(addedExifTIFF(orientation: 1, dateTime: exifDateString, tileWidth: 8, tileHeight: 6,
+                                         exifIFDDates: [exifDateString, exifDateString]),
+                           date: exifIntentDate, lat: 40.4, lon: -3.7),
+              "added Exif: missing GPS under location intent must refuse")
+        check(!exifVerdict(addedExifTIFF(orientation: 1, tileWidth: 9, tileHeight: 6)),
+              "added Exif: TileWidth != decoded width must refuse")
+        check(!exifVerdict(addedExifTIFF(orientation: 1, tileWidth: 8, tileHeight: 6,
+                                         extraIFD0: [(500, 3, be16(1))])),
+              "added Exif: unknown tag must refuse")
+        check(!exifVerdict(addedExifTIFF(orientation: 1, tileWidth: 8, tileHeight: 6,
+                                         extraIFD0: [(274, 3, be16(1))])),
+              "added Exif: duplicate tag must refuse")
         let source = root.appendingPathComponent("original.png")
         try fixture(at: source, type: "public.png" as CFString)
         let original = try Data(contentsOf: source)

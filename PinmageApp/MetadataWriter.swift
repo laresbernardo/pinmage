@@ -1762,6 +1762,156 @@ struct MetadataWriter {
         return out
     }
 
+    /// Verifies an Exif item ImageIO added to a HEIC output when the source
+    /// carried no Exif item (observed real payload, run 41716235473: IFD0
+    /// {Orientation, DateTime, TileWidth, TileLength, sub-IFD pointers},
+    /// ExifIFD {DateTimeOriginal, DateTimeDigitized}, GPSIFD
+    /// {refs + rational coordinates}). Admission: every tag must be an intent
+    /// tag holding the requested value or a positively verified synthesized
+    /// value; intent-set date/location tags must all be present; a source
+    /// orientation must never be dropped or silently reset (the tag must
+    /// equal it - the hardcoded expectation of 1 applies only when the
+    /// source declares no orientation); unknown or duplicate tags, unknown
+    /// or chained IFDs refuse.
+    ///
+    /// GPS rationals are compared NUMERICALLY (composed degrees at 1e-9)
+    /// with explicit bounds - zero denominators refuse, composed magnitudes
+    /// must be finite and within their axis range (90/180) - because ImageIO
+    /// emits non-canonical DMS (observed 40/1 23/1 6000/100, seconds == 60,
+    /// which normalizes to exactly 40.4). This is deliberately looser in
+    /// form, never in value, than the XMP string parser, which stays
+    /// strictly canonical; the TIFF path accepts only values composing to
+    /// the exact requested degrees.
+    static func verifyAddedExifCarrier(
+        tiff: Data,
+        date: Date?, removeDate: Bool,
+        latitude: Double?, longitude: Double?, removeLocation: Bool,
+        pixelWidth: Int?, pixelHeight: Int?, sourceOrientation: Int?
+    ) -> (ok: Bool, detail: String) {
+        guard let parsed = tiffIFDs(tiff) else {
+            return (false, "not a parseable TIFF structure")
+        }
+        typealias TIFFEntry = (tag: Int, type: Int, count: Int, value: Data?, raw: Data)
+        let little = parsed.little
+        func exifASCII(_ entry: TIFFEntry) -> String? {
+            guard entry.type == 2, let v = entry.value else { return nil }
+            var bytes = [UInt8](v)
+            while bytes.last == 0 { bytes.removeLast() }
+            return String(bytes: bytes, encoding: .utf8)
+        }
+        func exifUInt(_ entry: TIFFEntry) -> Int? {
+            guard let v = entry.value else { return nil }
+            let vb = [UInt8](v)
+            if entry.type == 3, vb.count == 2 {
+                return little ? Int(vb[0]) | Int(vb[1]) << 8 : Int(vb[0]) << 8 | Int(vb[1])
+            }
+            if entry.type == 4, vb.count == 4 {
+                return little ? Int(vb[0]) | Int(vb[1]) << 8 | Int(vb[2]) << 16 | Int(vb[3]) << 24
+                              : Int(vb[0]) << 24 | Int(vb[1]) << 16 | Int(vb[2]) << 8 | Int(vb[3])
+            }
+            return nil
+        }
+        func exifRationalDegrees(_ entry: TIFFEntry) -> Double? {
+            guard entry.type == 5, entry.count >= 1, entry.count <= 3,
+                  let v = entry.value, v.count == 8 * entry.count else { return nil }
+            let vb = [UInt8](v)
+            func u32(_ o: Int) -> Int {
+                little ? Int(vb[o]) | Int(vb[o + 1]) << 8 | Int(vb[o + 2]) << 16 | Int(vb[o + 3]) << 24
+                       : Int(vb[o]) << 24 | Int(vb[o + 1]) << 16 | Int(vb[o + 2]) << 8 | Int(vb[o + 3])
+            }
+            var result = 0.0
+            var divisor = 1.0
+            for i in 0..<entry.count {
+                let denominator = u32(8 * i + 4)
+                guard denominator != 0 else { return nil }
+                result += Double(u32(8 * i)) / Double(denominator) / divisor
+                divisor *= 60
+            }
+            guard result.isFinite else { return nil }
+            return result
+        }
+        let wantDate = date != nil && !removeDate
+        let wantLocation = latitude != nil && longitude != nil && !removeLocation
+        let tiffDateFormatter = DateFormatter()
+        tiffDateFormatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        let expectedDate = wantDate ? date.map { tiffDateFormatter.string(from: $0) } : nil
+        let expectedOrientation = sourceOrientation ?? 1
+        var addedTags: Set<String> = []
+        for (label, entries, next) in parsed.ifds {
+            guard next == 0 else {
+                return (false, "chained IFD at \(label)")
+            }
+            for entry in entries {
+                let key = "\(label)#\(entry.tag)"
+                guard addedTags.insert(key).inserted else {
+                    return (false, "duplicate tag \(key)")
+                }
+                switch (label, entry.tag) {
+                case ("IFD0", 274):
+                    guard exifUInt(entry) == expectedOrientation else {
+                        return (false, "Orientation \(exifUInt(entry) ?? -1) != \(expectedOrientation)")
+                    }
+                case ("IFD0", 306), ("IFD0>34665", 36867), ("IFD0>34665", 36868):
+                    guard let expected = expectedDate, exifASCII(entry) == expected else {
+                        return (false, "date tag \(entry.tag) does not carry the intent date")
+                    }
+                case ("IFD0", 322):
+                    guard let width = pixelWidth, exifUInt(entry) == width else {
+                        return (false, "TileWidth is not the decoded width")
+                    }
+                case ("IFD0", 323):
+                    guard let height = pixelHeight, exifUInt(entry) == height else {
+                        return (false, "TileLength is not the decoded height")
+                    }
+                case ("IFD0", 34665), ("IFD0", 34853):
+                    continue // sub-IFD contents are checked by label
+                case ("IFD0>34853", 1):
+                    guard let lat = latitude, wantLocation, abs(lat) <= 90,
+                          exifASCII(entry) == (lat >= 0 ? "N" : "S") else {
+                        return (false, "GPSLatitudeRef does not match the intent")
+                    }
+                case ("IFD0>34853", 2):
+                    guard let lat = latitude, wantLocation, abs(lat) <= 90,
+                          let degrees = exifRationalDegrees(entry),
+                          degrees <= 90, abs(degrees - abs(lat)) < 1e-9 else {
+                        return (false, "GPSLatitude does not match the intent")
+                    }
+                case ("IFD0>34853", 3):
+                    guard let lon = longitude, wantLocation, abs(lon) <= 180,
+                          exifASCII(entry) == (lon >= 0 ? "E" : "W") else {
+                        return (false, "GPSLongitudeRef does not match the intent")
+                    }
+                case ("IFD0>34853", 4):
+                    guard let lon = longitude, wantLocation, abs(lon) <= 180,
+                          let degrees = exifRationalDegrees(entry),
+                          degrees <= 180, abs(degrees - abs(lon)) < 1e-9 else {
+                        return (false, "GPSLongitude does not match the intent")
+                    }
+                default:
+                    return (false, "unverified tag \(entry.tag) at \(label)")
+                }
+            }
+        }
+        if wantDate {
+            for key in ["IFD0#306", "IFD0>34665#36867", "IFD0>34665#36868"] {
+                guard addedTags.contains(key) else {
+                    return (false, "missing intent date tag \(key)")
+                }
+            }
+        }
+        if wantLocation {
+            for key in ["IFD0>34853#1", "IFD0>34853#2", "IFD0>34853#3", "IFD0>34853#4"] {
+                guard addedTags.contains(key) else {
+                    return (false, "missing intent location tag \(key)")
+                }
+            }
+        }
+        if let orientation = sourceOrientation, !addedTags.contains("IFD0#274") {
+            return (false, "source Orientation \(orientation) was dropped")
+        }
+        return (true, "")
+    }
+
     private static func heicWriteVerified(sourceData: Data, destinationURL: URL, imageSource: CGImageSource,
                                           date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?,
                                           removeLocation: Bool, operation: String) -> Bool {
@@ -2093,14 +2243,10 @@ struct MetadataWriter {
             }
         }
         // An added Exif item carries the intent in TIFF form (observed run
-        // 41716235473: IFD0 Orientation=1, DateTime, TileWidth/TileLength
-        // equal the decoded dimensions; ExifIFD DateTimeOriginal/
-        // DateTimeDigitized; GPSIFD ref+rational coordinates). Admission
-        // rule: every tag must be an intent tag holding the requested value
-        // or a positively verified synthesized value; when the plan sets a
-        // date or location every corresponding tag must be present; unknown
-        // tags, unknown or chained IFDs, and intent values that do not
-        // match all refuse.
+        // 41716235473: IFD0 Orientation/DateTime/TileWidth/TileLength,
+        // ExifIFD date tags, GPSIFD ref+rational coordinates). The shared
+        // verifier checks every tag against the intent or a positively
+        // verified synthesized value; anything unverified refuses.
         if let addedExifID = addedExifID {
             guard let exifPayload = stagedPayloads[addedExifID], exifPayload.count >= 4 else {
                 return refuse("added Exif item shape changed")
@@ -2110,117 +2256,16 @@ struct MetadataWriter {
             guard 4 + exifTiffOffset <= eb.count else {
                 return refuse("added Exif item offset out of range")
             }
-            guard let addedTIFF = tiffIFDs(Data(eb[(4 + exifTiffOffset)...])) else {
-                return refuse("added Exif item did not parse as TIFF")
-            }
-            typealias TIFFEntry = (tag: Int, type: Int, count: Int, value: Data?, raw: Data)
-            let little = addedTIFF.little
-            func exifASCII(_ entry: TIFFEntry) -> String? {
-                guard entry.type == 2, let v = entry.value else { return nil }
-                var bytes = [UInt8](v)
-                while bytes.last == 0 { bytes.removeLast() }
-                return String(bytes: bytes, encoding: .utf8)
-            }
-            func exifUInt(_ entry: TIFFEntry) -> Int? {
-                guard let v = entry.value else { return nil }
-                let vb = [UInt8](v)
-                if entry.type == 3, vb.count == 2 {
-                    return little ? Int(vb[0]) | Int(vb[1]) << 8 : Int(vb[0]) << 8 | Int(vb[1])
-                }
-                if entry.type == 4, vb.count == 4 {
-                    return little ? Int(vb[0]) | Int(vb[1]) << 8 | Int(vb[2]) << 16 | Int(vb[3]) << 24
-                                  : Int(vb[0]) << 24 | Int(vb[1]) << 16 | Int(vb[2]) << 8 | Int(vb[3])
-                }
-                return nil
-            }
-            func exifRationalDegrees(_ entry: TIFFEntry) -> Double? {
-                guard entry.type == 5, entry.count >= 1, entry.count <= 3,
-                      let v = entry.value, v.count == 8 * entry.count else { return nil }
-                let vb = [UInt8](v)
-                func u32(_ o: Int) -> Int {
-                    little ? Int(vb[o]) | Int(vb[o + 1]) << 8 | Int(vb[o + 2]) << 16 | Int(vb[o + 3]) << 24
-                           : Int(vb[o]) << 24 | Int(vb[o + 1]) << 16 | Int(vb[o + 2]) << 8 | Int(vb[o + 3])
-                }
-                var result = 0.0
-                var divisor = 1.0
-                for i in 0..<entry.count {
-                    let denominator = u32(8 * i + 4)
-                    guard denominator != 0 else { return nil }
-                    result += Double(u32(8 * i)) / Double(denominator) / divisor
-                    divisor *= 60
-                }
-                return result
-            }
-            let wantDate = date != nil && !removeDate
-            let wantLocation = latitude != nil && longitude != nil && !removeLocation
-            let tiffDateFormatter = DateFormatter()
-            tiffDateFormatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-            let expectedDate = wantDate ? date.map { tiffDateFormatter.string(from: $0) } : nil
-            let stagedProps = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
-            let pixelWidth = (stagedProps?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue
-            let pixelHeight = (stagedProps?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue
-            var addedTags: Set<String> = []
-            for (label, entries, next) in addedTIFF.ifds {
-                guard next == 0 else {
-                    return refuse("added Exif item chains IFDs")
-                }
-                for entry in entries {
-                    addedTags.insert("\(label)#\(entry.tag)")
-                    switch (label, entry.tag) {
-                    case ("IFD0", 274):
-                        guard exifUInt(entry) == 1 else {
-                            return refuse("added Exif Orientation is not 1")
-                        }
-                    case ("IFD0", 306), ("IFD0>34665", 36867), ("IFD0>34665", 36868):
-                        guard let expected = expectedDate, exifASCII(entry) == expected else {
-                            return refuse("added Exif date tag \(entry.tag) does not carry the intent date")
-                        }
-                    case ("IFD0", 322):
-                        guard let width = pixelWidth, exifUInt(entry) == width else {
-                            return refuse("added Exif TileWidth is not the image width")
-                        }
-                    case ("IFD0", 323):
-                        guard let height = pixelHeight, exifUInt(entry) == height else {
-                            return refuse("added Exif TileLength is not the image height")
-                        }
-                    case ("IFD0", 34665), ("IFD0", 34853):
-                        continue // sub-IFD contents are checked by label
-                    case ("IFD0>34853", 1):
-                        guard let lat = latitude, wantLocation,
-                              exifASCII(entry) == (lat >= 0 ? "N" : "S") else {
-                            return refuse("added Exif GPSLatitudeRef does not match the intent")
-                        }
-                    case ("IFD0>34853", 2):
-                        guard let lat = latitude, wantLocation,
-                              let degrees = exifRationalDegrees(entry), abs(degrees - abs(lat)) < 1e-9 else {
-                            return refuse("added Exif GPSLatitude does not match the intent")
-                        }
-                    case ("IFD0>34853", 3):
-                        guard let lon = longitude, wantLocation,
-                              exifASCII(entry) == (lon >= 0 ? "E" : "W") else {
-                            return refuse("added Exif GPSLongitudeRef does not match the intent")
-                        }
-                    case ("IFD0>34853", 4):
-                        guard let lon = longitude, wantLocation,
-                              let degrees = exifRationalDegrees(entry), abs(degrees - abs(lon)) < 1e-9 else {
-                            return refuse("added Exif GPSLongitude does not match the intent")
-                        }
-                    default:
-                        return refuse("added Exif item carries unverified tag \(entry.tag) at \(label)")
-                    }
-                }
-            }
-            if wantDate {
-                guard addedTags.contains("IFD0#306"), addedTags.contains("IFD0>34665#36867"),
-                      addedTags.contains("IFD0>34665#36868") else {
-                    return refuse("added Exif item misses the intent date")
-                }
-            }
-            if wantLocation {
-                guard addedTags.contains("IFD0>34853#1"), addedTags.contains("IFD0>34853#2"),
-                      addedTags.contains("IFD0>34853#3"), addedTags.contains("IFD0>34853#4") else {
-                    return refuse("added Exif item misses the intent location")
-                }
+            let sourceProps = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
+            let exifCheck = verifyAddedExifCarrier(
+                tiff: Data(eb[(4 + exifTiffOffset)...]),
+                date: date, removeDate: removeDate,
+                latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                pixelWidth: (sourceProps?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+                pixelHeight: (sourceProps?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+                sourceOrientation: (sourceProps?[kCGImagePropertyOrientation] as? NSNumber)?.intValue)
+            guard exifCheck.ok else {
+                return refuse("added Exif item not intent-verified: \(exifCheck.detail)")
             }
         }
         let mimeItemIDs = items.filter { $0.type == "mime" }.map { $0.id } + (addedMimeID.map { [$0] } ?? [])
