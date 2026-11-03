@@ -814,16 +814,18 @@ struct MetadataWriter {
             }
         }
         // XMP APP1 carriers: at most one each side; a lost carrier or
-        // duplicates refuse. ImageIO ADDS one XMP carrier when the source
-        // had none (both routes; probe evidence runs 41690332177 and
-        // 41697547199): the observed packet holds only exif:PixelXDimension
-        // and exif:PixelYDimension equal to the decoded pixels. An added
-        // carrier is admitted only when its ENTIRE parsed graph is those
-        // two tags with those values and no qualifiers - any other tag,
-        // value or qualifier refuses. verifyIntent independently proves
-        // the requested metadata before publication regardless. When the
-        // source carries XMP, the staged packet must match the
-        // plan-verified corrected packet as before.
+        // duplicates refuse. When the source carries XMP, the staged packet
+        // must match the plan-verified corrected packet. ImageIO ADDS one
+        // XMP carrier when the source had none (both routes): that packet
+        // is the destination writer's serialization of the same
+        // plan-applied graph correctedXMPacket builds, so it must be
+        // graph-equal to the verified corrected packet (run 41706940975:
+        // it carries the intent values, not just dimensions). The only
+        // tags admitted on top are ImageIO's own synthesis, each verified
+        // positively: iio:hasXMP (must be true) and the pixel-dimension
+        // pair (must equal the decoded source pixels). Anything else
+        // refuses. verifyIntent independently proves the requested
+        // metadata before publication regardless.
         guard sourceParts.xmp.count <= 1, stagedParts.xmp.count <= 1 else {
             return refuse("unsupported multiple XMP APP1 carriers")
         }
@@ -844,47 +846,40 @@ struct MetadataWriter {
                 return refuse("staged XMP packet differs from the verified packet [\(violations.joined(separator: ", "))]")
             }
         } else if stagedParts.xmp.count == 1 {
-            let added = addedXMPVerifiedDimensionOnly(stagedParts.xmp[0], xmpPrefix: xmpPrefix, imageSource: imageSource)
-            guard added.ok else {
-                return refuse("added XMP APP1 carrier failed dimension-only verification [\(added.dump)]")
+            guard let addedGraph = CGImageMetadataCreateFromXMPData(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count)) as CFData) else {
+                return refuse("added XMP APP1 carrier did not parse")
+            }
+            var expectedMap: [String: CGImageMetadataTag] = [:]
+            if let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
+                                                       latitude: latitude, longitude: longitude, removeLocation: removeLocation),
+               !expectedPacket.isEmpty,
+               let expectedGraph = CGImageMetadataCreateFromXMPData(expectedPacket as CFData) {
+                expectedMap = metadataTagMap(expectedGraph)
+                let violations = xmpPlanViolations(source: expectedGraph, result: addedGraph,
+                                                   date: nil, removeDate: false, latitude: nil, longitude: nil, removeLocation: false)
+                guard violations.isEmpty else {
+                    return refuse("added XMP APP1 carrier differs from the verified packet [\(violations.joined(separator: ", "))]")
+                }
+            }
+            guard let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
+                  let width = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+                  let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue else {
+                return refuse("source properties did not parse")
+            }
+            var extras: [String] = []
+            for (path, tag) in metadataTagMap(addedGraph) where expectedMap[path] == nil {
+                let value = CGImageMetadataTagCopyValue(tag)
+                if path == "iio:hasXMP", let b = value as? NSNumber, b.boolValue { continue }
+                if path == "iio:hasXMP", (value as? String) == "True" { continue }
+                if path == "exif:PixelXDimension", xmpNumericValue(value) == Double(width) { continue }
+                if path == "exif:PixelYDimension", xmpNumericValue(value) == Double(height) { continue }
+                extras.append("\(path)=\(String(describing: value))")
+            }
+            guard extras.isEmpty else {
+                return refuse("added XMP APP1 carrier carries unverified tags [\(extras.joined(separator: "; "))]")
             }
         }
         return true
-    }
-
-    /// Positive allowlist for an XMP carrier ImageIO adds to a JPEG that
-    /// had none: the whole parsed graph must be exactly the two
-    /// pixel-dimension tags with values equal to the decoded source
-    /// pixels. Unknown paths, qualifiers, or wrong values fail.
-    private static func addedXMPVerifiedDimensionOnly(_ packet: Data, xmpPrefix: Data, imageSource: CGImageSource) -> (ok: Bool, dump: String) {
-        guard packet.prefix(xmpPrefix.count) == xmpPrefix,
-              let graph = CGImageMetadataCreateFromXMPData(Data(packet.dropFirst(xmpPrefix.count)) as CFData),
-              let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
-              let width = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
-              let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue else {
-            return (false, "packet or source properties did not parse")
-        }
-        // Enumerate every tag for the refusal dump even after a violation.
-        // A tag with an EMPTY qualifier array (not just nil qualifiers) is
-        // acceptable - ImageIO vends either for a plain tag.
-        var ok = true
-        var seenX = false, seenY = false
-        var lines: [String] = []
-        CGImageMetadataEnumerateTagsUsingBlock(graph, nil, nil) { (path, tag) in
-            let p = path as String
-            let qualifierCount = CGImageMetadataTagCopyQualifiers(tag).map { CFArrayGetCount($0) } ?? 0
-            let raw = CGImageMetadataTagCopyValue(tag)
-            let text = (raw as? String) ?? (raw as? NSNumber)?.stringValue
-            lines.append("\(p)=\(text ?? "?") qualifiers=\(qualifierCount)")
-            let expected: Int
-            if p == "exif:PixelXDimension" { expected = width; seenX = true }
-            else if p == "exif:PixelYDimension" { expected = height; seenY = true }
-            else { ok = false; return true }
-            if qualifierCount != 0 || text != String(expected) { ok = false }
-            return true
-        }
-        if !seenX || !seenY { ok = false }
-        return (ok, lines.joined(separator: "; "))
     }
 
     /// TIFF IFD walk with resolved values: (label, entries, next offset) per
@@ -2291,6 +2286,42 @@ struct MetadataWriter {
         return expected
     }
 
+    /// Numeric value of an XMP tag whether ImageIO typed it number or
+    /// decimal string (XMP is text; typing is serializer-dependent).
+    private static func xmpNumericValue(_ v: CFTypeRef?) -> Double? {
+        guard let v = v else { return nil }
+        if let n = v as? NSNumber { return n.doubleValue }
+        if let s = v as? String { return Double(s) }
+        return nil
+    }
+
+    /// Degrees value of a GPS coordinate tag across ImageIO's observed
+    /// serializations: a number, a decimal string ("40.399999999999999"),
+    /// or the sexagesimal XMP form ("40,24N", optionally with seconds).
+    private static func gpsDegrees(_ v: CFTypeRef?) -> Double? {
+        if let d = xmpNumericValue(v) { return d }
+        guard let v = v, let s = v as? String, let ref = s.last,
+              ref == "N" || ref == "S" || ref == "E" || ref == "W" else { return nil }
+        let parts = s.dropLast().split(separator: ",")
+        guard parts.count == 2 || parts.count == 3,
+              let deg = Double(parts[0]), let min = Double(parts[1]) else { return nil }
+        var value = deg + min / 60
+        if parts.count == 3, let sec = Double(parts[2]) { value += sec / 3600 }
+        return value
+    }
+
+    /// Value equality where the tag path is known: GPS coordinates
+    /// additionally tolerate alternate serializations of the SAME
+    /// coordinate (decimal at full float precision, or sexagesimal).
+    /// Equal information, different text - not a loss.
+    private static func metadataTagValuesEqual(path: String, _ a: CFTypeRef?, _ b: CFTypeRef?) -> Bool {
+        if metadataValuesEqual(a, b) { return true }
+        let leaf = path.components(separatedBy: ":").last ?? path
+        guard leaf == "GPSLatitude" || leaf == "GPSLongitude",
+              let da = gpsDegrees(a), let db = gpsDegrees(b) else { return false }
+        return abs(da - db) < 1e-9
+    }
+
     /// CFEqual with a string-form tolerance: a number may round-trip through
     /// XMP as a string without losing information.
     private static func metadataValuesEqual(_ a: CFTypeRef?, _ b: CFTypeRef?) -> Bool {
@@ -2335,7 +2366,7 @@ struct MetadataWriter {
             }
             if let expected = plannedSets[fullPath] {
                 guard let resultTag = resultTags[fullPath],
-                      metadataValuesEqual(CGImageMetadataTagCopyValue(resultTag), expected) else {
+                      metadataTagValuesEqual(path: fullPath, CGImageMetadataTagCopyValue(resultTag), expected) else {
                     violations.append("set value missing or wrong at \(fullPath)")
                     return true
                 }
@@ -2345,7 +2376,7 @@ struct MetadataWriter {
                 violations.append("lost \(fullPath)")
                 return true
             }
-            if !metadataValuesEqual(CGImageMetadataTagCopyValue(tag), CGImageMetadataTagCopyValue(resultTag)) {
+            if !metadataTagValuesEqual(path: fullPath, CGImageMetadataTagCopyValue(tag), CGImageMetadataTagCopyValue(resultTag)) {
                 violations.append("altered \(fullPath)")
             }
             if !metadataValuesEqual(CGImageMetadataTagCopyQualifiers(tag), CGImageMetadataTagCopyQualifiers(resultTag)) {
@@ -2357,7 +2388,7 @@ struct MetadataWriter {
         // a write must not publish a requested value that never landed.
         for (path, expected) in plannedSets {
             guard let resultTag = resultTags[path],
-                  metadataValuesEqual(CGImageMetadataTagCopyValue(resultTag), expected) else {
+                  metadataTagValuesEqual(path: path, CGImageMetadataTagCopyValue(resultTag), expected) else {
                 violations.append("set value missing or wrong at \(path)")
                 continue
             }
@@ -2381,9 +2412,21 @@ struct MetadataWriter {
     /// means the source metadata could not be read, transformed or
     /// serialized - callers treat nil as a refusal, never as "no XMP needed".
     private static func correctedXMPPacket(imageSource: CGImageSource, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool) -> Data? {
-        guard let sourceMetadata = CGImageSourceCopyMetadataAtIndex(imageSource, 0, nil),
-              let mutableMetadata = CGImageMetadataCreateMutableCopy(sourceMetadata),
-              applyMetadataPlan(mutableMetadata, date: date, removeDate: removeDate,
+        // Mirror the writer's own construction (updateImageMetadata): a
+        // source without a readable metadata graph starts from an EMPTY
+        // mutable graph, not from a refusal.
+        let sourceMetadata: CGImageMetadata
+        let mutableMetadata: CGMutableImageMetadata
+        if let source = CGImageSourceCopyMetadataAtIndex(imageSource, 0, nil),
+           let copy = CGImageMetadataCreateMutableCopy(source) {
+            sourceMetadata = source
+            mutableMetadata = copy
+        } else {
+            let empty = CGImageMetadataCreateMutable()
+            sourceMetadata = empty
+            mutableMetadata = empty
+        }
+        guard applyMetadataPlan(mutableMetadata, date: date, removeDate: removeDate,
                                 latitude: latitude, longitude: longitude, removeLocation: removeLocation) else {
             return nil
         }
