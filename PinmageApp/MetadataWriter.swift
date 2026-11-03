@@ -844,8 +844,9 @@ struct MetadataWriter {
                 return refuse("staged XMP packet differs from the verified packet [\(violations.joined(separator: ", "))]")
             }
         } else if stagedParts.xmp.count == 1 {
-            guard addedXMPVerifiedDimensionOnly(stagedParts.xmp[0], xmpPrefix: xmpPrefix, imageSource: imageSource) else {
-                return refuse("added XMP APP1 carrier failed dimension-only verification")
+            let added = addedXMPVerifiedDimensionOnly(stagedParts.xmp[0], xmpPrefix: xmpPrefix, imageSource: imageSource)
+            guard added.ok else {
+                return refuse("added XMP APP1 carrier failed dimension-only verification [\(added.dump)]")
             }
         }
         return true
@@ -855,30 +856,35 @@ struct MetadataWriter {
     /// had none: the whole parsed graph must be exactly the two
     /// pixel-dimension tags with values equal to the decoded source
     /// pixels. Unknown paths, qualifiers, or wrong values fail.
-    private static func addedXMPVerifiedDimensionOnly(_ packet: Data, xmpPrefix: Data, imageSource: CGImageSource) -> Bool {
+    private static func addedXMPVerifiedDimensionOnly(_ packet: Data, xmpPrefix: Data, imageSource: CGImageSource) -> (ok: Bool, dump: String) {
         guard packet.prefix(xmpPrefix.count) == xmpPrefix,
               let graph = CGImageMetadataCreateFromXMPData(Data(packet.dropFirst(xmpPrefix.count)) as CFData),
               let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
               let width = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
-              let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue else { return false }
+              let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue else {
+            return (false, "packet or source properties did not parse")
+        }
+        // Enumerate every tag for the refusal dump even after a violation.
+        // A tag with an EMPTY qualifier array (not just nil qualifiers) is
+        // acceptable - ImageIO vends either for a plain tag.
         var ok = true
+        var seenX = false, seenY = false
+        var lines: [String] = []
         CGImageMetadataEnumerateTagsUsingBlock(graph, nil, nil) { (path, tag) in
             let p = path as String
-            guard p == "exif:PixelXDimension" || p == "exif:PixelYDimension",
-                  CGImageMetadataTagCopyQualifiers(tag) == nil,
-                  let raw = CGImageMetadataTagCopyValue(tag) else {
-                ok = false
-                return false
-            }
-            let expected = p == "exif:PixelXDimension" ? width : height
+            let qualifierCount = CGImageMetadataTagCopyQualifiers(tag).map { CFArrayGetCount($0) } ?? 0
+            let raw = CGImageMetadataTagCopyValue(tag)
             let text = (raw as? String) ?? (raw as? NSNumber)?.stringValue
-            guard text == String(expected) else {
-                ok = false
-                return false
-            }
+            lines.append("\(p)=\(text ?? "?") qualifiers=\(qualifierCount)")
+            let expected: Int
+            if p == "exif:PixelXDimension" { expected = width; seenX = true }
+            else if p == "exif:PixelYDimension" { expected = height; seenY = true }
+            else { ok = false; return true }
+            if qualifierCount != 0 || text != String(expected) { ok = false }
             return true
         }
-        return ok
+        if !seenX || !seenY { ok = false }
+        return (ok, lines.joined(separator: "; "))
     }
 
     /// TIFF IFD walk with resolved values: (label, entries, next offset) per
@@ -1261,9 +1267,10 @@ struct MetadataWriter {
         return refs
     }
 
-    /// iloc payload -> (item id, construction method, extents) per item.
+    /// iloc payload -> (id, construction method, data reference index,
+    /// extents) per item; extent offsets resolved to base + offset.
     /// Strict: version 0-2, field sizes 0/4/8, trailing bytes refuse.
-    private static func heicExtents(_ payload: Data) -> [(id: Int, method: Int, extents: [(offset: Int, length: Int)])]? {
+    private static func heicExtents(_ payload: Data) -> [(id: Int, method: Int, dref: Int, extents: [(offset: Int, length: Int)])]? {
         let b = [UInt8](payload)
         guard b.count >= 8, b[0] <= 2 else { return nil }
         let version = Int(b[0])
@@ -1282,7 +1289,7 @@ struct MetadataWriter {
             guard o + 4 <= b.count else { return nil }
             count = Int(b[o]) << 24 | Int(b[o + 1]) << 16 | Int(b[o + 2]) << 8 | Int(b[o + 3]); o += 4
         }
-        var items: [(Int, Int, [(Int, Int)])] = []
+        var items: [(Int, Int, Int, [(Int, Int)])] = []
         for _ in 0..<count {
             let idLength = version < 2 ? 2 : 4
             guard o + idLength <= b.count else { return nil }
@@ -1296,6 +1303,7 @@ struct MetadataWriter {
                 o += 2
             }
             guard o + 2 <= b.count else { return nil }
+            let dref = Int(b[o]) << 8 | Int(b[o + 1])
             o += 2 // data_reference_index
             var base = 0
             if baseOffsetSize > 0 {
@@ -1320,7 +1328,7 @@ struct MetadataWriter {
                 o += lengthSize
                 extents.append((base + offset, length))
             }
-            items.append((itemID, method, extents))
+            items.append((itemID, method, dref, extents))
         }
         guard o == b.count else { return nil }
         return items
@@ -1374,7 +1382,11 @@ struct MetadataWriter {
         var out = Data(sourceFtyp.box)
         out.append(stagedData[stagedFtyp.boxEnd...])
         guard delta != 0 else { return out }
+        // Only ftyp/meta/mdat may sit at the top level for the transplant:
+        // any other box (fidx, free, uuid, ...) could carry file offsets or
+        // layout the shift would invalidate - refuse those writes instead.
         guard let stagedBoxes = heicBoxes(stagedData, range: 0..<stagedData.count),
+              stagedBoxes.allSatisfy({ $0.type == "ftyp" || $0.type == "meta" || $0.type == "mdat" }),
               stagedBoxes.filter({ $0.type == "meta" }).count == 1,
               let metaBox = stagedBoxes.first(where: { $0.type == "meta" }),
               metaBox.payload.count >= 4,
@@ -1388,6 +1400,208 @@ struct MetadataWriter {
         guard ilocStartInOut >= 0, ilocStartInOut + adjusted.count <= out.count else { return nil }
         out.replaceSubrange(ilocStartInOut..<(ilocStartInOut + adjusted.count), with: adjusted)
         return out
+    }
+
+    /// iloc payload -> per-item field positions for in-place edits (raw
+    /// base/offset values plus where each field sits in the payload).
+    /// Same structural limits as heicExtents; nil on malformed payloads.
+    private typealias HeicIlocLayout = (id: Int, method: Int, dref: Int,
+                                        basePos: Int?, baseSize: Int, base: Int,
+                                        extents: [(offPos: Int?, offSize: Int, offset: Int,
+                                                   lenPos: Int, lenSize: Int, length: Int)])
+    private static func heicIlocLayout(_ payload: Data) -> [HeicIlocLayout]? {
+        let b = [UInt8](payload)
+        guard b.count >= 8, b[0] <= 2 else { return nil }
+        let version = Int(b[0])
+        let offsetSize = Int(b[4] >> 4), lengthSize = Int(b[4] & 0xF)
+        let baseOffsetSize = Int(b[5] >> 4)
+        let indexSize = version >= 1 ? Int(b[5] & 0xF) : 0
+        for size in [offsetSize, lengthSize, baseOffsetSize, indexSize] {
+            guard size == 0 || size == 4 || size == 8 else { return nil }
+        }
+        func read(_ o: Int, _ n: Int) -> Int { var v = 0; for i in 0..<n { v = v << 8 | Int(b[o + i]) }; return v }
+        var o = 6
+        let count: Int
+        if version < 2 {
+            guard o + 2 <= b.count else { return nil }
+            count = read(o, 2); o += 2
+        } else {
+            guard o + 4 <= b.count else { return nil }
+            count = read(o, 4); o += 4
+        }
+        var items: [HeicIlocLayout] = []
+        for _ in 0..<count {
+            let idLength = version < 2 ? 2 : 4
+            guard o + idLength <= b.count else { return nil }
+            let itemID = read(o, idLength); o += idLength
+            var method = 0
+            if version >= 1 {
+                guard o + 2 <= b.count else { return nil }
+                method = Int(b[o + 1]) & 0xF; o += 2
+            }
+            guard o + 2 <= b.count else { return nil }
+            let dref = read(o, 2); o += 2
+            guard o + baseOffsetSize <= b.count else { return nil }
+            let basePos: Int? = baseOffsetSize > 0 ? o : nil
+            let base = read(o, baseOffsetSize); o += baseOffsetSize
+            guard o + 2 <= b.count else { return nil }
+            let extentCount = read(o, 2); o += 2
+            var extents: [(offPos: Int?, offSize: Int, offset: Int, lenPos: Int, lenSize: Int, length: Int)] = []
+            for _ in 0..<extentCount {
+                o += indexSize
+                guard o + offsetSize + lengthSize <= b.count else { return nil }
+                let offPos: Int? = offsetSize > 0 ? o : nil
+                let offset = read(o, offsetSize); o += offsetSize
+                let lenPos = o
+                let length = read(o, lengthSize); o += lengthSize
+                extents.append((offPos, offsetSize, offset, lenPos, lengthSize, length))
+            }
+            items.append((itemID, method, dref, basePos, baseOffsetSize, base, extents))
+        }
+        guard o == b.count else { return nil }
+        return items
+    }
+
+    /// Replace one item's payload in a staged HEIC byte stream: splice the
+    /// new bytes in at the item's single extent, rewrite that extent's iloc
+    /// length, shift every extent that starts after the splice point, and
+    /// grow the containing mdat's size field. Candidate surgery, never an
+    /// exemption: callers must still run the full verification on the
+    /// result. nil (no splice) unless the layout is the verified one: top
+    /// level only ftyp/meta/mdat, one meta, one iloc, every item method 0 /
+    /// data reference 0, the target item single-extent with a nonzero
+    /// length, the iloc payload entirely before the splice point, and no
+    /// item straddling the splice with a base offset (a base shifts the
+    /// whole item, so a straddling base item cannot be adjusted).
+    private static func heicSplicingItemPayload(_ whole: Data, itemID: Int, newPayload: Data) -> Data? {
+        guard let boxes = heicBoxes(whole, range: 0..<whole.count),
+              boxes.allSatisfy({ $0.type == "ftyp" || $0.type == "meta" || $0.type == "mdat" }) else { return nil }
+        let metas = boxes.filter { $0.type == "meta" }
+        guard metas.count == 1, metas[0].payload.count >= 4,
+              let children = heicBoxes(metas[0].payload, range: 4..<metas[0].payload.count) else { return nil }
+        let ilocs = children.filter { $0.type == "iloc" }
+        guard ilocs.count == 1,
+              let layout = heicIlocLayout(ilocs[0].payload),
+              layout.allSatisfy({ $0.method == 0 && $0.dref == 0 }) else { return nil }
+        let targets = layout.filter { $0.id == itemID }
+        guard targets.count == 1, targets[0].extents.count == 1 else { return nil }
+        let target = targets[0]
+        let oldLength = target.extents[0].length
+        guard oldLength > 0 else { return nil }
+        let splice = target.base + target.extents[0].offset
+        let delta = newPayload.count - oldLength
+        // iloc.range is relative to the meta payload; the iloc payload must
+        // sit entirely before the splice point so patching it in place is
+        // valid after bytes move.
+        let ilocStart = metas[0].range.lowerBound + ilocs[0].range.lowerBound
+        let ilocEnd = ilocStart + ilocs[0].payload.count
+        guard ilocEnd <= splice, splice + oldLength <= whole.count else { return nil }
+        var outIloc = [UInt8](ilocs[0].payload)
+        func write(_ pos: Int, _ n: Int, _ v: Int) -> Bool {
+            guard v >= 0, n > 0, n == 8 || v < (1 << (8 * n)) else { return false }
+            for i in 0..<n { outIloc[pos + n - 1 - i] = UInt8((v >> (8 * i)) & 0xFF) }
+            return true
+        }
+        guard write(target.extents[0].lenPos, target.extents[0].lenSize, newPayload.count) else { return nil }
+        for item in layout {
+            let after = item.extents.map { item.base + $0.offset > splice }
+            guard after.contains(true) else { continue }
+            if let basePos = item.basePos {
+                guard after.allSatisfy({ $0 }) else { return nil }
+                guard write(basePos, item.baseSize, item.base + delta) else { return nil }
+            } else {
+                for (extent, isAfter) in zip(item.extents, after) where isAfter {
+                    guard let offPos = extent.offPos,
+                          write(offPos, extent.offSize, extent.offset + delta) else { return nil }
+                }
+            }
+        }
+        var out = Data(whole.prefix(splice))
+        out.append(newPayload)
+        out.append(whole[(splice + oldLength)...])
+        out.replaceSubrange(ilocStart..<ilocEnd, with: outIloc)
+        // Grow the mdat header containing the spliced extent. Box starts
+        // derive from parse order, so 8- and 16-byte headers are exact.
+        let b = [UInt8](whole)
+        var boxStart = 0
+        var updatedSize = false
+        for box in boxes {
+            let start = boxStart
+            boxStart = box.range.upperBound
+            guard box.type == "mdat", start <= splice, splice + oldLength <= box.range.upperBound else { continue }
+            let header = box.range.lowerBound - start
+            if header == 16 {
+                var size = 0
+                for i in 0..<8 { size = size << 8 | Int(b[start + 8 + i]) }
+                guard size + delta >= 0 else { return nil }
+                var sized = [UInt8](repeating: 0, count: 8)
+                for i in 0..<8 { sized[7 - i] = UInt8(((size + delta) >> (8 * i)) & 0xFF) }
+                out.replaceSubrange((start + 8)..<(start + 16), with: sized)
+                updatedSize = true
+            } else if header == 8 {
+                var size = 0
+                for i in 0..<4 { size = size << 8 | Int(b[start + i]) }
+                if size == 0 {
+                    updatedSize = true // to-EOF mdat: no size field to update
+                } else {
+                    guard size + delta >= 0, size + delta < (1 << 32) else { return nil }
+                    var sized = [UInt8](repeating: 0, count: 4)
+                    for i in 0..<4 { sized[3 - i] = UInt8(((size + delta) >> (8 * i)) & 0xFF) }
+                    out.replaceSubrange(start..<(start + 4), with: sized)
+                    updatedSize = true
+                }
+            } else {
+                return nil
+            }
+            break
+        }
+        guard updatedSize else { return nil }
+        return out
+    }
+
+    /// ImageIO writes a reduced XMP mime item on HEIC copy-writes (observed
+    /// run 41705293732: the staged packet lost exif:DateTimeOriginal,
+    /// tiff:Orientation, tiff:TileWidth and tiff:TileLength). Restore the
+    /// verified corrected packet as the staged mime item's payload via
+    /// heicSplicingItemPayload. nil when the staged file carries no single
+    /// XMP mime item or the layout does not support the splice - the full
+    /// verification then decides the write as before.
+    private static func heicRestoringXmpItem(stagedData: Data, imageSource: CGImageSource,
+                                             date: Date?, removeDate: Bool,
+                                             latitude: Double?, longitude: Double?, removeLocation: Bool) -> Data? {
+        guard let boxes = heicBoxes(stagedData, range: 0..<stagedData.count),
+              boxes.allSatisfy({ $0.type == "ftyp" || $0.type == "meta" || $0.type == "mdat" }) else { return nil }
+        let metas = boxes.filter { $0.type == "meta" }
+        guard metas.count == 1, metas[0].payload.count >= 4,
+              let children = heicBoxes(metas[0].payload, range: 4..<metas[0].payload.count) else { return nil }
+        let iinfs = children.filter { $0.type == "iinf" }
+        guard iinfs.count == 1, let items = heicIinfItems(iinfs[0].payload) else { return nil }
+        let mimeIDs = items.filter { $0.type == "mime" && $0.contentType == "application/rdf+xml" }.map { $0.id }
+        guard mimeIDs.count == 1 else { return nil }
+        guard let packet = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
+                                              latitude: latitude, longitude: longitude, removeLocation: removeLocation),
+              !packet.isEmpty else { return nil }
+        guard let spliced = heicSplicingItemPayload(stagedData, itemID: mimeIDs[0], newPayload: packet) else {
+            FileHandle.standardError.write(Data("HEIC note: staged XMP item layout does not support verified-packet restore; verification decides\n".utf8))
+            return nil
+        }
+        return spliced
+    }
+
+    /// Strict ftyp parse: major brand, minor version, compatible brands.
+    private static func heicFtypBrands(_ payload: Data) -> (major: String, minor: UInt32, brands: [String])? {
+        let b = [UInt8](payload)
+        guard b.count >= 8, (b.count - 8) % 4 == 0,
+              let major = String(bytes: b[0..<4], encoding: .ascii) else { return nil }
+        let minor = UInt32(b[4]) << 24 | UInt32(b[5]) << 16 | UInt32(b[6]) << 8 | UInt32(b[7])
+        var brands: [String] = []
+        var o = 8
+        while o + 4 <= b.count {
+            guard let brand = String(bytes: b[o..<(o + 4)], encoding: .ascii) else { return nil }
+            brands.append(brand)
+            o += 4
+        }
+        return (major, minor, brands)
     }
 
     /// Shifts an iloc payload's absolute file offsets by delta, editing
@@ -1500,6 +1714,25 @@ struct MetadataWriter {
                 return refuse("could not stage the source ftyp")
             }
         }
+        // ImageIO also rewrites the XMP mime item on HEIC copy-writes
+        // (observed run 41705293732: the staged packet lost
+        // exif:DateTimeOriginal, tiff:Orientation, tiff:TileWidth and
+        // tiff:TileLength). Replace the staged mime item's payload with the
+        // verified corrected packet, adjusting iloc and the containing mdat.
+        // Same candidate discipline as the ftyp transplant above: the spliced
+        // file must still pass every check below, including the packet-graph
+        // comparison, which re-verifies the restored packet itself.
+        if let patched = heicRestoringXmpItem(stagedData: stagedData, imageSource: imageSource,
+                                              date: date, removeDate: removeDate,
+                                              latitude: latitude, longitude: longitude,
+                                              removeLocation: removeLocation), patched != stagedData {
+            do {
+                try patched.write(to: destinationURL)
+                stagedData = patched
+            } catch {
+                return refuse("could not stage the corrected XMP item")
+            }
+        }
         guard let stagedBoxes = heicBoxes(stagedData, range: 0..<stagedData.count) else {
             return refuse("staged output did not parse as boxes")
         }
@@ -1594,7 +1827,7 @@ struct MetadataWriter {
             let b = [UInt8](whole)
             var out: [Int: Data] = [:]
             for item in located {
-                guard item.method == 0 else { return nil }
+                guard item.method == 0, item.dref == 0 else { return nil }
                 var payload = Data()
                 for extent in item.extents {
                     guard extent.offset >= 0, extent.length >= 0, extent.offset + extent.length <= b.count,
@@ -1655,6 +1888,52 @@ struct MetadataWriter {
                 guard violations.isEmpty else {
                     return refuse("staged XMP item differs from the verified packet [\(violations.joined(separator: ", "))]")
                 }
+            }
+        }
+        // Restored ftyp declarations must be TRUE of this output, not just
+        // of the source. Only brands whose constraints we can check may be
+        // declared; anything else refuses. Constraint rules from MIAF
+        // (ISO/IEC 23000-22) as implemented in gpac ComplianceWarden
+        // (specs/miaf/brands.cpp, profiles.cpp): base HEIF/MIAF structure is
+        // enforced by the verified plain-still shape and payload-exact
+        // children above; MiHB profile properties live in the hvcC/ipco and
+        // hvc1 item, both byte-exact; MiPr adds the layout rules below.
+        // (MiPr's thumbnail rules are vacuous here: the verified shape
+        // refuses thumbnails and every non-cdsc reference.)
+        guard let stagedFtypBox = stagedBoxes.first(where: { $0.type == "ftyp" }),
+              let ftyp = heicFtypBrands(stagedFtypBox.payload) else {
+            return refuse("staged ftyp did not parse")
+        }
+        let checkableBrands: Set<String> = ["heic", "heix", "mif1", "miaf", "MiHB", "MiPr"]
+        guard Set(ftyp.brands).isSubset(of: checkableBrands) else {
+            return refuse("ftyp declares brands outside the verifiable set [\(ftyp.brands.joined(separator: ","))]")
+        }
+        guard let stagedIloc = stagedChildren.first(where: { $0.type == "iloc" }),
+              let stagedLocated = heicExtents(stagedIloc.payload) else {
+            return refuse("staged iloc did not parse")
+        }
+        // No overlapping extents anywhere, across all items.
+        let allExtents = stagedLocated.flatMap { $0.extents }.sorted { $0.offset < $1.offset }
+        for pair in zip(allExtents, allExtents.dropFirst()) {
+            guard pair.0.offset + pair.0.length <= pair.1.offset else {
+                return refuse("overlapping iloc extents")
+            }
+        }
+        if ftyp.brands.contains("MiPr") {
+            // MIAF 10.2 layout: ftyp first, meta immediately after, no mdat
+            // before meta; the primary item's coded data ends within
+            // 128000 bytes of the file start.
+            guard stagedBoxes.count >= 2, stagedBoxes[0].type == "ftyp", stagedBoxes[1].type == "meta" else {
+                return refuse("MiPr layout: meta must follow ftyp")
+            }
+            guard let metaIndex = stagedBoxes.firstIndex(where: { $0.type == "meta" }),
+                  !stagedBoxes[..<metaIndex].contains(where: { $0.type == "mdat" }) else {
+                return refuse("MiPr layout: mdat before meta")
+            }
+            guard let primaryExtents = stagedLocated.first(where: { $0.id == primary })?.extents,
+                  let lastByte = primaryExtents.map({ $0.offset + $0.length }).max(),
+                  lastByte <= 128_000 else {
+                return refuse("MiPr layout: primary coded data beyond 128000 bytes")
             }
         }
         guard let sourceRGBA = rgbaData(sourceData), let stagedRGBA = rgbaData(stagedData), sourceRGBA == stagedRGBA else {
