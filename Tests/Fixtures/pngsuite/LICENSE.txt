@@ -1,0 +1,12 @@
+PngSuite images (basn2c16.png, basi2c16.png, basn0g16.png, cdun2c08.png)
+Source: http://www.schaik.com/pngsuite/ (Willem van Schaik)
+
+PngSuite.LICENSE, verbatim:
+"Permission to use, copy, modify and distribute these images for any purpose
+and without fee is hereby granted. (c) Willem van Schaik, 1996, 2011"
+
+Pinned SHA-256 (verified at import):
+1e1c28ec0ee5da6224404b4005076dd30e2335a1a80c0ca722046a245c4a2b3b  basn2c16.png
+ae13eba5fabbf7cbe8c01ec4458cdaa7e6bfdfcbd5109e831efaac9f39096027  basi2c16.png
+1a1fe155f40c11d79350b3f84c7eb2b29719037e57073cb7ae2ab9e8323f9360  basn0g16.png
+a849d89ba3d92146940d7c56d2fe74c9c3ec96725c7f24eefaf44160a6304de2  cdun2c08.png

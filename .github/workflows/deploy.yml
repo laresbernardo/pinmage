@@ -40,6 +40,29 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "Building Pinmage $VERSION"
 
+      # Camera sample fixtures: ianare/exif-py project images, CC BY-SA 4.0
+      # (attribution in Tests/Fixtures/FIXTURES.md). Fetched, never committed;
+      # every file is verified against its pinned SHA-256 before use.
+      - name: Fetch public test fixtures
+        run: |
+          set -euo pipefail
+          FIXDIR="$RUNNER_TEMP/pinmage-fixtures"
+          mkdir -p "$FIXDIR"
+          BASE="https://raw.githubusercontent.com/ianare/exif-py/master/tests/resources"
+          cat > "$FIXDIR/SHA256SUMS" <<'SUMS'
+          17307b1207eb6487d7908e9d154890b46e3d2e0192369cfd3f4c33d5a5af4035  DSCN0010.jpg
+          9be023624ccd5846beeb5b02d9b571251ef5bd8ed820389a430d114029f58eda  HMD_Nokia_8.3_5G.jpg
+          e760c80eed310e4f27c092d5487693ca8e104e7cc01d25ba4828deb28f679676  iphone_13_pro_max.heic
+          6bfdabd4fc33d112283c147acccc574e770bbe6fbdbc3d4da968ba7b606ecc2f  Canon_40D.jpg
+          32f6aab90dc2d284a83040debe379e01333107b83a98c1aa2e6dabf56790b48a  Tless0.tiff
+          26f4b11c45ad3e56a530d03967ff4627892b3264183b85fefba194ff1fe3e08e  Arbitro.tiff
+          SUMS
+          for f in DSCN0010.jpg HMD_Nokia_8.3_5G.jpg iphone_13_pro_max.heic Canon_40D.jpg Tless0.tiff Arbitro.tiff; do
+            curl -fsSL "$BASE/$f" -o "$FIXDIR/$f"
+          done
+          cd "$FIXDIR" && shasum -a 256 -c SHA256SUMS
+          echo "PINMAGE_FIXTURES_DIR=$FIXDIR" >> "$GITHUB_ENV"
+
       - name: Test metadata write safety
         env:
           PRESERVATION_ARTIFACT_DIR: ${{ runner.temp }}/preservation-artifacts

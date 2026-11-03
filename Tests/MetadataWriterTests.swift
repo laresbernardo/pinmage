@@ -51,6 +51,15 @@ struct MetadataWriterTests {
             kCGImagePropertyGPSLatitudeRef: "N",
             kCGImagePropertyGPSLongitude: 3.7,
             kCGImagePropertyGPSLongitudeRef: "E",
+            // Beyond the coordinate four: altitude, direction and the fix
+            // date/time exercise the B1 whole-IFD removal exemption, the B2
+            // preservation of untargeted GPS tags on coordinate sets, and the
+            // GPSDateStamp capture-date alias strip on date removals.
+            kCGImagePropertyGPSAltitude: 12.0,
+            kCGImagePropertyGPSImgDirection: 90.0,
+            kCGImagePropertyGPSImgDirectionRef: "T",
+            kCGImagePropertyGPSTimeStamp: "04:05:06",
+            kCGImagePropertyGPSDateStamp: "2001:02:03",
         ]
         let properties: [CFString: Any] = [
             kCGImagePropertyExifDictionary: exif,
@@ -1281,6 +1290,214 @@ struct MetadataWriterTests {
         return Data(tiff)
     }
 
+    /// M18 (B3 + S8): a TIFF carrying a native IPTC-NAA tag (33723) refuses
+    /// every date/location-touching op, the refusal reaches the operation's
+    /// note, and the refused write leaves the original byte-identical.
+    static func runTIFFIPTCRefusalProbe(root: URL) throws {
+        // Minimal little-endian 8x6 gray TIFF with an inline 4-byte IPTC-NAA tag.
+        let pixelCount = 8 * 6
+        let ifdBytes = 2 + 12 * 11 + 4
+        let pixelOffset = 8 + ifdBytes
+        var tiff = Data([0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00])
+        func entry(_ tag: UInt16, _ type: UInt16, _ count: UInt32, _ value: UInt32) {
+            tiff.append(contentsOf: [UInt8(tag & 0xFF), UInt8(tag >> 8), UInt8(type & 0xFF), UInt8(type >> 8),
+                                     UInt8(count & 0xFF), UInt8((count >> 8) & 0xFF), UInt8((count >> 16) & 0xFF), UInt8((count >> 24) & 0xFF),
+                                     UInt8(value & 0xFF), UInt8((value >> 8) & 0xFF), UInt8((value >> 16) & 0xFF), UInt8((value >> 24) & 0xFF)])
+        }
+        tiff.append(contentsOf: [0x0B, 0x00]) // 11 entries
+        entry(256, 3, 1, 8)                    // ImageWidth
+        entry(257, 3, 1, 6)                    // ImageLength
+        entry(258, 3, 1, 8)                    // BitsPerSample
+        entry(259, 3, 1, 1)                    // Compression: none
+        entry(262, 3, 1, 1)                    // Photometric: BlackIsZero
+        entry(273, 4, 1, UInt32(pixelOffset))  // StripOffsets
+        entry(277, 3, 1, 1)                    // SamplesPerPixel
+        entry(278, 4, 1, 6)                    // RowsPerStrip
+        entry(279, 4, 1, UInt32(pixelCount))   // StripByteCounts
+        entry(33723, 7, 4, 0x43545049)         // IPTC-NAA, inline "IPTC"
+        tiff.append(contentsOf: [0x00, 0x00, 0x00, 0x00]) // next IFD
+        tiff.append(Data(repeating: 0x7F, count: pixelCount))
+        let f = root.appendingPathComponent("m18-iptc.tiff")
+        try tiff.write(to: f)
+        let before = try Data(contentsOf: f)
+        for op in [(date: Date(timeIntervalSince1970: 981173106) as Date?, removeDate: false, removeLocation: false, name: "set"),
+                   (date: nil as Date?, removeDate: true, removeLocation: false, name: "removeDate"),
+                   (date: nil as Date?, removeDate: false, removeLocation: true, name: "removeLocation")] {
+            let note = MetadataWriter.RefusalNote()
+            let ok = MetadataWriter.updateImageMetadata(sourceURL: f, destinationURL: f, date: op.date, removeDate: op.removeDate,
+                                                        latitude: nil, longitude: nil, removeLocation: op.removeLocation, refusalNote: note)
+            try require(!ok, "TIFF with native IPTC-NAA must refuse a \(op.name)")
+            try require(note.reason?.contains("33723") == true, "refusal note must name 33723, got: \(note.reason ?? "none")")
+            try require(try Data(contentsOf: f) == before, "refused write must leave the original intact")
+        }
+    }
+
+    /// M18 (S2): a HEIC removal that empties the XMP packet passes via the
+    /// spliced minimal packet; the output mime item reparses to zero tags.
+    /// Also prints the xmp:MetadataDate regeneration evidence (reviewer
+    /// verification item 4) for CI codification.
+    static func runHEICEmptyPacketProbe(root: URL) throws {
+        let heic = root.appendingPathComponent("m18-empty-packet.heic")
+        try fixture(at: heic, type: "public.heic" as CFString)
+        let date = Date(timeIntervalSince1970: 981173106)
+        try require(MetadataWriter.updateImageMetadata(sourceURL: heic, destinationURL: heic, date: date, removeDate: false,
+                                                       latitude: nil, longitude: nil, removeLocation: false),
+                    "HEIC date set must succeed")
+        try require(MetadataWriter.updateImageMetadata(sourceURL: heic, destinationURL: heic, date: nil, removeDate: true,
+                                                       latitude: nil, longitude: nil, removeLocation: false),
+                    "HEIC removal emptying the XMP packet must succeed via the spliced minimal packet (S2)")
+        if let source = CGImageSourceCreateWithURL(heic as CFURL, nil),
+           let metadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil),
+           let xmp = CGImageMetadataCreateXMPData(metadata, nil) {
+            let text = String(data: xmp as Data, encoding: .utf8) ?? ""
+            FileHandle.standardError.write(Data("M18 probe: post-removal XMP carries MetadataDate = \(text.contains("MetadataDate"))\n".utf8))
+        }
+    }
+
+    /// M18 (B4): 16-bit sources keep native precision through the PNG
+    /// re-encode paths; interlaced sources refuse the re-encode honestly.
+    static func run16BitProbe(root: URL) throws {
+        let p16 = root.appendingPathComponent("m18-synth16.png")
+        guard let context = CGContext(data: nil, width: 8, height: 6, bitsPerComponent: 16, bytesPerRow: 64,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder16Little.rawValue),
+              let image = context.makeImage(),
+              let dest = CGImageDestinationCreateWithURL(p16 as CFURL, "public.png" as CFString, 1, nil) else {
+            throw NSError(domain: "Fixtures", code: 3, userInfo: [NSLocalizedDescriptionKey: "16-bit fixture creation failed"])
+        }
+        CGImageDestinationAddImage(dest, image, nil)
+        try require(CGImageDestinationFinalize(dest), "16-bit fixture finalize")
+        try require(MetadataWriter.updateImageMetadata(sourceURL: p16, destinationURL: p16, date: Date(timeIntervalSince1970: 981173106),
+                                                       removeDate: false, latitude: nil, longitude: nil, removeLocation: false),
+                    "16-bit PNG set must preserve native precision (B4)")
+        guard let source = CGImageSourceCreateWithURL(p16 as CFURL, nil),
+              let reread = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "16-bit output must decode"])
+        }
+        try require(reread.bitsPerComponent == 16, "16-bit PNG must stay 16bpc after a set")
+    }
+
+    /// M18: committed PngSuite fixtures (freeware, pinned SHA-256). Missing
+    /// files skip locally but fail in CI (PINMAGE_FIXTURES_DIR set).
+    static func runPngSuiteProbe(root: URL) throws {
+        let ci = ProcessInfo.processInfo.environment["PINMAGE_FIXTURES_DIR"] != nil
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Tests/Fixtures/pngsuite")
+        func staged(_ name: String) throws -> URL? {
+            let src = dir.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: src.path) else {
+                try require(!ci, "PngSuite fixture \(name) missing in CI")
+                print("M18: \(name) not found; skipped")
+                return nil
+            }
+            let dst = root.appendingPathComponent(name)
+            try FileManager.default.copyItem(at: src, at: dst)
+            return dst
+        }
+        let date = Date(timeIntervalSince1970: 981173106)
+        if let rgb16 = try staged("basn2c16.png") {
+            try require(MetadataWriter.updateImageMetadata(sourceURL: rgb16, destinationURL: rgb16, date: date, removeDate: false,
+                                                           latitude: nil, longitude: nil, removeLocation: false),
+                        "basn2c16 (16bpc RGB) set must pass at native precision")
+            guard let source = CGImageSourceCreateWithURL(rgb16 as CFURL, nil),
+                  let reread = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "basn2c16 output must decode"])
+            }
+            try require(reread.bitsPerComponent == 16, "basn2c16 must stay 16bpc")
+        }
+        if let interlaced = try staged("basi2c16.png") {
+            let note = MetadataWriter.RefusalNote()
+            try require(!MetadataWriter.updateImageMetadata(sourceURL: interlaced, destinationURL: interlaced, date: date, removeDate: false,
+                                                            latitude: nil, longitude: nil, removeLocation: false, refusalNote: note),
+                        "basi2c16 (interlaced) set must refuse the non-interlaced re-encode")
+            FileHandle.standardError.write(Data("M18: basi2c16 refusal reason: \(note.reason ?? "none")\n".utf8))
+        }
+        for name in ["basn0g16.png", "cdun2c08.png"] {
+            if let f = try staged(name) {
+                let note = MetadataWriter.RefusalNote()
+                let ok = MetadataWriter.updateImageMetadata(sourceURL: f, destinationURL: f, date: date, removeDate: false,
+                                                            latitude: nil, longitude: nil, removeLocation: false, refusalNote: note)
+                FileHandle.standardError.write(Data("M18 probe: \(name) set outcome = \(ok ? "pass" : "refuse: \(note.reason ?? "unknown")")\n".utf8))
+            }
+        }
+    }
+
+    /// M18: lawfully-licensed public camera fixtures (CC BY-SA 4.0,
+    /// ianare/exif-py; fetched by CI with pinned SHA-256). Skipped when
+    /// PINMAGE_FIXTURES_DIR is unset, enforced when set.
+    static func runPublicFixtureProbe(root: URL) throws {
+        guard let dir = ProcessInfo.processInfo.environment["PINMAGE_FIXTURES_DIR"], !dir.isEmpty else {
+            print("M18: PINMAGE_FIXTURES_DIR unset; public-fixture probes skipped")
+            return
+        }
+        let fdir = URL(fileURLWithPath: dir)
+        func staged(_ name: String, as local: String? = nil) throws -> URL {
+            let dst = root.appendingPathComponent(local ?? name)
+            try FileManager.default.copyItem(at: fdir.appendingPathComponent(name), at: dst)
+            return dst
+        }
+        let date = Date(timeIntervalSince1970: 981173106)
+        let f1 = try staged("DSCN0010.jpg")
+        try require(!MetadataWriter.updateImageMetadata(sourceURL: f1, destinationURL: f1, date: nil, removeDate: false,
+                                                        latitude: nil, longitude: nil, removeLocation: true),
+                    "F1 Nikon MakerNote removeLocation must refuse")
+        let f2a = try staged("HMD_Nokia_8.3_5G.jpg")
+        try require(MetadataWriter.updateImageMetadata(sourceURL: f2a, destinationURL: f2a, date: date, removeDate: false,
+                                                       latitude: nil, longitude: nil, removeLocation: false),
+                    "F2 Nokia date set must pass (B2 semantic compare)")
+        try require(MetadataWriter.readExistingCoordinates(from: f2a) != nil, "F2 GPS must survive a date set")
+        let f2b = try staged("HMD_Nokia_8.3_5G.jpg", as: "HMD_Nokia_8.3_5G-b.jpg")
+        try require(MetadataWriter.updateImageMetadata(sourceURL: f2b, destinationURL: f2b, date: nil, removeDate: false,
+                                                       latitude: nil, longitude: nil, removeLocation: true),
+                    "F2 Nokia removeLocation must pass (B1 whole-IFD exemption)")
+        try require(MetadataWriter.readExistingCoordinates(from: f2b) == nil, "F2 GPS must be gone after removeLocation")
+        let f3 = try staged("iphone_13_pro_max.heic")
+        try require(!MetadataWriter.updateImageMetadata(sourceURL: f3, destinationURL: f3, date: nil, removeDate: false,
+                                                        latitude: nil, longitude: nil, removeLocation: true),
+                    "F3 Apple HEIC removeLocation must refuse (MakerNote policy)")
+        let f4 = try staged("Canon_40D.jpg")
+        try require(MetadataWriter.updateImageMetadata(sourceURL: f4, destinationURL: f4, date: date, removeDate: false,
+                                                       latitude: nil, longitude: nil, removeLocation: false),
+                    "F4 Canon date set must pass")
+        guard let f4Source = CGImageSourceCreateWithURL(f4 as CFURL, nil),
+              let f4Props = CGImageSourceCopyPropertiesAtIndex(f4Source, 0, nil) as? [CFString: Any],
+              let f4Exif = f4Props[kCGImagePropertyExifDictionary] as? [CFString: Any] else {
+            throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "F4 output must read back"])
+        }
+        try require(f4Exif[kCGImagePropertyExifSubsecTimeOriginal] != nil, "F4 SubSecTimeOriginal must survive")
+        let f6 = try staged("Tless0.tiff")
+        try require(MetadataWriter.updateImageMetadata(sourceURL: f6, destinationURL: f6, date: date, removeDate: false,
+                                                       latitude: nil, longitude: nil, removeLocation: false),
+                    "F6 Tless0.tiff date set must pass")
+        let f7 = try staged("Arbitro.tiff")
+        try require(MetadataWriter.updateImageMetadata(sourceURL: f7, destinationURL: f7, date: nil, removeDate: true,
+                                                       latitude: nil, longitude: nil, removeLocation: false),
+                    "F7 Arbitro.tiff removeDate must pass (tag 700 surgery)")
+    }
+
+    /// M18 (G1/S5): large camera-shaped HEIC (4032x3024) with full GPS.
+    /// Non-enforcing: prints the write outcome, refusal reason and the added
+    /// Exif item inventory so the Tile* rule gets codified from CI evidence.
+    static func runLargeHEICProbe(root: URL) throws {
+        let big = root.appendingPathComponent("m18-large.heic")
+        guard let context = CGContext(data: nil, width: 4032, height: 3024, bitsPerComponent: 8,
+                                      bytesPerRow: 4032 * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let image = context.makeImage(),
+              let dest = CGImageDestinationCreateWithURL(big as CFURL, "public.heic" as CFString, 1, nil) else {
+            throw NSError(domain: "Fixtures", code: 4, userInfo: [NSLocalizedDescriptionKey: "large HEIC fixture creation failed"])
+        }
+        CGImageDestinationAddImage(dest, image, nil)
+        try require(CGImageDestinationFinalize(dest), "large HEIC fixture finalize")
+        let before = try Data(contentsOf: big)
+        let note = MetadataWriter.RefusalNote()
+        let ok = MetadataWriter.updateImageMetadata(sourceURL: big, destinationURL: big, date: Date(timeIntervalSince1970: 981173106),
+                                                    removeDate: false, latitude: 40.4, longitude: 3.7, removeLocation: false,
+                                                    refusalNote: note)
+        let after = try Data(contentsOf: big)
+        let inventory = MetadataWriter.heicDiagnosticInventory(source: before, staged: after)
+        FileHandle.standardError.write(Data("M18 large-HEIC probe: succeeded = \(ok), reason = \(note.reason ?? "none")\n\(inventory)\n".utf8))
+    }
+
     static func main() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("PinmageTests-\(UUID().uuidString)")
@@ -1322,6 +1539,98 @@ struct MetadataWriterTests {
         try require(MetadataWriter.gpsDegrees("181,0E" as CFString, latitude: false) == nil, "GPS longitude out of range must fail")
         try require(MetadataWriter.gpsDegrees("95" as CFString, latitude: true) == nil, "GPS numeric latitude out of range must fail")
         try require(MetadataWriter.gpsDegrees(40.4 as CFNumber, latitude: true) != nil, "GPS numeric parse")
+
+        // M18 surgery unit tests (S9): the byte-surgery and semantic-compare
+        // helpers are exercised directly, not only through full writes.
+        // Exact rational reduction: no epsilon, sign into numerator, zero
+        // denominators never equal (B2).
+        try require(MetadataWriter.reducedRational(num: 6, den: 8).map { $0.0 == 3 && $0.1 == 4 } == true, "reduce 6/8")
+        try require(MetadataWriter.reducedRational(num: -6, den: 8).map { $0.0 == -3 && $0.1 == 4 } == true, "reduce -6/8")
+        try require(MetadataWriter.reducedRational(num: 6, den: -8).map { $0.0 == -3 && $0.1 == 4 } == true, "reduce 6/-8")
+        try require(MetadataWriter.reducedRational(num: -4, den: -2).map { $0.0 == 2 && $0.1 == 1 } == true, "reduce -4/-2")
+        try require(MetadataWriter.reducedRational(num: 0, den: 5).map { $0.0 == 0 && $0.1 == 1 } == true, "reduce 0/5")
+        try require(MetadataWriter.reducedRational(num: 5, den: 0) == nil, "zero denominator refuses")
+        try require(MetadataWriter.reducedRational(num: Int64(Int32.min), den: 1).map { $0.0 == Int64(Int32.min) } == true, "Int32.min numerator safe")
+        // Rational field reads honor per-file endianness and signedness.
+        let ratBE = Data([0, 0, 0, 100, 0, 0, 0, 1])
+        let ratLE = Data([100, 0, 0, 0, 1, 0, 0, 0])
+        try require(MetadataWriter.tiffRationalAt(ratBE, 0, false, false).map { $0.0 == 100 && $0.1 == 1 } == true, "rational BE read")
+        try require(MetadataWriter.tiffRationalAt(ratLE, 0, false, true).map { $0.0 == 100 && $0.1 == 1 } == true, "rational LE read")
+        let ratNeg = Data([0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 2])
+        try require(MetadataWriter.tiffRationalAt(ratNeg, 0, true, false).map { $0.0 == -1 && $0.1 == 2 } == true, "srational sign")
+        // Semantic TIFF value equality (B2).
+        try require(MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 282, type: 5, sourceValue: ratBE, sourceLittle: false, outputValue: ratLE, outputLittle: true), "cross-endian rational equal")
+        let halfA = Data([0, 0, 0, 1, 0, 0, 0, 2])
+        let halfB = Data([0, 0, 0, 2, 0, 0, 0, 4])
+        let third = Data([0, 0, 0, 1, 0, 0, 0, 3])
+        try require(MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 282, type: 5, sourceValue: halfA, sourceLittle: false, outputValue: halfB, outputLittle: false), "1/2 == 2/4 by reduction")
+        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 282, type: 5, sourceValue: halfA, sourceLittle: false, outputValue: third, outputLittle: false), "1/2 != 1/3")
+        let zeroDenA = Data([0, 0, 0, 1, 0, 0, 0, 0])
+        let zeroDenB = Data([0, 0, 0, 2, 0, 0, 0, 0])
+        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 282, type: 5, sourceValue: zeroDenA, sourceLittle: false, outputValue: zeroDenB, outputLittle: false), "zero denominators never semantically equal")
+        let negHalf = Data([0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 2])
+        let negHalfB = Data([0, 0, 0, 1, 0xFF, 0xFF, 0xFF, 0xFE])
+        try require(MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 207, type: 10, sourceValue: negHalf, sourceLittle: false, outputValue: negHalfB, outputLittle: false), "srational -1/2 == 1/-2")
+        // GPS DMS composition (tags 2/4 only): legal recomposition matches,
+        // real differences and axis violations refuse.
+        func dms(_ parts: [(Int, Int)]) -> Data {
+            var d = Data()
+            for (n, den) in parts {
+                d.append(contentsOf: [UInt8(n >> 24 & 0xFF), UInt8(n >> 16 & 0xFF), UInt8(n >> 8 & 0xFF), UInt8(n & 0xFF),
+                                      UInt8(den >> 24 & 0xFF), UInt8(den >> 16 & 0xFF), UInt8(den >> 8 & 0xFF), UInt8(den & 0xFF)])
+            }
+            return d
+        }
+        let canon = dms([(40, 1), (24, 1), (0, 1)])
+        let recomposed = dms([(40, 1), (23, 1), (6000, 100)])
+        let different = dms([(41, 1), (0, 1), (0, 1)])
+        try require(MetadataWriter.tiffValuesMatch(label: "IFD0>34853", tag: 2, type: 5, sourceValue: canon, sourceLittle: false, outputValue: recomposed, outputLittle: false), "DMS 40/24/0 == 40/23/60.00")
+        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0>34853", tag: 2, type: 5, sourceValue: canon, sourceLittle: false, outputValue: different, outputLittle: false), "DMS 40.4 != 41.0")
+        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0>34853", tag: 2, type: 5, sourceValue: canon, sourceLittle: false, outputValue: dms([(40, 1), (24, 1)]), outputLittle: false), "DMS count mismatch refuses")
+        // The same recomposition under a non-GPS tag stays byte-exact.
+        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 282, type: 5, sourceValue: canon, sourceLittle: false, outputValue: recomposed, outputLittle: false), "DMS tolerance confined to GPS degree tags")
+        // ASCII: NUL-trimmed equality, content differences refuse.
+        try require(MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 271, type: 2, sourceValue: Data("abc\0".utf8), sourceLittle: false, outputValue: Data("abc\0\0".utf8), outputLittle: false), "ASCII NUL-trim")
+        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 271, type: 2, sourceValue: Data("abc\0".utf8), sourceLittle: false, outputValue: Data("abd\0".utf8), outputLittle: false), "ASCII content differs")
+        // Unproven types stay byte-exact.
+        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 256, type: 3, sourceValue: Data([0, 8]), sourceLittle: false, outputValue: Data([0, 9]), outputLittle: false), "SHORT stays byte-exact")
+        // TIFF tag-700 surgery: replace and drop, header repointed, bytes sane.
+        var tiff700 = Data([0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00])
+        tiff700.append(contentsOf: [0x01, 0x00])                 // one entry
+        tiff700.append(contentsOf: [0xBC, 0x01, 0x07, 0x00])     // tag 700, type UNDEFINED
+        tiff700.append(contentsOf: [0x04, 0x00, 0x00, 0x00])     // count 4
+        tiff700.append(contentsOf: [0x1A, 0x00, 0x00, 0x00])     // value offset 26
+        tiff700.append(contentsOf: [0x00, 0x00, 0x00, 0x00])     // next IFD = 0
+        tiff700.append(contentsOf: [0xAA, 0xBB, 0xCC, 0xDD])     // packet bytes
+        let packet = Data("<x/>".utf8)
+        guard let replaced700 = MetadataWriter.tiffReplacingTag700(tiff700, correctedPacket: packet) else {
+            throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "tag700 replace returned nil"])
+        }
+        try require(replaced700.count > tiff700.count, "tag700 replace appends the IFD copy")
+        try require(replaced700.range(of: packet) != nil, "tag700 replace carries the new packet")
+        try require(replaced700.range(of: Data([0xAA, 0xBB, 0xCC, 0xDD])) == nil, "tag700 replace drops the old packet")
+        guard let dropped700 = MetadataWriter.tiffReplacingTag700(tiff700, correctedPacket: nil) else {
+            throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "tag700 drop returned nil"])
+        }
+        try require(dropped700.range(of: Data([0xAA, 0xBB, 0xCC, 0xDD])) == nil, "tag700 drop removes the packet")
+        // JPEG APP13 surgery: insert, replace, malformed refusal.
+        var jpegBase = Data([0xFF, 0xD8])
+        jpegBase.append(contentsOf: [0xFF, 0xE0, 0x00, 0x10])
+        jpegBase.append(contentsOf: Data("JFIF\0".utf8) + Data(repeating: 0, count: 9))
+        jpegBase.append(contentsOf: [0xFF, 0xDA, 0x00, 0x02])
+        jpegBase.append(contentsOf: [0x11, 0x22, 0x33])
+        jpegBase.append(contentsOf: [0xFF, 0xD9])
+        let irb = Data("Photoshop 3.0\0".utf8) + Data([0x38, 0x42, 0x49, 0x4D, 0x04, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00])
+        guard let insertedIRB = MetadataWriter.jpegReplacingAPP13(jpegBase, payload: irb) else {
+            throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "APP13 insert returned nil"])
+        }
+        try require(insertedIRB.range(of: irb) != nil, "APP13 insert carries the resource bytes")
+        try require(insertedIRB.count > jpegBase.count, "APP13 insert grows the file")
+        guard let replacedIRB = MetadataWriter.jpegReplacingAPP13(insertedIRB, payload: irb) else {
+            throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "APP13 replace returned nil"])
+        }
+        try require(replacedIRB == insertedIRB, "APP13 replace is idempotent for identical bytes")
+        try require(MetadataWriter.jpegReplacingAPP13(Data([0xFF, 0xD8, 0xFF]), payload: irb) == nil, "APP13 malformed source refuses")
         try require(MetadataWriter.metadataTagValuesEqual(path: "exif:GPSLatitude", "40,24N" as CFString, 40.4 as CFNumber), "GPS decimal vs sexagesimal equality")
         try require(!MetadataWriter.metadataTagValuesEqual(path: "exif:GPSLatitude", "40,24N" as CFString, (-40.4) as CFNumber), "GPS sign mismatch must not compare equal")
         try require(!MetadataWriter.metadataTagValuesEqual(path: "exif:GPSLatitude", "40,24N" as CFString, "40,24S" as CFString), "GPS hemisphere mismatch must not compare equal")
@@ -2084,6 +2393,22 @@ struct MetadataWriterTests {
             try require(jpegEntropyData(before) == jpegEntropyData(after), "JPEG entropy must survive byte-exact")
             try require(try pixelData(f) != nil, "JPEG output must decode")
         }
+
+        try runTIFFIPTCRefusalProbe(root: root)
+        try runHEICEmptyPacketProbe(root: root)
+        try run16BitProbe(root: root)
+        try runPngSuiteProbe(root: root)
+        try runPublicFixtureProbe(root: root)
+        try runLargeHEICProbe(root: root)
+        // M18 (B3): the IPTC presence check and its removal exemptions.
+        let iptcSource: [CFString: Any] = [kCGImagePropertyIPTCDictionary: ["DateCreated": "2001:02:03", "City": "Madrid", "Caption": "x"] as [CFString: Any]]
+        var iptcDropped = MetadataWriter.droppedUntouchedTags(source: iptcSource, output: [:], removeDate: true, removeLocation: false)
+        try require(iptcDropped == ["IPTC.Caption", "IPTC.City"], "IPTC date keys exempt under removeDate only: \(iptcDropped)")
+        iptcDropped = MetadataWriter.droppedUntouchedTags(source: iptcSource, output: [:], removeDate: false, removeLocation: true)
+        try require(iptcDropped == ["IPTC.Caption", "IPTC.DateCreated"], "IPTC location keys exempt under removeLocation only: \(iptcDropped)")
+        let gpsDateSource: [CFString: Any] = [kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSDateStamp: "2001:02:03", kCGImagePropertyGPSLatitude: 40.4] as [CFString: Any]]
+        let gpsDropped = MetadataWriter.droppedUntouchedTags(source: gpsDateSource, output: [:], removeDate: true, removeLocation: false)
+        try require(gpsDropped.count == 1 && !gpsDropped[0].contains("DateStamp"), "GPSDateStamp exempt under removeDate: \(gpsDropped)")
 
         try require(softFailures.isEmpty, "\(softFailures.count) check(s) failed across format stages: \(softFailures.joined(separator: " | "))")
         print("Metadata write safety tests passed (PNG, JPEG, TIFF, HEIC).")

@@ -9,6 +9,54 @@ struct MetadataWriter {
     /// arguments; the same values drive the no-op decision, the encoder and the readback
     /// check, so they cannot disagree. Removal wins over a set of the same field, as the
     /// encoder always did. A location needs both coordinates, as before.
+    /// Per-operation refusal diagnostics: each write carries its own note
+    /// instance, so concurrent writes never leak each other's reasons. Guards
+    /// record the FIRST refusal cause; the manager surfaces it in the item's
+    /// error text instead of a bare "failed" (S8).
+    final class RefusalNote {
+        private(set) var reason: String?
+        func record(_ message: String) {
+            if reason == nil { reason = message }
+        }
+    }
+
+    /// Records a refusal cause on the operation's note and mirrors it to
+    /// stderr. The first cause sticks; later cascading refusals do not
+    /// overwrite it.
+    private static func recordRefusal(_ note: RefusalNote?, _ message: String) {
+        note?.record(message)
+        FileHandle.standardError.write(Data("\(message)\n".utf8))
+    }
+
+    /// Minimal well-formed XMP packet with a zero-tag graph: spliced into a
+    /// carrier item when a removal empties the packet, so the carrier holds
+    /// "no metadata" instead of refusing the write (S2). The verifier asserts
+    /// the staged output reparses to a zero-tag graph.
+    private static let emptyXMPPacket = Data("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"></rdf:RDF></x:xmpmeta>".utf8)
+
+    /// IPTC property-dictionary keys a date/location removal strips AND the
+    /// readback verifies absent - one shared pair of sets, so the strip and
+    /// the check can never drift apart (B3). ImageIO surfaces the IPTC
+    /// dictionary keyed by property name.
+    private static let iptcDateKeys: [String] = ["DateCreated", "TimeCreated"]
+    private static let iptcLocationKeys: [String] = ["City", "SubLocation", "ProvinceState", "Country", "CountryPrimaryLocationCode", "CountryPrimaryLocationName", "Location"]
+
+    /// XMP leaf names (any namespace) a date/location removal deletes (S7):
+    /// the CI-proven alias set plus dcterms:created ("created") and
+    /// exif:GPSDateStamp ("GPSDateStamp", a capture-date alias).
+    /// xmp:MetadataDate is intentionally NOT a target while the serializer
+    /// regenerates it as the edit timestamp on every write; if evidence shows
+    /// it is not regenerated it must join this set. Location leaves are
+    /// MWG-mapped location names; anything GPS-prefixed is also a target.
+    private static let removalDateLeaves: Set<String> = [
+        "DateTimeOriginal", "DateTimeDigitized", "DateTime",
+        "DateCreated", "CreateDate", "ModifyDate", "created", "GPSDateStamp",
+    ]
+    private static let removalLocationLeaves: Set<String> = [
+        "Location", "City", "SubLocation", "ProvinceState", "State",
+        "Country", "CountryCode", "CountryName",
+    ]
+
     struct WritePlan: Equatable {
         let date: Date?
         let latitude: Double?
@@ -39,7 +87,7 @@ struct MetadataWriter {
     /// the encoder writes one image, so accepting them would silently drop frames.
     /// A request with nothing to set or remove never re-encodes: an overwrite leaves the
     /// original untouched and a copy is a byte-for-byte copy of the source.
-    static func updateImageMetadata(sourceURL: URL, destinationURL: URL, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool) -> Bool {
+    static func updateImageMetadata(sourceURL: URL, destinationURL: URL, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool, refusalNote: RefusalNote? = nil) -> Bool {
         let plan = WritePlan(date: date, removeDate: removeDate, latitude: latitude, longitude: longitude, removeLocation: removeLocation)
         let isOverwrite = sourceURL.resolvingSymlinksInPath().standardizedFileURL == destinationURL.resolvingSymlinksInPath().standardizedFileURL
         let targetURL = isOverwrite ? sourceURL.resolvingSymlinksInPath() : destinationURL
@@ -62,48 +110,57 @@ struct MetadataWriter {
                 } catch {
                     return false
                 }
-            })
+            }, refusalNote: refusalNote)
         }
         return writeSafely(sourceURL: sourceURL, destinationURL: targetURL, overwrite: isOverwrite, encode: { temporaryURL in
-            encodeImageMetadata(sourceURL: sourceURL, destinationURL: temporaryURL, date: plan.date, removeDate: plan.removeDate, latitude: plan.latitude, longitude: plan.longitude, removeLocation: plan.removeLocation)
-        }, verify: { stagedURL in verifyIntent(plan, in: stagedURL) })
+            encodeImageMetadata(sourceURL: sourceURL, destinationURL: temporaryURL, date: plan.date, removeDate: plan.removeDate, latitude: plan.latitude, longitude: plan.longitude, removeLocation: plan.removeLocation, refusalNote: refusalNote)
+        }, verify: { stagedURL in verifyIntent(plan, in: stagedURL, refusalNote: refusalNote) }, refusalNote: refusalNote)
     }
 
     /// I03: reads the staged output back through ImageIO, independent of the encoder,
     /// and checks it holds what the plan asked for. Fails closed.
-    static func verifyIntent(_ plan: WritePlan, in url: URL) -> Bool {
+    static func verifyIntent(_ plan: WritePlan, in url: URL, refusalNote: RefusalNote? = nil) -> Bool {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
             return false
         }
         let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
         let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        let gpsDict = props[kCGImagePropertyGPSDictionary] as? [CFString: Any]
+        let iptcDict = props[kCGImagePropertyIPTCDictionary] as? [CFString: Any]
         if plan.removeDate {
+            let iptcDateSurvivors = iptcDateKeys.filter { iptcDict?[$0 as CFString] != nil }
             if exif?[kCGImagePropertyExifDateTimeOriginal] != nil
                 || exif?[kCGImagePropertyExifDateTimeDigitized] != nil
-                || tiff?[kCGImagePropertyTIFFDateTime] != nil {
-                FileHandle.standardError.write(Data("Readback: date still present after removal\n".utf8))
+                || tiff?[kCGImagePropertyTIFFDateTime] != nil
+                || gpsDict?[kCGImagePropertyGPSDateStamp] != nil
+                || !iptcDateSurvivors.isEmpty {
+                recordRefusal(refusalNote, "Readback: date still present after removal")
                 return false
             }
         }
-        if plan.removeLocation, props[kCGImagePropertyGPSDictionary] != nil {
-            FileHandle.standardError.write(Data("Readback: GPS still present after removal\n".utf8))
-            return false
+        if plan.removeLocation {
+            let iptcLocationSurvivors = iptcLocationKeys.filter { iptcDict?[$0 as CFString] != nil }
+            guard props[kCGImagePropertyGPSDictionary] == nil, iptcLocationSurvivors.isEmpty else {
+                recordRefusal(refusalNote, "Readback: location still present after removal")
+                return false
+            }
         }
         if let date = plan.date {
             let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
             formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
             let expected = formatter.string(from: date)
             guard let written = exif?[kCGImagePropertyExifDateTimeOriginal] as? String,
                   normalizedDateString(written) == expected else {
-                FileHandle.standardError.write(Data("Readback: capture date differs from the requested date\n".utf8))
+                recordRefusal(refusalNote, "Readback: capture date differs from the requested date\n")
                 return false
             }
         }
         if let lat = plan.latitude, let lon = plan.longitude {
             guard let coords = readExistingCoordinates(from: url),
                   abs(coords.latitude - lat) < 0.0001, abs(coords.longitude - lon) < 0.0001 else {
-                FileHandle.standardError.write(Data("Readback: coordinates differ from the requested location\n".utf8))
+                recordRefusal(refusalNote, "Readback: coordinates differ from the requested location\n")
                 return false
             }
         }
@@ -129,7 +186,8 @@ struct MetadataWriter {
         encode: (URL) -> Bool,
         validate: (URL, URL) -> Bool = validateImage,
         verify: (URL) -> Bool = { _ in true },
-        publish: (URL, URL, Bool) throws -> Void = publishImage
+        publish: (URL, URL, Bool) throws -> Void = publishImage,
+        refusalNote: RefusalNote? = nil
     ) -> Bool {
         let fileManager = FileManager.default
         // mkdtemp reserves a private sibling directory exclusively, on the target volume.
@@ -137,6 +195,7 @@ struct MetadataWriter {
             .appendingPathComponent(".pinmage-write-XXXXXX").path.utf8CString)
         guard let directoryPath = mkdtemp(&template) else {
             print("Failed to create metadata staging directory: \(errno)")
+            recordRefusal(refusalNote, "could not create a private staging directory (errno \(errno))")
             return false
         }
         let stagingDirectory = URL(fileURLWithPath: String(cString: directoryPath), isDirectory: true)
@@ -147,11 +206,28 @@ struct MetadataWriter {
             let originalData = overwrite ? try Data(contentsOf: sourceURL) : nil
             if overwrite {
                 guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
-                      CGImageSourceGetCount(source) == 1 else { return false }
+                      CGImageSourceGetCount(source) == 1 else {
+                    recordRefusal(refusalNote, "source is not a readable single-frame image")
+                    return false
+                }
             }
-            guard encode(temporaryURL), validate(sourceURL, temporaryURL), verify(temporaryURL) else { return false }
+            guard encode(temporaryURL) else {
+                recordRefusal(refusalNote, "the verified encoder refused the write")
+                return false
+            }
+            guard validate(sourceURL, temporaryURL) else {
+                recordRefusal(refusalNote, "staged output failed format validation")
+                return false
+            }
+            guard verify(temporaryURL) else {
+                recordRefusal(refusalNote, "staged output failed intent verification")
+                return false
+            }
             if overwrite {
-                guard try Data(contentsOf: sourceURL) == originalData else { return false }
+                guard try Data(contentsOf: sourceURL) == originalData else {
+                    recordRefusal(refusalNote, "the source changed while the write was staged")
+                    return false
+                }
                 let attributes = try fileManager.attributesOfItem(atPath: sourceURL.path)
                 if let permissions = attributes[.posixPermissions] {
                     try fileManager.setAttributes([.posixPermissions: permissions], ofItemAtPath: temporaryURL.path)
@@ -165,6 +241,7 @@ struct MetadataWriter {
             return true
         } catch {
             print("Failed to publish metadata image: \(error)")
+            recordRefusal(refusalNote, "could not publish the staged image: \(error.localizedDescription)")
             return false
         }
     }
@@ -207,7 +284,7 @@ struct MetadataWriter {
         return true
     }
 
-    private static func encodeImageMetadata(sourceURL: URL, destinationURL: URL, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool) -> Bool {
+    private static func encodeImageMetadata(sourceURL: URL, destinationURL: URL, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool, refusalNote: RefusalNote? = nil) -> Bool {
         // Read file data
         guard let sourceData = try? Data(contentsOf: sourceURL),
               let imageSource = CGImageSourceCreateWithData(sourceData as CFData, nil) else {
@@ -221,7 +298,7 @@ struct MetadataWriter {
         // writeSafely refuses multi-frame overwrites upstream, but a copy to a
         // different destination reached this encoder unchecked.
         guard CGImageSourceGetCount(imageSource) == 1 else {
-            FileHandle.standardError.write(Data("Refusing multi-frame image: writing it would drop frames\n".utf8))
+            recordRefusal(refusalNote, "Refusing multi-frame image: writing it would drop frames\n")
             return false
         }
 
@@ -277,7 +354,7 @@ struct MetadataWriter {
             // machinery. Multi-frame
             // sources are refused at this function's entry (M15).
             guard let decodedImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
-                FileHandle.standardError.write(Data("Failed to decode image for removal write\n".utf8))
+                recordRefusal(refusalNote, "Failed to decode image for removal write\n")
                 return false
             }
             var removalDict = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any] ?? [:]
@@ -290,15 +367,29 @@ struct MetadataWriter {
                 var tiffDict = removalDict[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
                 tiffDict.removeValue(forKey: kCGImagePropertyTIFFDateTime)
                 removalDict[kCGImagePropertyTIFFDictionary] = tiffDict
+                // GPSDateStamp is a capture-date alias (S7).
+                var gpsDict = removalDict[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
+                gpsDict.removeValue(forKey: kCGImagePropertyGPSDateStamp)
+                removalDict[kCGImagePropertyGPSDictionary] = gpsDict
+                // IPTC date aliases strip from the same shared key set the
+                // readback verifies absent (B3).
+                var iptcDict = removalDict[kCGImagePropertyIPTCDictionary] as? [CFString: Any] ?? [:]
+                for key in iptcDateKeys { iptcDict.removeValue(forKey: key as CFString) }
+                removalDict[kCGImagePropertyIPTCDictionary] = iptcDict
             }
             if removeLocation {
                 removalDict.removeValue(forKey: kCGImagePropertyGPSDictionary)
+                // IPTC location aliases strip from the shared key set (B3).
+                var iptcDict = removalDict[kCGImagePropertyIPTCDictionary] as? [CFString: Any] ?? [:]
+                for key in iptcLocationKeys { iptcDict.removeValue(forKey: key as CFString) }
+                removalDict[kCGImagePropertyIPTCDictionary] = iptcDict
             }
             // A mixed request (remove one field, set the other) must still carry the
             // requested values: this branch used to apply only the removals, so the set
             // half was silently dropped. Same EXIF-string form as the dictionary path.
             if !removeDate, let date = date {
                 let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "en_US_POSIX")
                 formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
                 let dateString = formatter.string(from: date)
                 var exifDict = removalDict[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
@@ -319,20 +410,21 @@ struct MetadataWriter {
             }
             CGImageDestinationAddImage(imageDestination, decodedImage, removalDict as CFDictionary)
             guard CGImageDestinationFinalize(imageDestination) else {
-                FileHandle.standardError.write(Data("Failed to finalize image destination\n".utf8))
+                recordRefusal(refusalNote, "Failed to finalize image destination\n")
                 return false
             }
             if utiString == "public.png" {
                 let corrected = correctStagedXMPCarrier(sourceData: sourceData, destinationURL: destinationURL, imageSource: imageSource,
                                                         date: date, removeDate: removeDate, latitude: latitude, longitude: longitude,
-                                                        removeLocation: removeLocation, operation: "removal")
+                                                        removeLocation: removeLocation, operation: "removal", refusalNote: refusalNote)
                 guard corrected.success else { return false }
-                guard pngAuxChunksPreserved(source: sourceData, destinationURL: destinationURL, operation: "removal", xmpHandled: corrected.xmpHandled) else { return false }
+                guard pngAuxChunksPreserved(source: sourceData, destinationURL: destinationURL, operation: "removal", xmpHandled: corrected.xmpHandled, refusalNote: refusalNote) else { return false }
+                guard pngIHDRAndPixelsPreserved(source: sourceData, destinationURL: destinationURL, operation: "removal", refusalNote: refusalNote) else { return false }
             }
             if utiString == "public.tiff" {
                 guard tiffAuxTagsHandled(sourceData: sourceData, destinationURL: destinationURL, imageSource: imageSource,
                                          date: date, removeDate: removeDate, latitude: latitude, longitude: longitude,
-                                         removeLocation: removeLocation, operation: "removal") else { return false }
+                                         removeLocation: removeLocation, operation: "removal", refusalNote: refusalNote) else { return false }
             }
             // M15b, tag level: this branch rebuilds metadata from the
             // properties dictionary, so every source tag the dictionary
@@ -343,12 +435,12 @@ struct MetadataWriter {
             guard let sourceProps = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
                   let stagedSource = CGImageSourceCreateWithURL(destinationURL as CFURL, nil),
                   let stagedProps = CGImageSourceCopyPropertiesAtIndex(stagedSource, 0, nil) as? [CFString: Any] else {
-                FileHandle.standardError.write(Data("Refusing \(utiString) removal: could not read back staged metadata\n".utf8))
+                recordRefusal(refusalNote, "Refusing \(utiString) removal: could not read back staged metadata\n")
                 return false
             }
             let droppedTags = droppedUntouchedTags(source: sourceProps, output: stagedProps, removeDate: removeDate, removeLocation: removeLocation)
             guard droppedTags.isEmpty else {
-                FileHandle.standardError.write(Data("Refusing \(utiString) removal: output would drop untouched tags [\(droppedTags.joined(separator: ", "))]\n".utf8))
+                recordRefusal(refusalNote, "Refusing \(utiString) removal: output would drop untouched tags [\(droppedTags.joined(separator: ", "))]\n")
                 return false
             }
             return true
@@ -378,6 +470,7 @@ struct MetadataWriter {
             
             if let date = date {
                 let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "en_US_POSIX")
                 formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
                 let dateString = formatter.string(from: date)
                 var exifDict = metadataDict[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
@@ -399,7 +492,7 @@ struct MetadataWriter {
             
             CGImageDestinationAddImageFromSource(imageDestination, imageSource, 0, metadataDict as CFDictionary)
             guard CGImageDestinationFinalize(imageDestination) else {
-                FileHandle.standardError.write(Data("Failed to finalize image destination\n".utf8))
+                recordRefusal(refusalNote, "Failed to finalize image destination\n")
                 return false
             }
             if utiString == "public.png" {
@@ -412,14 +505,15 @@ struct MetadataWriter {
                 // itself verified against the staged file.
                 let corrected = correctStagedXMPCarrier(sourceData: sourceData, destinationURL: destinationURL, imageSource: imageSource,
                                                         date: date, removeDate: removeDate, latitude: latitude, longitude: longitude,
-                                                        removeLocation: removeLocation, operation: "set")
+                                                        removeLocation: removeLocation, operation: "set", refusalNote: refusalNote)
                 guard corrected.success else { return false }
-                guard pngAuxChunksPreserved(source: sourceData, destinationURL: destinationURL, operation: "set", xmpHandled: corrected.xmpHandled) else { return false }
+                guard pngAuxChunksPreserved(source: sourceData, destinationURL: destinationURL, operation: "set", xmpHandled: corrected.xmpHandled, refusalNote: refusalNote) else { return false }
+                guard pngIHDRAndPixelsPreserved(source: sourceData, destinationURL: destinationURL, operation: "set", refusalNote: refusalNote) else { return false }
             }
             if utiString == "public.tiff" {
                 guard tiffAuxTagsHandled(sourceData: sourceData, destinationURL: destinationURL, imageSource: imageSource,
                                          date: date, removeDate: removeDate, latitude: latitude, longitude: longitude,
-                                         removeLocation: removeLocation, operation: "set") else { return false }
+                                         removeLocation: removeLocation, operation: "set", refusalNote: refusalNote) else { return false }
             }
             return true
         }
@@ -439,7 +533,8 @@ struct MetadataWriter {
         }
         
         guard applyMetadataPlan(mutableMetadata, date: date, removeDate: removeDate,
-                                latitude: latitude, longitude: longitude, removeLocation: removeLocation) else {
+                                latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                                refusalNote: refusalNote) else {
             return false
         }
         
@@ -470,18 +565,18 @@ struct MetadataWriter {
             // stderr: print() output is block-buffered and lost when the test
             // harness aborts; the CI log needs the real CFError to diagnose.
             let errDesc = copyError?.takeRetainedValue().localizedDescription ?? "unknown"
-            FileHandle.standardError.write(Data("Failed to write image with updated metadata: \(errDesc)\n".utf8))
+            recordRefusal(refusalNote, "Failed to write image with updated metadata: \(errDesc)\n")
             return false
         }
         if utiString == "public.jpeg" {
             guard jpegWriteVerified(sourceData: sourceData, destinationURL: destinationURL, imageSource: imageSource,
                                     date: date, removeDate: removeDate, latitude: latitude, longitude: longitude,
-                                    removeLocation: removeLocation, operation: isRemoval ? "removal" : "set") else { return false }
+                                    removeLocation: removeLocation, operation: isRemoval ? "removal" : "set", refusalNote: refusalNote) else { return false }
         }
         if utiString == "public.heic" || utiString == "public.heif" {
             guard heicWriteVerified(sourceData: sourceData, destinationURL: destinationURL, imageSource: imageSource,
                                     date: date, removeDate: removeDate, latitude: latitude, longitude: longitude,
-                                    removeLocation: removeLocation, operation: isRemoval ? "removal" : "set") else { return false }
+                                    removeLocation: removeLocation, operation: isRemoval ? "removal" : "set", refusalNote: refusalNote) else { return false }
         }
         return true
     }
@@ -541,6 +636,37 @@ struct MetadataWriter {
         return Data(bytes)
     }
 
+    /// Decoded RGBA at the source's own sample precision: 8bpc and 16bpc
+    /// sources decode to 8/16-bit RGBA respectively; any other precision is
+    /// unsupported here and never silently downconverted for comparison (B4).
+    private static func nativePixelData(_ data: Data) -> (bpc: Int, rgba: Data)? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) == 1,
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        let bpc = image.bitsPerComponent
+        guard bpc == 8 || bpc == 16 else { return nil }
+        let width = image.width, height = image.height
+        let bytesPerPixel = 4 * (bpc / 8)
+        var bytes = [UInt8](repeating: 0, count: width * height * bytesPerPixel)
+        let bitmapInfo = bpc == 16
+            ? CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder16Little.rawValue
+            : CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let context = CGContext(data: &bytes, width: width, height: height,
+                                      bitsPerComponent: bpc, bytesPerRow: width * bytesPerPixel,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: bitmapInfo) else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return (bpc, Data(bytes))
+    }
+
+    /// Re-encode-path pixel gate: source and staged decode at the SAME native
+    /// precision (8 or 16bpc) to identical bytes, so a precision reduction
+    /// (16->8) or low-byte damage fails. Unsupported precisions refuse (B4).
+    private static func nativePixelsEqual(_ sourceData: Data, _ stagedData: Data) -> Bool {
+        guard let s = nativePixelData(sourceData), let t = nativePixelData(stagedData) else { return false }
+        return s.bpc == t.bpc && s.rgba == t.rgba
+    }
+
     /// Photoshop IRB (APP13 "Photoshop 3.0") 8BIM resource walk, keeping
     /// each resource's complete bytes (signature, id, Pascal name, size,
     /// payload, pad). Strict: nil when the payload does not parse
@@ -565,7 +691,7 @@ struct MetadataWriter {
             p += 4
             let end = p + size + (size % 2)
             guard end <= b.count else { return nil }
-            let nameData = nameLength > 0 ? Data(b[(pos + 7)..<(pos + 6 + nameLength)]) : Data()
+            let nameData = nameLength > 0 ? Data(b[(pos + 7)..<(pos + 7 + nameLength)]) : Data()
             out.append((rid, nameData, Data(b[p..<(p + size)]), Data(b[pos..<end])))
             pos = end
         }
@@ -595,7 +721,7 @@ struct MetadataWriter {
     /// Replaces the first genuine Photoshop IRB with the given payload;
     /// inserts one after the last APP0/APP1 when the file has none (the
     /// conventional IRB position, keeping compared-segment order stable).
-    private static func jpegReplacingAPP13(_ data: Data, payload: Data) -> Data? {
+    static func jpegReplacingAPP13(_ data: Data, payload: Data) -> Data? {
         let b = [UInt8](data)
         guard b.count >= 4, b[0] == 0xFF, b[1] == 0xD8 else { return nil }
         var out = Data([0xFF, 0xD8])
@@ -650,16 +776,26 @@ struct MetadataWriter {
             exempt["IFD0", default: []].insert(306)
             exempt["IFD0>34665", default: []].formUnion([36867, 36868])
         }
-        if latitude != nil || removeLocation {
-            exempt["IFD0>34853", default: []] = [0, 1, 2, 3, 4]
+        if removeDate {
+            // GPSDateStamp is a capture-date alias the removal strips (S7).
+            exempt["IFD0>34853", default: []].insert(29)
+        }
+        if removeLocation {
+            // The whole GPS IFD is intentionally removed; verifyIntent
+            // independently requires the GPS dictionary absent in the
+            // readback, so this byte-compare only protects non-GPS tags.
+            // -1 exempts every tag in this IFD (tiffAuxTagViolations).
+            exempt["IFD0>34853"] = [-1]
+        } else if latitude != nil {
+            exempt["IFD0>34853", default: []].formUnion([0, 1, 2, 3, 4])
         }
         return exempt
     }
 
     /// Full JPEG write verification, fail-closed at every step, per actual
     /// input/output - nothing is inferred from fixture evidence:
-    /// 1. Both files parse as JPEG. Decoded RGBA and the entropy-coded
-    ///    stream are byte-exact; every payload-bearing segment outside the
+    /// 1. Both files parse as JPEG. The entropy-coded stream is byte-exact
+    ///    (pixel transport is proven there); every payload-bearing segment outside the
     ///    semantically-handled APP1/APP13 classes survives payload-exact
     ///    (frame/coding tables, APP0, APP2, APP14, COM, foreign APPn, SOS
     ///    header), as a multiset per marker; only no-payload markers are
@@ -676,12 +812,12 @@ struct MetadataWriter {
     ///    Malformed IRB refuses.
     private static func jpegWriteVerified(sourceData: Data, destinationURL: URL, imageSource: CGImageSource,
                                           date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?,
-                                          removeLocation: Bool, operation: String) -> Bool {
+                                          removeLocation: Bool, operation: String, refusalNote: RefusalNote? = nil) -> Bool {
         let irbPrefix = Data("Photoshop 3.0\0".utf8)
         let exifPrefix = Data("Exif\0\0".utf8)
         let xmpPrefix = Data("http://ns.adobe.com/xap/1.0/\0".utf8)
         func refuse(_ message: String) -> Bool {
-            FileHandle.standardError.write(Data("Refusing JPEG \(operation): \(message)\n".utf8))
+            recordRefusal(refusalNote, "Refusing JPEG \(operation): \(message)\n")
             return false
         }
         guard let source = jpegSegments(sourceData) else {
@@ -749,9 +885,9 @@ struct MetadataWriter {
         guard source.entropy == staged.entropy else {
             return refuse("compressed image data was re-encoded")
         }
-        guard let sourceRGBA = rgbaData(sourceData), let stagedRGBA = rgbaData(stagedData), sourceRGBA == stagedRGBA else {
-            return refuse("decoded pixels changed")
-        }
+        // Pixel transport is proven by the byte-exact comparisons above
+        // (the entropy-coded stream / image item payload): a decoded-pixel
+        // compare here would add cost, not assurance (B4).
         // Classify segments: Exif/XMP/IRB are handled semantically;
         // no-payload markers are exempt; everything else is payload-exact.
         func classified(_ segments: [(marker: UInt8, payload: Data)]) -> (exact: [UInt8: [Data]], order: [UInt8], exif: [Data], xmp: [Data]) {
@@ -761,7 +897,6 @@ struct MetadataWriter {
             var xmp: [Data] = []
             for (m, payload) in segments {
                 if m == 0xD8 || m == 0xD9 || m == 0x01 || (m >= 0xD0 && m <= 0xD7) { continue }
-                order.append(m)
                 if m == 0xE1 && payload.prefix(exifPrefix.count) == exifPrefix {
                     exif.append(payload)
                 } else if m == 0xE1 && payload.prefix(xmpPrefix.count) == xmpPrefix {
@@ -770,6 +905,7 @@ struct MetadataWriter {
                     continue
                 } else {
                     exact[m, default: []].append(payload)
+                    order.append(m)
                 }
             }
             return (exact, order, exif, xmp)
@@ -955,6 +1091,92 @@ struct MetadataWriter {
     /// guarded by label, and a fully-exempted sub-IFD may legitimately vanish.
     private static let tiffLayoutTags: Set<Int> = [273, 279, 324, 325, 513, 514]
 
+    /// Exact rational equality by lowest-terms reduction: no products, no
+    /// epsilon, no overflow path. Zero denominators never compare equal.
+    /// SRATIONAL sign is normalized into the numerator with Int64 magnitude
+    /// arithmetic (Int32.min safe) (B2).
+    static func reducedRational(num: Int64, den: Int64) -> (Int64, Int64)? {
+        guard den != 0 else { return nil }
+        var n = num, d = den
+        if d < 0 { n = -n; d = -d }
+        var a = n < 0 ? -n : n, b = d
+        while b != 0 { let t = a % b; a = b; b = t }
+        let g = a == 0 ? 1 : a
+        return (n / g, d / g)
+    }
+
+    /// Reads the i-th rational of a TIFF RATIONAL(5)/SRATIONAL(10) value.
+    static func tiffRationalAt(_ value: Data, _ index: Int, _ signed: Bool, _ little: Bool) -> (Int64, Int64)? {
+        let vb = [UInt8](value)
+        let o = 8 * index
+        guard o + 8 <= vb.count else { return nil }
+        func u32(_ p: Int) -> UInt32 {
+            little ? UInt32(vb[p]) | UInt32(vb[p + 1]) << 8 | UInt32(vb[p + 2]) << 16 | UInt32(vb[p + 3]) << 24
+                   : UInt32(vb[p]) << 24 | UInt32(vb[p + 1]) << 16 | UInt32(vb[p + 2]) << 8 | UInt32(vb[p + 3])
+        }
+        let rawN = u32(o), rawD = u32(o + 4)
+        let n: Int64 = signed ? Int64(Int32(bitPattern: rawN)) : Int64(rawN)
+        let d: Int64 = signed ? Int64(Int32(bitPattern: rawD)) : Int64(rawD)
+        return (n, d)
+    }
+
+    /// Type-verified value equality for the aux-tag compare (B2). Byte
+    /// equality always passes. Otherwise only semantics proven for the field
+    /// type: RATIONAL/SRATIONAL compare element-wise by exact reduction
+    /// (endianness read per file); GPS degree tags (IFD0>34853 tags 2/4)
+    /// compose DMS numerically because ImageIO legally recomposes them
+    /// (40/24/0 == 40/23/60.00), with axis bounds checked and a 1e-9
+    /// tolerance confined to this composition; ASCII compares NUL-trimmed
+    /// strings. The field TYPE must match (fail-closed: a SHORT->LONG
+    /// re-encode refuses even when the value is equal). Everything else
+    /// stays byte-exact.
+    static func tiffValuesMatch(label: String, tag: Int, type: Int,
+                                        sourceValue: Data, sourceLittle: Bool,
+                                        outputValue: Data, outputLittle: Bool) -> Bool {
+        if sourceValue == outputValue { return true }
+        switch type {
+        case 2:
+            func ascii(_ d: Data) -> String? {
+                var bytes = [UInt8](d)
+                while bytes.last == 0 { bytes.removeLast() }
+                return String(bytes: bytes, encoding: .utf8)
+            }
+            guard let a = ascii(sourceValue), let b = ascii(outputValue) else { return false }
+            return a == b
+        case 5, 10:
+            let signed = type == 10
+            guard sourceValue.count % 8 == 0 else { return false }
+            let scount = sourceValue.count / 8
+            guard scount == outputValue.count / 8, outputValue.count % 8 == 0 else { return false }
+            if label == "IFD0>34853" && (tag == 2 || tag == 4) {
+                // Composed DMS degrees: the only place a tolerance applies.
+                func composed(_ v: Data, _ little: Bool) -> Double? {
+                    guard scount >= 1, scount <= 3 else { return nil }
+                    var result = 0.0, divisor = 1.0
+                    for i in 0..<scount {
+                        guard let (n, d) = tiffRationalAt(v, i, false, little), d > 0, n >= 0 else { return nil }
+                        result += Double(n) / Double(d) / divisor
+                        divisor *= 60
+                    }
+                    return result.isFinite ? result : nil
+                }
+                guard let a = composed(sourceValue, sourceLittle), let b = composed(outputValue, outputLittle),
+                      a <= (tag == 2 ? 90 : 180), b <= (tag == 2 ? 90 : 180) else { return false }
+                return abs(a - b) < 1e-9
+            }
+            for i in 0..<scount {
+                guard let s = tiffRationalAt(sourceValue, i, signed, sourceLittle),
+                      let o = tiffRationalAt(outputValue, i, signed, outputLittle),
+                      let sr = reducedRational(num: s.0, den: s.1),
+                      let or_ = reducedRational(num: o.0, den: o.1),
+                      sr.0 == or_.0, sr.1 == or_.1 else { return false }
+            }
+            return true
+        default:
+            return false
+        }
+    }
+
     /// Every source tag outside the layout/regenerated/exempt sets must
     /// survive in the same IFD with the same type and exact resolved value.
     /// Returns the violations; nil when either file does not parse.
@@ -976,7 +1198,7 @@ struct MetadataWriter {
         for (label, entries, _) in source.ifds {
             let exemptHere = exempt[label] ?? []
             for entry in entries {
-                if exemptHere.contains(entry.tag) { continue }
+                if exemptHere.contains(-1) || exemptHere.contains(entry.tag) { continue }
                 if entry.tag == 34665 || entry.tag == 34853 || entry.tag == 40965 { continue }
                 if tiffLayoutTags.contains(entry.tag) {
                     if !outPresent.contains("\(label)#\(entry.tag)") {
@@ -989,7 +1211,12 @@ struct MetadataWriter {
                     continue
                 }
                 let candidates = outValues[label]?[entry.tag] ?? []
-                if !candidates.contains(where: { $0.0 == entry.type && $0.1 == value }) {
+                let matched = candidates.contains(where: { candidate in
+                    candidate.0 == entry.type && tiffValuesMatch(label: label, tag: entry.tag, type: entry.type,
+                                                                 sourceValue: value, sourceLittle: source.little,
+                                                                 outputValue: candidate.1, outputLittle: output.little)
+                })
+                if !matched {
                     violations.append("tag \(entry.tag) missing or altered at \(label)")
                 }
             }
@@ -1005,7 +1232,7 @@ struct MetadataWriter {
     /// be reattached safely after correction - arbitrary private tags are
     /// refused by the guard instead of reattached (an opaque payload could
     /// embed exactly the values a removal targets).
-    private static func tiffReplacingTag700(_ data: Data, correctedPacket: Data?) -> Data? {
+    static func tiffReplacingTag700(_ data: Data, correctedPacket: Data?) -> Data? {
         let b = [UInt8](data)
         guard b.count >= 8 else { return nil }
         let little: Bool
@@ -1084,11 +1311,23 @@ struct MetadataWriter {
     /// could embed exactly the values a removal targets.
     private static func tiffAuxTagsHandled(sourceData: Data, destinationURL: URL, imageSource: CGImageSource,
                                            date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?,
-                                           removeLocation: Bool, operation: String) -> Bool {
+                                           removeLocation: Bool, operation: String, refusalNote: RefusalNote? = nil) -> Bool {
         var exempt = intentExemptions(date: date, removeDate: removeDate,
                                       latitude: latitude, longitude: longitude, removeLocation: removeLocation)
         guard let sourceIFDs = tiffIFDs(sourceData) else {
-            FileHandle.standardError.write(Data("Refusing TIFF \(operation): source did not parse as TIFF\n".utf8))
+            recordRefusal(refusalNote, "Refusing TIFF \(operation): source did not parse as TIFF\n")
+            return false
+        }
+        // Native IPTC-NAA (tag 33723) is an opaque IIM byte blob that can
+        // embed exactly the dates/locations a plan changes; it cannot be
+        // verified, edited or stripped safely. Any date/location-touching
+        // operation on such a file refuses - the same posture as JPEG's
+        // non-empty IPTC-NAA IRB rule (B3).
+        let hasNativeIPTC = sourceIFDs.ifds.contains { _, entries, _ in
+            entries.contains { $0.tag == 33723 }
+        }
+        guard !hasNativeIPTC else {
+            recordRefusal(refusalNote, "Refusing TIFF \(operation): source carries a native IPTC-NAA tag (33723) whose date/location semantics cannot be verified")
             return false
         }
         let sourceHas700 = sourceIFDs.ifds.contains { label, entries, _ in
@@ -1098,48 +1337,49 @@ struct MetadataWriter {
         if sourceHas700 {
             guard let packet = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
                                                   latitude: latitude, longitude: longitude, removeLocation: removeLocation) else {
-                FileHandle.standardError.write(Data("Refusing TIFF \(operation): corrected XMP failed preservation checks\n".utf8))
+                recordRefusal(refusalNote, "Refusing TIFF \(operation): corrected XMP failed preservation checks\n")
                 return false
             }
             guard let stagedData = try? Data(contentsOf: destinationURL),
                   let replaced = tiffReplacingTag700(stagedData, correctedPacket: packet.isEmpty ? nil : packet) else {
-                FileHandle.standardError.write(Data("Refusing TIFF \(operation): could not stage the corrected tag 700\n".utf8))
+                recordRefusal(refusalNote, "Refusing TIFF \(operation): could not stage the corrected tag 700\n")
                 return false
             }
             do {
                 try replaced.write(to: destinationURL)
             } catch {
-                FileHandle.standardError.write(Data("Refusing TIFF \(operation): could not stage the corrected tag 700\n".utf8))
+                recordRefusal(refusalNote, "Refusing TIFF \(operation): could not stage the corrected tag 700\n")
                 return false
             }
             // Verify the staged tag 700 carries exactly the corrected packet
             // (or is gone when the corrections emptied it).
             guard let finalData = try? Data(contentsOf: destinationURL),
                   let finalIFDs = tiffIFDs(finalData) else {
-                FileHandle.standardError.write(Data("Refusing TIFF \(operation): corrected tag 700 did not verify\n".utf8))
+                recordRefusal(refusalNote, "Refusing TIFF \(operation): corrected tag 700 did not verify\n")
                 return false
             }
             let final700 = finalIFDs.ifds.first { label, _, _ in label == "IFD0" }?.entries.filter { $0.tag == 700 } ?? []
             let expected700: [Data] = packet.isEmpty ? [] : [packet]
             guard final700.compactMap({ $0.value }) == expected700 else {
-                FileHandle.standardError.write(Data("Refusing TIFF \(operation): corrected tag 700 did not verify\n".utf8))
+                recordRefusal(refusalNote, "Refusing TIFF \(operation): corrected tag 700 did not verify\n")
                 return false
             }
         }
         guard let finalData = try? Data(contentsOf: destinationURL),
               let violations = tiffAuxTagViolations(sourceData: sourceData, outputData: finalData, exempt: exempt) else {
-            FileHandle.standardError.write(Data("Refusing TIFF \(operation): source or staged output did not parse as TIFF\n".utf8))
+            recordRefusal(refusalNote, "Refusing TIFF \(operation): source or staged output did not parse as TIFF\n")
             return false
         }
         guard violations.isEmpty else {
-            FileHandle.standardError.write(Data("Refusing TIFF \(operation): output would lose or alter tags [\(violations.joined(separator: ", "))]\n".utf8))
+            recordRefusal(refusalNote, "Refusing TIFF \(operation): output would lose or alter tags [\(violations.joined(separator: ", "))]\n")
             return false
         }
         // Pixel fidelity per actual input/output: the layout tags are only
-        // presence-checked, so decoded RGBA equality is what verifies the
-        // strip/tile offsets and counts still point at intact pixel data.
-        guard let sourceRGBA = rgbaData(sourceData), let stagedRGBA = rgbaData(finalData), sourceRGBA == stagedRGBA else {
-            FileHandle.standardError.write(Data("Refusing TIFF \(operation): decoded pixels changed\n".utf8))
+        // presence-checked, so native-precision decoded equality (8/16bpc)
+        // is what verifies the strip/tile offsets and counts still point at
+        // intact pixel data without a hidden precision reduction (B4).
+        guard nativePixelsEqual(sourceData, finalData) else {
+            recordRefusal(refusalNote, "Refusing TIFF \(operation): decoded pixels changed at native precision (or the precision is unsupported)")
             return false
         }
         return true
@@ -1249,7 +1489,7 @@ struct MetadataWriter {
     /// items, references, iloc extents and the non-primary item payloads
     /// (hex, capped). Diagnostic only; the sole caller is the
     /// artifact-dir-gated refusal path, so it never runs in the app.
-    private static func heicDiagnosticInventory(source: Data, staged: Data) -> String {
+    static func heicDiagnosticInventory(source: Data, staged: Data) -> String {
         var out = ""
         func describe(_ label: String, _ data: Data) {
             out += "== heic-diag \(label): \(data.count) bytes\n"
@@ -1560,7 +1800,7 @@ struct MetadataWriter {
     /// length, the iloc payload entirely before the splice point, and no
     /// item straddling the splice with a base offset (a base shifts the
     /// whole item, so a straddling base item cannot be adjusted).
-    private static func heicSplicingItemPayload(_ whole: Data, itemID: Int, newPayload: Data) -> Data? {
+    static func heicSplicingItemPayload(_ whole: Data, itemID: Int, newPayload: Data) -> Data? {
         guard let boxes = heicBoxes(whole, range: 0..<whole.count),
               boxes.allSatisfy({ $0.type == "ftyp" || $0.type == "meta" || $0.type == "mdat" }) else { return nil }
         let metas = boxes.filter { $0.type == "meta" }
@@ -1665,9 +1905,13 @@ struct MetadataWriter {
         guard iinfs.count == 1, let items = heicIinfItems(iinfs[0].payload) else { return nil }
         let mimeIDs = items.filter { $0.type == "mime" && $0.contentType == "application/rdf+xml" }.map { $0.id }
         guard mimeIDs.count == 1 else { return nil }
-        guard let packet = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
-                                              latitude: latitude, longitude: longitude, removeLocation: removeLocation),
-              !packet.isEmpty else { return nil }
+        guard let corrected = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
+                                                 latitude: latitude, longitude: longitude, removeLocation: removeLocation) else { return nil }
+        // A removal can empty the packet: splice the minimal well-formed
+        // empty packet so the mime item carries no metadata instead of
+        // refusing (S2). The verifier asserts the staged item reparses to a
+        // zero-tag graph.
+        let packet = corrected.isEmpty ? emptyXMPPacket : corrected
         guard let spliced = heicSplicingItemPayload(stagedData, itemID: mimeIDs[0], newPayload: packet) else {
             FileHandle.standardError.write(Data("HEIC note: staged XMP item layout does not support verified-packet restore; verification decides\n".utf8))
             return nil
@@ -1833,6 +2077,7 @@ struct MetadataWriter {
         let wantDate = date != nil && !removeDate
         let wantLocation = latitude != nil && longitude != nil && !removeLocation
         let tiffDateFormatter = DateFormatter()
+        tiffDateFormatter.locale = Locale(identifier: "en_US_POSIX")
         tiffDateFormatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
         let expectedDate = wantDate ? date.map { tiffDateFormatter.string(from: $0) } : nil
         let expectedOrientation = sourceOrientation ?? 1
@@ -1914,14 +2159,14 @@ struct MetadataWriter {
 
     private static func heicWriteVerified(sourceData: Data, destinationURL: URL, imageSource: CGImageSource,
                                           date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?,
-                                          removeLocation: Bool, operation: String) -> Bool {
+                                          removeLocation: Bool, operation: String, refusalNote: RefusalNote? = nil) -> Bool {
         // Full structural evidence is CI-only: PRESERVATION_ARTIFACT_DIR is
         // set by the workflow and never by the app, so a CI refusal dumps
         // both box structures and the synthetic fixture bytes for one-run
         // diagnosis; in the app a refusal stays the single line above.
         var stagedDataForDump: Data? = nil
         func refuse(_ message: String) -> Bool {
-            FileHandle.standardError.write(Data("Refusing HEIC \(operation): \(message)\n".utf8))
+            recordRefusal(refusalNote, "Refusing HEIC \(operation): \(message)\n")
             if let dir = ProcessInfo.processInfo.environment["PRESERVATION_ARTIFACT_DIR"],
                let staged = stagedDataForDump {
                 let report = heicDiagnosticInventory(source: sourceData, staged: staged)
@@ -2271,20 +2516,34 @@ struct MetadataWriter {
         let mimeItemIDs = items.filter { $0.type == "mime" }.map { $0.id } + (addedMimeID.map { [$0] } ?? [])
         if !mimeItemIDs.isEmpty {
             guard let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
-                                                          latitude: latitude, longitude: longitude, removeLocation: removeLocation),
-                  !expectedPacket.isEmpty else {
+                                                          latitude: latitude, longitude: longitude, removeLocation: removeLocation) else {
                 return refuse("corrected XMP failed preservation checks")
             }
             for mimeID in mimeItemIDs {
                 guard let stagedPayload = stagedPayloads[mimeID],
-                      let stagedGraph = CGImageMetadataCreateFromXMPData(stagedPayload as CFData),
-                      let expectedGraph = CGImageMetadataCreateFromXMPData(expectedPacket as CFData) else {
+                      let stagedGraph = CGImageMetadataCreateFromXMPData(stagedPayload as CFData) else {
                     return refuse("staged XMP item failed verification")
                 }
-                let violations = xmpPlanViolations(source: expectedGraph, result: stagedGraph,
-                                                   date: nil, removeDate: false, latitude: nil, longitude: nil, removeLocation: false)
-                guard violations.isEmpty else {
-                    return refuse("staged XMP item differs from the verified packet [\(violations.joined(separator: ", "))]")
+                if expectedPacket.isEmpty {
+                    // The removal emptied the packet: the staged item - read
+                    // from the output file bytes - must hold a zero-tag graph.
+                    var tagCount = 0
+                    CGImageMetadataEnumerateTagsUsingBlock(stagedGraph, nil, [kCGImageMetadataEnumerateRecursively: true] as CFDictionary) { _, _ in
+                        tagCount += 1
+                        return true
+                    }
+                    guard tagCount == 0 else {
+                        return refuse("staged XMP item still carries \(tagCount) tag(s) after the packet was emptied")
+                    }
+                } else {
+                    guard let expectedGraph = CGImageMetadataCreateFromXMPData(expectedPacket as CFData) else {
+                        return refuse("staged XMP item failed verification")
+                    }
+                    let violations = xmpPlanViolations(source: expectedGraph, result: stagedGraph,
+                                                       date: nil, removeDate: false, latitude: nil, longitude: nil, removeLocation: false)
+                    guard violations.isEmpty else {
+                        return refuse("staged XMP item differs from the verified packet [\(violations.joined(separator: ", "))]")
+                    }
                 }
             }
         }
@@ -2303,8 +2562,9 @@ struct MetadataWriter {
             return refuse("staged ftyp did not parse")
         }
         let checkableBrands: Set<String> = ["heic", "heix", "mif1", "miaf", "MiHB", "MiPr"]
-        guard Set(ftyp.brands).isSubset(of: checkableBrands) else {
-            return refuse("ftyp declares brands outside the verifiable set [\(ftyp.brands.joined(separator: ","))]")
+        let declaredBrands = Set(ftyp.brands).union([ftyp.major])
+        guard declaredBrands.isSubset(of: checkableBrands) else {
+            return refuse("ftyp declares brands outside the verifiable set [\(declaredBrands.subtracting(checkableBrands).sorted().joined(separator: ","))]")
         }
         guard let stagedIloc = stagedChildren.first(where: { $0.type == "iloc" }),
               let stagedLocated = heicExtents(stagedIloc.payload) else {
@@ -2317,7 +2577,7 @@ struct MetadataWriter {
                 return refuse("overlapping iloc extents")
             }
         }
-        if ftyp.brands.contains("MiPr") {
+        if declaredBrands.contains("MiPr") {
             // MIAF 10.2 layout: ftyp first, meta immediately after, no mdat
             // before meta; the primary item's coded data ends within
             // 128000 bytes of the file start.
@@ -2334,9 +2594,9 @@ struct MetadataWriter {
                 return refuse("MiPr layout: primary coded data beyond 128000 bytes")
             }
         }
-        guard let sourceRGBA = rgbaData(sourceData), let stagedRGBA = rgbaData(stagedData), sourceRGBA == stagedRGBA else {
-            return refuse("decoded pixels changed")
-        }
+        // Pixel transport is proven by the byte-exact comparisons above
+        // (the entropy-coded stream / image item payload): a decoded-pixel
+        // compare here would add cost, not assurance (B4).
         return true
     }
 
@@ -2419,14 +2679,14 @@ struct MetadataWriter {
 
     /// M15b: a PNG write must never silently drop or alter an aux chunk. Fails
     /// closed on any loss or on bytes that do not parse as PNG.
-    private static func pngAuxChunksPreserved(source sourceData: Data, destinationURL: URL, operation: String, xmpHandled: Bool = false) -> Bool {
+    private static func pngAuxChunksPreserved(source sourceData: Data, destinationURL: URL, operation: String, xmpHandled: Bool = false, refusalNote: RefusalNote? = nil) -> Bool {
         guard let outputData = try? Data(contentsOf: destinationURL),
               let lost = pngLostAuxChunks(source: sourceData, output: outputData, xmpHandled: xmpHandled) else {
-            FileHandle.standardError.write(Data("Refusing PNG \(operation): source or staged output did not parse as PNG\n".utf8))
+            recordRefusal(refusalNote, "Refusing PNG \(operation): source or staged output did not parse as PNG\n")
             return false
         }
         guard lost.isEmpty else {
-            FileHandle.standardError.write(Data("Refusing PNG \(operation): output would lose or alter chunks [\(lost.joined(separator: ", "))]\n".utf8))
+            recordRefusal(refusalNote, "Refusing PNG \(operation): output would lose or alter chunks [\(lost.joined(separator: ", "))]\n")
             return false
         }
         return true
@@ -2441,7 +2701,7 @@ struct MetadataWriter {
     /// The one metadata transformation both write paths share: removal by
     /// enumerated XMP path (no namespace guessing), then sets in XMP form.
     /// Fail closed on any tag that cannot be removed or created.
-    static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool) -> Bool {
+static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool, refusalNote: RefusalNote? = nil) -> Bool {
         // Removal: ImageIO has no remove-by-image-property API, so the real
         // XMP paths are discovered by recursive enumeration (no namespace
         // guessing) and then deleted. A date removal deletes every capture-date
@@ -2468,7 +2728,7 @@ struct MetadataWriter {
             for removePath in pathsToRemove {
                 // Fail closed: a tag that cannot be removed must not publish.
                 guard CGImageMetadataRemoveTagWithPath(mutableMetadata, nil, removePath as CFString) else {
-                    FileHandle.standardError.write(Data("Failed to remove metadata tag: \(removePath)\n".utf8))
+                    recordRefusal(refusalNote, "Failed to remove metadata tag: \(removePath)\n")
                     return false
                 }
             }
@@ -2479,6 +2739,7 @@ struct MetadataWriter {
         // Fail closed if any write cannot be created.
         if !removeDate, let date = date {
             let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
             // XMP date values must be in XMP form (YYYY-MM-DDThh:mm:ss); the
             // EXIF layout "yyyy:MM:dd HH:mm:ss" is not parseable as XMP and the
             // tag is dropped on readback (CI: "Date missing in png", while
@@ -2497,7 +2758,7 @@ struct MetadataWriter {
                   CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeOriginal" as CFString, dateString as CFString),
                   CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:DateTimeDigitized" as CFString, dateString as CFString),
                   CGImageMetadataSetValueWithPath(mutableMetadata, nil, "tiff:DateTime" as CFString, dateString as CFString) else {
-                FileHandle.standardError.write(Data("Failed to set date metadata\n".utf8))
+                recordRefusal(refusalNote, "Failed to set date metadata\n")
                 return false
             }
         }
@@ -2510,7 +2771,7 @@ struct MetadataWriter {
                   CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:GPSLatitudeRef" as CFString, (lat >= 0 ? "N" : "S") as CFString),
                   CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:GPSLongitude" as CFString, abs(lon) as CFNumber),
                   CGImageMetadataSetValueWithPath(mutableMetadata, nil, "exif:GPSLongitudeRef" as CFString, (lon >= 0 ? "E" : "W") as CFString) else {
-                FileHandle.standardError.write(Data("Failed to set GPS metadata\n".utf8))
+                recordRefusal(refusalNote, "Failed to set GPS metadata\n")
                 return false
             }
         }
@@ -2560,16 +2821,42 @@ struct MetadataWriter {
     /// source's own metadata, staged and verified exactly. Returns whether
     /// the write may proceed and whether the XMP carrier was handled, so the
     /// aux guard verifies it by identity instead of payload comparison.
+    /// PNG re-encode gate beyond aux chunks (B4): the IHDR payload -
+    /// dimensions, bit depth, color type, compression, filter and interlace
+    /// method - must survive byte-exact, so a bit-depth or color-model
+    /// downgrade refuses; and the decoded pixels must match at native
+    /// precision (8/16bpc), so 16-bit damage or a silent 16->8 reduction
+    /// refuses. Interlaced sources reach here only if the re-encode kept
+    /// the interlace method; otherwise IHDR inequality refuses first.
+    private static func pngIHDRAndPixelsPreserved(source sourceData: Data, destinationURL: URL, operation: String, refusalNote: RefusalNote? = nil) -> Bool {
+        guard let outputData = try? Data(contentsOf: destinationURL),
+              let sourceChunks = pngChunks(sourceData), let outputChunks = pngChunks(outputData),
+              let sourceIHDR = sourceChunks["IHDR"], let outputIHDR = outputChunks["IHDR"],
+              sourceIHDR.count == 1, outputIHDR.count == 1 else {
+            recordRefusal(refusalNote, "Refusing PNG \(operation): IHDR did not parse")
+            return false
+        }
+        guard sourceIHDR[0] == outputIHDR[0] else {
+            recordRefusal(refusalNote, "Refusing PNG \(operation): IHDR changed (dimensions, bit depth, color type or interlace)")
+            return false
+        }
+        guard nativePixelsEqual(sourceData, outputData) else {
+            recordRefusal(refusalNote, "Refusing PNG \(operation): decoded pixels changed at native precision (or the precision is unsupported)")
+            return false
+        }
+        return true
+    }
+
     private static func correctStagedXMPCarrier(sourceData: Data, destinationURL: URL, imageSource: CGImageSource,
                                                 date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?,
-                                                removeLocation: Bool, operation: String) -> (success: Bool, xmpHandled: Bool) {
+                                                removeLocation: Bool, operation: String, refusalNote: RefusalNote? = nil) -> (success: Bool, xmpHandled: Bool) {
         guard let sourceChunks = pngChunks(sourceData) else {
-            FileHandle.standardError.write(Data("Refusing PNG \(operation): source did not parse as PNG\n".utf8))
+            recordRefusal(refusalNote, "Refusing PNG \(operation): source did not parse as PNG\n")
             return (false, false)
         }
         let sourceXMP = (sourceChunks["iTXt"] ?? []).filter(isXMPCarrierPayload)
         guard sourceXMP.count <= 1 else {
-            FileHandle.standardError.write(Data("Refusing PNG \(operation): multiple XMP packets\n".utf8))
+            recordRefusal(refusalNote, "Refusing PNG \(operation): multiple XMP packets\n")
             return (false, false)
         }
         guard !sourceXMP.isEmpty else {
@@ -2581,13 +2868,13 @@ struct MetadataWriter {
                                               latitude: latitude, longitude: longitude, removeLocation: removeLocation),
               let staged = try? Data(contentsOf: destinationURL),
               let replaced = pngReplacingXMPCarrier(staged, correctedPacket: packet.isEmpty ? nil : packet) else {
-            FileHandle.standardError.write(Data("Refusing PNG \(operation): could not build or stage the corrected XMP packet\n".utf8))
+            recordRefusal(refusalNote, "Refusing PNG \(operation): could not build or stage the corrected XMP packet\n")
             return (false, false)
         }
         do {
             try replaced.write(to: destinationURL)
         } catch {
-            FileHandle.standardError.write(Data("Refusing PNG \(operation): could not stage the corrected XMP packet\n".utf8))
+            recordRefusal(refusalNote, "Refusing PNG \(operation): could not stage the corrected XMP packet\n")
             return (false, false)
         }
         // Verify the staged file carries exactly the intended packet (none,
@@ -2600,7 +2887,7 @@ struct MetadataWriter {
         guard let finalData = try? Data(contentsOf: destinationURL),
               let finalChunks = pngChunks(finalData),
               (finalChunks["iTXt"] ?? []).filter(isXMPCarrierPayload) == expected else {
-            FileHandle.standardError.write(Data("Refusing PNG \(operation): corrected XMP packet did not verify\n".utf8))
+            recordRefusal(refusalNote, "Refusing PNG \(operation): corrected XMP packet did not verify\n")
             return (false, false)
         }
         return (true, true)
@@ -2658,8 +2945,8 @@ struct MetadataWriter {
     /// including nested members). Tags outside this set are not removal
     /// targets; nonstandard aliases are a documented residual.
     private static func isRemovalTarget(_ leaf: String, removeDate: Bool, removeLocation: Bool) -> Bool {
-        (removeDate && ["DateTimeOriginal", "DateTimeDigitized", "DateTime", "DateCreated", "CreateDate", "ModifyDate"].contains(leaf))
-            || (removeLocation && leaf.hasPrefix("GPS"))
+        (removeDate && removalDateLeaves.contains(leaf))
+            || (removeLocation && (leaf.hasPrefix("GPS") || removalLocationLeaves.contains(leaf)))
     }
 
     /// The XMP paths a plan sets, with their expected values, at the canonical
@@ -2674,6 +2961,7 @@ struct MetadataWriter {
         var expected: [String: CFTypeRef] = [:]
         if let date = date {
             let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
             formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
             let dateString = formatter.string(from: date)
             for path in ["photoshop:DateCreated", "xmp:CreateDate", "xmp:ModifyDate", "exif:DateTimeOriginal"] {
@@ -2874,7 +3162,8 @@ struct MetadataWriter {
             mutableMetadata = empty
         }
         guard applyMetadataPlan(mutableMetadata, date: date, removeDate: removeDate,
-                                latitude: latitude, longitude: longitude, removeLocation: removeLocation) else {
+                                latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                                refusalNote: refusalNote) else {
             return nil
         }
         var tagCount = 0
@@ -2926,8 +3215,17 @@ struct MetadataWriter {
         if !removeLocation, let sourceGps = source[kCGImagePropertyGPSDictionary] as? [CFString: Any] {
             let outputGps = output[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
             for key in sourceGps.keys where outputGps[key] == nil {
+                if removeDate && key == kCGImagePropertyGPSDateStamp { continue }
                 dropped.append("GPS.\(key)")
             }
+        }
+        let sourceIPTC = source[kCGImagePropertyIPTCDictionary] as? [CFString: Any] ?? [:]
+        let outputIPTC = output[kCGImagePropertyIPTCDictionary] as? [CFString: Any] ?? [:]
+        for key in sourceIPTC.keys {
+            let name = key as String
+            if removeDate && iptcDateKeys.contains(name) { continue }
+            if removeLocation && iptcLocationKeys.contains(name) { continue }
+            if outputIPTC[key] == nil { dropped.append("IPTC.\(key)") }
         }
         return dropped.sorted()
     }
