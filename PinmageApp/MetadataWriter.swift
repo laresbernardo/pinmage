@@ -988,52 +988,36 @@ struct MetadataWriter {
             guard stagedParts.xmp.count == 1 else {
                 return refuse("XMP APP1 carrier lost")
             }
+            // Guard B (existing carrier): strict tree equality of the
+            // actual staged packet against the expected corrected packet - no
+            // exemptions, strictly stronger than the previous graph-level
+            // compare. Guard A (inside correctedXMPPacket) accounts the
+            // source packet's content against the corrected packet.
             guard let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
                                                            latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                                                           sourcePacket: Data(sourceParts.xmp[0].dropFirst(xmpPrefix.count)),
                                                            refusalNote: refusalNote),
                   !expectedPacket.isEmpty,
-                  let stagedGraph = CGImageMetadataCreateFromXMPData(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count)) as CFData),
-                  let expectedGraph = CGImageMetadataCreateFromXMPData(expectedPacket as CFData) else {
+                  let stagedTree = xmpPacketTree(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))),
+                  let expectedTree = xmpPacketTree(expectedPacket),
+                  xmpTreeEqual(stagedTree, expectedTree) else {
                 return refuse("staged XMP packet failed verification")
             }
-            let violations = xmpPlanViolations(source: expectedGraph, result: stagedGraph,
-                                               date: nil, removeDate: false, latitude: nil, longitude: nil, removeLocation: false)
-            guard violations.isEmpty else {
-                return refuse("staged XMP packet differs from the verified packet [\(violations.joined(separator: ", "))]")
-            }
         } else if stagedParts.xmp.count == 1 {
-            guard let addedGraph = CGImageMetadataCreateFromXMPData(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count)) as CFData) else {
-                return refuse("added XMP APP1 carrier did not parse")
-            }
-            var expectedMap: [String: CGImageMetadataTag] = [:]
-            if let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
-                                                       latitude: latitude, longitude: longitude, removeLocation: removeLocation,
-                                                       refusalNote: refusalNote),
-               !expectedPacket.isEmpty,
-               let expectedGraph = CGImageMetadataCreateFromXMPData(expectedPacket as CFData) {
-                expectedMap = metadataTagMap(expectedGraph)
-                let violations = xmpPlanViolations(source: expectedGraph, result: addedGraph,
-                                                   date: nil, removeDate: false, latitude: nil, longitude: nil, removeLocation: false)
-                guard violations.isEmpty else {
-                    return refuse("added XMP APP1 carrier differs from the verified packet [\(violations.joined(separator: ", "))]")
-                }
-            }
-            guard let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any],
-                  let width = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
-                  let height = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue else {
-                return refuse("source properties did not parse")
-            }
-            var extras: [String] = []
-            for (path, tag) in metadataTagMap(addedGraph) where expectedMap[path] == nil {
-                let value = CGImageMetadataTagCopyValue(tag)
-                if path == "iio:hasXMP", let b = value as? NSNumber, b.boolValue { continue }
-                if path == "iio:hasXMP", (value as? String) == "True" { continue }
-                if path == "exif:PixelXDimension", xmpNumericValue(value) == Double(width) { continue }
-                if path == "exif:PixelYDimension", xmpNumericValue(value) == Double(height) { continue }
-                extras.append("\(path)=\(String(describing: value))")
-            }
-            guard extras.isEmpty else {
-                return refuse("added XMP APP1 carrier carries unverified tags [\(extras.joined(separator: "; "))]")
+            // Guard B (added carrier): strict tree equality of the actual
+            // staged packet against the expected corrected packet - no
+            // exemptions, strictly stronger than the previous graph compare
+            // plus synthesis allowlist. The source had no packet, so Guard A
+            // does not apply; ImageIO's synthesis lands in both packets
+            // identically.
+            guard let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
+                                                          latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                                                          refusalNote: refusalNote),
+                  !expectedPacket.isEmpty,
+                  let stagedTree = xmpPacketTree(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))),
+                  let expectedTree = xmpPacketTree(expectedPacket),
+                  xmpTreeEqual(stagedTree, expectedTree) else {
+                return refuse("added XMP APP1 carrier differs from the verified packet")
             }
         }
         return true
@@ -1410,8 +1394,16 @@ struct MetadataWriter {
         }
         if sourceHas700 { exempt["IFD0", default: []].insert(700) }
         if sourceHas700 {
+            // Guard A accounts the source packet's content; a tag 700 whose
+            // value cannot be resolved is known-but-unverifiable metadata.
+            let sourcePacket700 = sourceIFDs.ifds.first { label, _, _ in label == "IFD0" }?.entries.first { $0.tag == 700 }?.value
+            guard sourcePacket700 != nil else {
+                recordRefusal(refusalNote, "Refusing TIFF \(operation): source tag 700 value could not be verified\n")
+                return false
+            }
             guard let packet = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
                                                   latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                                                  sourcePacket: sourcePacket700,
                                                   refusalNote: refusalNote) else {
                 recordRefusal(refusalNote, "Refusing TIFF \(operation): corrected XMP failed preservation checks\n")
                 return false
@@ -1962,6 +1954,40 @@ struct MetadataWriter {
         return out
     }
 
+    /// The source file's raw XMP item payload for Guard A: present=true when
+    /// the source carries an XMP mime item; payload=nil with present=true
+    /// means the item exists but cannot be located and read bounds-checked,
+    /// which the caller must refuse - known-but-unverifiable source metadata
+    /// is never treated as absent. A source whose item inventory itself is
+    /// unreadable reports (false, nil): presence cannot be determined and the
+    /// pre-existing graph verification decides, as before.
+    private static func heicSourceXMPItem(_ data: Data) -> (present: Bool, payload: Data?) {
+        guard let top = heicBoxes(data, range: 0..<data.count),
+              let meta = top.filter({ $0.type == "meta" }).first, meta.payload.count >= 4,
+              let children = heicBoxes(meta.payload, range: 4..<meta.payload.count),
+              let iinf = children.first(where: { $0.type == "iinf" }),
+              let items = heicIinfItems(iinf.payload) else { return (false, nil) }
+        let mimeIDs = items.filter { $0.type == "mime" && $0.contentType == "application/rdf+xml" }.map { $0.id }
+        guard let itemID = mimeIDs.first else { return (false, nil) }
+        guard mimeIDs.count == 1,
+              let iloc = children.first(where: { $0.type == "iloc" }),
+              let located = heicExtents(iloc.payload),
+              let item = located.first(where: { $0.id == itemID }),
+              item.method == 0, item.dref == 0, !item.extents.isEmpty else { return (true, nil) }
+        let mdatRanges = top.filter { $0.type == "mdat" }.map { $0.range }
+        let b = [UInt8](data)
+        var payload = Data()
+        for extent in item.extents {
+            guard extent.offset >= 0, extent.length >= 0, extent.offset + extent.length <= b.count,
+                  mdatRanges.contains(where: { extent.offset >= $0.lowerBound && extent.offset + extent.length <= $0.upperBound }) else {
+                return (true, nil)
+            }
+            payload.append(Data(b[extent.offset..<(extent.offset + extent.length)]))
+        }
+        guard payload.count <= 1_000_000 else { return (true, nil) }
+        return (true, payload)
+    }
+
     /// ImageIO writes a reduced XMP mime item on HEIC copy-writes (observed
     /// run 41705293732: the staged packet lost exif:DateTimeOriginal,
     /// tiff:Orientation, tiff:TileWidth and tiff:TileLength). Restore the
@@ -1969,10 +1995,10 @@ struct MetadataWriter {
     /// heicSplicingItemPayload. nil when the staged file carries no single
     /// XMP mime item or the layout does not support the splice - the full
     /// verification then decides the write as before.
-    private static func heicRestoringXmpItem(stagedData: Data, imageSource: CGImageSource,
+    private static func heicRestoringXmpItem(stagedData: Data, sourceData: Data, imageSource: CGImageSource,
                                              date: Date?, removeDate: Bool,
                                              latitude: Double?, longitude: Double?, removeLocation: Bool,
-                                             refusalNote: RefusalNote? = nil) -> Data? {
+                                             refusalNote: RefusalNote? = nil, refused: inout Bool) -> Data? {
         guard let boxes = heicBoxes(stagedData, range: 0..<stagedData.count),
               boxes.allSatisfy({ $0.type == "ftyp" || $0.type == "meta" || $0.type == "mdat" }) else { return nil }
         let metas = boxes.filter { $0.type == "meta" }
@@ -1982,9 +2008,24 @@ struct MetadataWriter {
         guard iinfs.count == 1, let items = heicIinfItems(iinfs[0].payload) else { return nil }
         let mimeIDs = items.filter { $0.type == "mime" && $0.contentType == "application/rdf+xml" }.map { $0.id }
         guard mimeIDs.count == 1 else { return nil }
+        // Guard A needs the SOURCE packet. A source XMP item that exists
+        // but cannot be read bounds-checked must refuse, not fall through to
+        // the graph-level verification, which cannot see carrier-only content.
+        let sourceItem = heicSourceXMPItem(sourceData)
+        if sourceItem.present && sourceItem.payload == nil {
+            recordRefusal(refusalNote, "source HEIC XMP item could not be verified")
+            refused = true
+            return nil
+        }
         guard let corrected = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
                                                  latitude: latitude, longitude: longitude, removeLocation: removeLocation,
-                                                 refusalNote: refusalNote) else { return nil }
+                                                 sourcePacket: sourceItem.payload,
+                                                 refusalNote: refusalNote) else {
+            // correctedXMPPacket records its refusal cause; nil here is a
+            // refusal, not a "layout unsupported" skip.
+            refused = true
+            return nil
+        }
         // A removal can empty the packet: splice the minimal well-formed
         // empty packet so the mime item carries no metadata instead of
         // refusing (S2). The verifier asserts the staged item reparses to a
@@ -2301,11 +2342,12 @@ struct MetadataWriter {
         // Same candidate discipline as the ftyp transplant above: the spliced
         // file must still pass every check below, including the packet-graph
         // comparison, which re-verifies the restored packet itself.
-        if let patched = heicRestoringXmpItem(stagedData: stagedData, imageSource: imageSource,
+        var heicXMPRefused = false
+        if let patched = heicRestoringXmpItem(stagedData: stagedData, sourceData: sourceData, imageSource: imageSource,
                                               date: date, removeDate: removeDate,
                                               latitude: latitude, longitude: longitude,
                                               removeLocation: removeLocation,
-                                              refusalNote: refusalNote), patched != stagedData {
+                                              refusalNote: refusalNote, refused: &heicXMPRefused), patched != stagedData {
             do {
                 try patched.write(to: destinationURL)
                 stagedData = patched
@@ -2313,6 +2355,9 @@ struct MetadataWriter {
             } catch {
                 return refuse("could not stage the corrected XMP item")
             }
+        }
+        guard !heicXMPRefused else {
+            return refuse("source XMP item could not be preserved")
         }
         guard let stagedBoxes = heicBoxes(stagedData, range: 0..<stagedData.count) else {
             return refuse("staged output did not parse as boxes")
@@ -2984,9 +3029,16 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
             return (true, false)
         }
         // An empty packet means nothing survived the plan, so the carrier is
-        // dropped rather than written empty.
+        // dropped rather than written empty. Guard A accounts the source
+        // packet's content; an iTXt payload whose header cannot be walked is
+        // known-but-unverifiable metadata.
+        guard let sourcePacket = xmpPacketFromITXtPayload(sourceXMP[0]) else {
+            recordRefusal(refusalNote, "Refusing PNG \(operation): source XMP iTXt payload could not be verified\n")
+            return (false, false)
+        }
         guard let packet = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
                                               latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                                              sourcePacket: sourcePacket,
                                               refusalNote: refusalNote),
               let staged = try? Data(contentsOf: destinationURL),
               let replaced = pngReplacingXMPCarrier(staged, correctedPacket: packet.isEmpty ? nil : packet) else {
@@ -3251,13 +3303,506 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
         return violations.sorted()
     }
 
+    // MARK: - XMP packet content guard (M18; reviewer design v2 + completeness bar)
+
+    /// Identity is always the (namespace URI, local name) pair; the prefix in
+    /// the source bytes is only a label and is never trusted.
+    struct XMPKey: Hashable {
+        let uri: String
+        let name: String
+    }
+
+    /// One parsed XMP property. Every parsed field participates in the
+    /// compare; anything the model does not cover is rejected at parse,
+    /// never silently normalized away.
+    struct XMPProperty {
+        enum Value {
+            case text(String)
+            case uriReference(String)
+            case array(kind: String, entries: [XMPProperty])
+            case structure([XMPProperty])
+        }
+        let key: XMPKey
+        /// Modeled qualifiers: xml:lang only (flagged interpretation: v2 kept
+        /// it; rejecting it would refuse ImageIO's own dc:title lang-alts).
+        let qualifiers: [String: String]
+        let value: Value
+    }
+
+    private static let rdfNamespaceURI = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+    private static let xmlNamespaceURI = "http://www.w3.org/XML/1998/namespace"
+    private static let xmpmetaNamespaceURI = "adobe:ns:meta/"
+
+    /// Namespace URIs for every prefix whose properties the guard targets or
+    /// plans. Prefixes not listed here are simply foreign content: preserved
+    /// verbatim or refused, never treated as targets.
+    private static let xmpNamespaceURIs: [String: String] = [
+        "xmp": "http://ns.adobe.com/xap/1.0/",
+        "exif": "http://ns.adobe.com/exif/1.0/",
+        "exifEX": "http://cipa.jp/exif/1.0/",
+        "tiff": "http://ns.adobe.com/tiff/1.0/",
+        "photoshop": "http://ns.adobe.com/photoshop/1.0/",
+        "dc": "http://purl.org/dc/elements/1.1/",
+        "dcterms": "http://purl.org/dc/terms/",
+        "Iptc4xmpCore": "http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/",
+        // ImageIO's private synthesis namespace (not publicly documented; the
+        // URI is a working assumption - a mismatch fails closed below).
+        "iio": "http://ns.apple.com/ImageIO/1.0/",
+    ]
+
+    /// Strict intermediate node used only while parsing; the packet guard
+    /// converts it to XMPProperty values and rejects any shape outside the
+    /// model. Resource bounds are enforced during construction.
+    private final class XMPDOMNode {
+        let uri: String
+        let name: String
+        var attributes: [(uri: String, name: String, value: String)] = []
+        var text = ""
+        var children: [XMPDOMNode] = []
+        init(uri: String, name: String) { self.uri = uri; self.name = name }
+    }
+
+    /// Total-callback-accounting parser delegate. Every XMLParser callback is
+    /// classified: element start/end and character data (including CDATA,
+    /// which is character data) are modeled; xpacket processing instructions
+    /// are allowed; comments, every DTD/entity/element/attribute/notation
+    /// declaration form, external entity resolution and parse/validation
+    /// errors are rejected; whitespace outside the root element is ignored
+    /// as structural. Nothing unmodeled can reach the tree.
+    private final class XMPPacketParserDelegate: NSObject, XMLParserDelegate {
+        private(set) var root: XMPDOMNode?
+        private(set) var failed = false
+        private var stack: [XMPDOMNode] = []
+        private var prefixURIs: [String: [String]] = ["xml": [MetadataWriter.xmlNamespaceURI]]
+        private var nodeCount = 0
+        private var textCount = 0
+        private static let maxNodes = 4096
+        private static let maxDepth = 12
+        private static let maxText = 1_000_000
+
+        private func reject() { failed = true }
+
+        func parser(_ parser: XMLParser, didStartMappingPrefix prefix: String, toURI namespaceURI: String) {
+            prefixURIs[prefix, default: []].append(namespaceURI)
+        }
+
+        func parser(_ parser: XMLParser, didEndMappingPrefix prefix: String) {
+            if var uris = prefixURIs[prefix], !uris.isEmpty {
+                uris.removeLast()
+                prefixURIs[prefix] = uris
+            }
+        }
+
+        func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
+            guard !failed else { return }
+            nodeCount += 1
+            guard nodeCount <= Self.maxNodes, stack.count < Self.maxDepth else { reject(); return }
+            let node = XMPDOMNode(uri: namespaceURI ?? "", name: elementName)
+            // Attribute names arrive as qualified names; resolve each prefix
+            // against the in-scope mappings (unprefixed attributes are in no
+            // namespace, per XML namespaces).
+            for (rawName, value) in attributeDict {
+                let parts = rawName.split(separator: ":", omittingEmptySubsequences: false)
+                guard parts.count <= 2 else { reject(); return }
+                if parts.count == 2 {
+                    let prefix = String(parts[0])
+                    guard let uri = prefixURIs[prefix]?.last else { reject(); return }
+                    node.attributes.append((uri: uri, name: String(parts[1]), value: value))
+                } else {
+                    node.attributes.append((uri: "", name: rawName, value: value))
+                }
+            }
+            if let parent = stack.last {
+                parent.children.append(node)
+            } else {
+                guard root == nil else { reject(); return }
+                root = node
+            }
+            stack.append(node)
+        }
+
+        func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+            guard !failed, let node = stack.last, node.name == elementName else { reject(); return }
+            stack.removeLast()
+        }
+
+        private func appendText(_ text: String) {
+            guard !failed else { return }
+            textCount += text.count
+            guard textCount <= Self.maxText else { reject(); return }
+            guard let node = stack.last else {
+                // Outside the root element only whitespace is structural.
+                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return }
+                reject()
+                return
+            }
+            node.text += text
+        }
+
+        func parser(_ parser: XMLParser, foundCharacters string: String) { appendText(string) }
+
+        func parser(_ parser: XMLParser, foundIgnorableWhitespace whitespaceString: String) { appendText(whitespaceString) }
+
+        func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
+            guard let text = String(data: CDATABlock, encoding: .utf8) else { reject(); return }
+            appendText(text)
+        }
+
+        func parser(_ parser: XMLParser, foundComment comment: String) { reject() }
+
+        func parser(_ parser: XMLParser, foundProcessingInstructionWithTarget target: String, data: String?) {
+            guard target == "xpacket" else { reject(); return }
+        }
+
+        func parser(_ parser: XMLParser, foundInternalEntityDeclarationWithName name: String, value: String?) { reject() }
+
+        func parser(_ parser: XMLParser, foundExternalEntityDeclarationWithName name: String, publicID: String?, systemID: String?) { reject() }
+
+        func parser(_ parser: XMLParser, foundUnparsedEntityDeclarationWithName name: String, publicID: String?, systemID: String?, notationName: String?) { reject() }
+
+        func parser(_ parser: XMLParser, foundNotationDeclarationWithName name: String, publicID: String?, systemID: String?) { reject() }
+
+        func parser(_ parser: XMLParser, foundElementDeclarationWithName name: String, model: String) { reject() }
+
+        func parser(_ parser: XMLParser, foundAttributeDeclarationWithName name: String, forElement elementName: String, type: String?, defaultValue: String?) { reject() }
+
+        func parser(_ parser: XMLParser, resolveExternalEntityName name: String, systemID: String?) -> Data? {
+            reject()
+            return nil
+        }
+
+        func parser(_ parser: XMLParser, parseErrorOccurred parseError: Error) { reject() }
+
+        func parser(_ parser: XMLParser, validationErrorOccurred validationError: Error) { reject() }
+    }
+
+    /// Parses a raw XMP packet into the guard's total model, or nil when the
+    /// packet uses any shape the model does not cover. UTF-8 is a hard
+    /// prerequisite (XMP mandates it, and it defeats encoding-smuggled
+    /// declarations); DOCTYPE/ENTITY constructs are rejected by byte scan AND
+    /// by parser callback; external resolution stays off; resource bounds
+    /// apply at parse. Refusal on nil, never a partial tree.
+    static func xmpPacketTree(_ packet: Data) -> [XMPProperty]? {
+        guard !packet.isEmpty, packet.count <= 1_000_000,
+              let text = String(data: packet, encoding: .utf8) else { return nil }
+        guard !text.contains("<!DOCTYPE"), !text.contains("<!ENTITY") else { return nil }
+        let parser = XMLParser(data: packet)
+        let delegate = XMPPacketParserDelegate()
+        parser.delegate = delegate
+        parser.shouldProcessNamespaces = true
+        parser.shouldReportNamespacePrefixes = true
+        parser.shouldResolveExternalEntities = false
+        guard parser.parse(), !delegate.failed, parser.parserError == nil,
+              let root = delegate.root else { return nil }
+        return xmpPacketFromDOM(root)
+    }
+
+    /// Envelope: one <x:xmpmeta> holding exactly one <rdf:RDF> whose children
+    /// are all <rdf:Description>. Whitespace between structural elements is
+    /// ignored; any other text or shape is rejected. Zero Descriptions is the
+    /// empty packet (a full-removal result), not an error.
+    private static func xmpPacketFromDOM(_ root: XMPDOMNode) -> [XMPProperty]? {
+        guard root.uri == xmpmetaNamespaceURI, root.name == "xmpmeta" else { return nil }
+        for attr in root.attributes {
+            // ImageIO may stamp a toolkit marker; it carries no metadata.
+            guard attr.uri == xmpmetaNamespaceURI, attr.name == "xmptk" else { return nil }
+        }
+        guard root.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              root.children.count == 1 else { return nil }
+        let rdf = root.children[0]
+        guard rdf.uri == rdfNamespaceURI, rdf.name == "RDF", rdf.attributes.isEmpty,
+              rdf.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        var merged: [XMPKey: XMPProperty] = [:]
+        for child in rdf.children {
+            guard child.uri == rdfNamespaceURI, child.name == "Description",
+                  let fields = xmpDescriptionFields(child) else { return nil }
+            for (key, prop) in fields {
+                guard merged[key] == nil else { return nil } // duplicate keys are ambiguous
+                merged[key] = prop
+            }
+        }
+        return Array(merged.values)
+    }
+
+    /// Fields of one rdf:Description (or a nested structure Description):
+    /// attributes in a property namespace become attribute-form properties
+    /// (rdf:about is identity scaffolding, modeled only when empty; every
+    /// other rdf:/xml:/unprefixed attribute is rejected); child elements
+    /// become element-form properties.
+    private static func xmpDescriptionFields(_ node: XMPDOMNode) -> [XMPKey: XMPProperty]? {
+        guard node.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        var fields: [XMPKey: XMPProperty] = [:]
+        for attr in node.attributes {
+            if attr.uri == rdfNamespaceURI {
+                guard attr.name == "about", attr.value.isEmpty else { return nil }
+                continue
+            }
+            guard attr.uri != xmlNamespaceURI, !attr.uri.isEmpty else { return nil }
+            let key = XMPKey(uri: attr.uri, name: attr.name)
+            guard fields[key] == nil else { return nil }
+            fields[key] = XMPProperty(key: key, qualifiers: [:], value: .text(attr.value))
+        }
+        for child in node.children {
+            guard let prop = xmpPropertyFromElement(child) else { return nil }
+            guard fields[prop.key] == nil else { return nil }
+            fields[prop.key] = prop
+        }
+        return fields
+    }
+
+    /// The only attributes modeled on a value-carrying element: rdf:resource,
+    /// rdf:parseType="Resource" and the xml:lang qualifier.
+    private static func xmpValueAttributes(_ node: XMPDOMNode) -> (resource: String?, parseTypeResource: Bool, qualifiers: [String: String])? {
+        var resource: String?
+        var parseTypeResource = false
+        var qualifiers: [String: String] = [:]
+        for attr in node.attributes {
+            switch (attr.uri, attr.name) {
+            case (rdfNamespaceURI, "resource"):
+                guard resource == nil else { return nil }
+                resource = attr.value
+            case (rdfNamespaceURI, "parseType"):
+                guard attr.value == "Resource" else { return nil }
+                parseTypeResource = true
+            case (xmlNamespaceURI, "lang"):
+                guard qualifiers["lang"] == nil else { return nil }
+                qualifiers["lang"] = attr.value
+            default:
+                return nil
+            }
+        }
+        guard !(resource != nil && parseTypeResource) else { return nil }
+        return (resource, parseTypeResource, qualifiers)
+    }
+
+    private static func xmpPropertyFromElement(_ node: XMPDOMNode) -> XMPProperty? {
+        guard let attrs = xmpValueAttributes(node) else { return nil }
+        let key = XMPKey(uri: node.uri, name: node.name)
+        guard let value = xmpElementValue(node, attrs: attrs, allowNestedArray: true) else { return nil }
+        return XMPProperty(key: key, qualifiers: attrs.qualifiers, value: value)
+    }
+
+    /// Value shape of a property element (or an rdf:li entry): exact text, a
+    /// uri reference, a structure (nested Description or parseType="Resource"),
+    /// or one ordered array. Mixed content and anything else is rejected.
+    private static func xmpElementValue(_ node: XMPDOMNode, attrs: (resource: String?, parseTypeResource: Bool, qualifiers: [String: String]), allowNestedArray: Bool) -> XMPProperty.Value? {
+        let whitespaceOnly = node.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if let resource = attrs.resource {
+            guard node.children.isEmpty, whitespaceOnly else { return nil }
+            return .uriReference(resource)
+        }
+        if attrs.parseTypeResource {
+            guard whitespaceOnly else { return nil }
+            var fields: [XMPKey: XMPProperty] = [:]
+            for child in node.children {
+                guard let prop = xmpPropertyFromElement(child) else { return nil }
+                guard fields[prop.key] == nil else { return nil }
+                fields[prop.key] = prop
+            }
+            return .structure(Array(fields.values))
+        }
+        if node.children.isEmpty {
+            return .text(node.text)
+        }
+        guard node.children.count == 1, whitespaceOnly else { return nil }
+        let child = node.children[0]
+        if child.uri == rdfNamespaceURI, child.name == "Description" {
+            guard let fields = xmpDescriptionFields(child) else { return nil }
+            return .structure(Array(fields.values))
+        }
+        if child.uri == rdfNamespaceURI, ["Seq", "Bag", "Alt"].contains(child.name), allowNestedArray {
+            guard child.attributes.isEmpty,
+                  child.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            var entries: [XMPProperty] = []
+            for li in child.children {
+                guard li.uri == rdfNamespaceURI, li.name == "li",
+                      let liAttrs = xmpValueAttributes(li),
+                      let value = xmpElementValue(li, attrs: liAttrs, allowNestedArray: false) else { return nil }
+                entries.append(XMPProperty(key: XMPKey(uri: rdfNamespaceURI, name: "li"), qualifiers: liAttrs.qualifiers, value: value))
+            }
+            return .array(kind: child.name, entries: entries)
+        }
+        return nil
+    }
+
+    /// Deep equality: key, qualifiers and value all participate. Array order
+    /// participates (rdf:Alt language alternatives are positional); structure
+    /// fields are an unordered key/value set (flagged interpretation: the
+    /// corrected packet is ImageIO's deterministic re-serialization, and
+    /// literal top-level/struct order-sensitivity would refuse every packet).
+    static func xmpPropertyEqual(_ lhs: XMPProperty, _ rhs: XMPProperty) -> Bool {
+        guard lhs.key == rhs.key, lhs.qualifiers == rhs.qualifiers else { return false }
+        switch (lhs.value, rhs.value) {
+        case (.text(let a), .text(let b)):
+            return a == b
+        case (.uriReference(let a), .uriReference(let b)):
+            return a == b
+        case (.array(let kindA, let entriesA), .array(let kindB, let entriesB)):
+            guard kindA == kindB, entriesA.count == entriesB.count else { return false }
+            return zip(entriesA, entriesB).allSatisfy { xmpPropertyEqual($0.0, $0.1) }
+        case (.structure(let fieldsA), .structure(let fieldsB)):
+            return xmpFieldMapEqual(fieldsA, fieldsB)
+        default:
+            return false
+        }
+    }
+
+    /// Keyed-set equality over property lists whose keys are unique (the
+    /// parser enforces uniqueness).
+    private static func xmpFieldMapEqual(_ lhs: [XMPProperty], _ rhs: [XMPProperty]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        var byKey: [XMPKey: XMPProperty] = [:]
+        for prop in lhs { byKey[prop.key] = prop }
+        for prop in rhs {
+            guard let other = byKey[prop.key], xmpPropertyEqual(prop, other) else { return false }
+        }
+        return true
+    }
+
+    /// Whole-tree equality: the two packets carry exactly the same properties.
+    static func xmpTreeEqual(_ lhs: [XMPProperty], _ rhs: [XMPProperty]) -> Bool {
+        xmpFieldMapEqual(lhs, rhs)
+    }
+
+    /// URI-scoped (namespace, local) keys the current plan may legitimately
+    /// remove - the same operations as the graph-level sweep, but scoped to
+    /// the namespaces those operations own. A foreign-namespace lookalike
+    /// (e.g. customns:CreateDate) is NOT exempt: it is real source metadata
+    /// and must survive or the write refuses.
+    private static func xmpRemovalTargetKeys(removeDate: Bool, removeLocation: Bool) -> Set<XMPKey> {
+        var out = Set<XMPKey>()
+        func add(_ prefix: String, _ name: String) {
+            if let uri = xmpNamespaceURIs[prefix] { out.insert(XMPKey(uri: uri, name: name)) }
+        }
+        if removeDate {
+            add("xmp", "CreateDate"); add("xmp", "ModifyDate"); add("xmp", "MetadataDate")
+            add("exif", "DateTimeOriginal"); add("exif", "DateTimeDigitized")
+            add("exif", "GPSDateStamp"); add("exif", "GPSTimeStamp")
+            add("tiff", "DateTime"); add("photoshop", "DateCreated"); add("dcterms", "created")
+        }
+        if removeLocation {
+            for prefix in ["photoshop", "Iptc4xmpCore"] {
+                for name in ["Location", "City", "SubLocation", "ProvinceState", "State", "Country", "CountryCode", "CountryName"] {
+                    add(prefix, name)
+                }
+            }
+            // exif:GPS* is covered by the prefix rule at the sweep site,
+            // matching the graph-level leaf rule.
+        }
+        return out
+    }
+
+    /// URI-scoped keys the plan sets explicitly (the plannedSetValues paths).
+    private static func xmpPlannedSetKeys(date: Date?, latitude: Double?, longitude: Double?) -> Set<XMPKey> {
+        var out = Set<XMPKey>()
+        for path in plannedSetValues(date: date, latitude: latitude, longitude: longitude).keys {
+            let parts = path.split(separator: ":")
+            guard parts.count == 2, let uri = xmpNamespaceURIs[String(parts[0])] else { continue }
+            out.insert(XMPKey(uri: uri, name: String(parts[1])))
+        }
+        return out
+    }
+
+    /// Guard A (reviewer design v2): asymmetric packet-content accounting run
+    /// while building the corrected packet. SOURCE side: every source-packet
+    /// property must either survive IDENTICALLY in the corrected packet or be
+    /// an explicit URI-scoped removal target or planned-set key. RESULT side:
+    /// the corrected packet may carry only source properties (possibly
+    /// updated), planned-set keys, or positively verified image-derived
+    /// synthesis; a removal target still present is a violation. Anything
+    /// unaccounted refuses; an empty corrected packet is the legitimate
+    /// full-removal result (empty tree), and an unparseable source packet
+    /// refuses because the guard cannot account for it.
+    static func xmpGuardViolations(sourcePacket: Data, correctedPacket: Data,
+                                   date: Date?, removeDate: Bool,
+                                   latitude: Double?, longitude: Double?, removeLocation: Bool,
+                                   pixelWidth: Int?, pixelHeight: Int?) -> [String] {
+        guard let sourceTree = xmpPacketTree(sourcePacket) else {
+            return ["source XMP packet uses a shape the guard cannot model"]
+        }
+        let correctedTree: [XMPProperty]
+        if correctedPacket.isEmpty {
+            correctedTree = []
+        } else {
+            guard let parsed = xmpPacketTree(correctedPacket) else {
+                return ["corrected XMP packet failed to reparse under the guard"]
+            }
+            correctedTree = parsed
+        }
+        let targets = xmpRemovalTargetKeys(removeDate: removeDate, removeLocation: removeLocation)
+        let planned = xmpPlannedSetKeys(date: removeDate ? nil : date,
+                                        latitude: removeLocation ? nil : latitude,
+                                        longitude: removeLocation ? nil : longitude)
+        let exifURI = xmpNamespaceURIs["exif"] ?? ""
+        func isGPSPrefixTarget(_ key: XMPKey) -> Bool {
+            removeLocation && key.uri == exifURI && key.name.hasPrefix("GPS")
+        }
+        var sourceByKey: [XMPKey: XMPProperty] = [:]
+        for prop in sourceTree { sourceByKey[prop.key] = prop }
+        var correctedByKey: [XMPKey: XMPProperty] = [:]
+        for prop in correctedTree { correctedByKey[prop.key] = prop }
+        func isVerifiedSynthesis(_ prop: XMPProperty) -> Bool {
+            // ImageIO synthesizes pixel dimensions into every rebuilt packet,
+            // and a hasXMP marker when it materializes a packet for a source
+            // that had none. Each is allowed only when its value matches the
+            // image itself; anything else fails closed.
+            guard case .text(let value) = prop.value else { return false }
+            if prop.key.uri == exifURI, prop.key.name == "PixelXDimension" {
+                guard let width = pixelWidth else { return false }
+                return value == "\(width)"
+            }
+            if prop.key.uri == exifURI, prop.key.name == "PixelYDimension" {
+                guard let height = pixelHeight else { return false }
+                return value == "\(height)"
+            }
+            if prop.key.uri == (xmpNamespaceURIs["iio"] ?? "-"), prop.key.name == "hasXMP" {
+                return value == "True" || value == "true" || value == "1"
+            }
+            return false
+        }
+        var violations: [String] = []
+        for (key, prop) in sourceByKey {
+            if targets.contains(key) || planned.contains(key) || isGPSPrefixTarget(key) { continue }
+            guard let other = correctedByKey[key], xmpPropertyEqual(prop, other) else {
+                violations.append("non-target XMP property would not survive: \(key.name) [\(key.uri)]")
+                continue
+            }
+        }
+        for (key, prop) in correctedByKey {
+            if targets.contains(key) || isGPSPrefixTarget(key) {
+                violations.append("removal target survived in the corrected XMP packet: \(key.name) [\(key.uri)]")
+                continue
+            }
+            if sourceByKey[key] != nil || planned.contains(key) || isVerifiedSynthesis(prop) { continue }
+            violations.append("corrected XMP packet carries an unplanned property: \(key.name) [\(key.uri)]")
+        }
+        return violations.sorted()
+    }
+
+    /// The raw XMP packet inside an iTXt XMP-carrier payload, walking the
+    /// (possibly non-empty) language tag and translated keyword fields rather
+    /// than assuming the writer's own empty fields.
+    private static func xmpPacketFromITXtPayload(_ payload: Data) -> Data? {
+        let prefix = Array("\(xmpITXtKeyword)\0".utf8)
+        let bytes = [UInt8](payload)
+        guard bytes.count > prefix.count + 4, Array(bytes.prefix(prefix.count)) == prefix,
+              bytes[prefix.count] == 0, bytes[prefix.count + 1] == 0 else { return nil }
+        var index = prefix.count + 2
+        guard let langEnd = bytes[index...].firstIndex(of: 0) else { return nil }
+        index = langEnd + 1
+        guard index <= bytes.count, let transEnd = bytes[index...].firstIndex(of: 0) else { return nil }
+        index = transEnd + 1
+        guard index <= bytes.count else { return nil }
+        return Data(bytes[index...])
+    }
+
     /// The corrected XMP packet for a rebuild-path write: the source's full
     /// metadata graph (unknown namespaces preserved) with the requested
     /// removals and sets applied, serialized with ImageIO's own XMP writer.
     /// Empty data means no tags survived the plan (drop the carrier); nil
     /// means the source metadata could not be read, transformed or
     /// serialized - callers treat nil as a refusal, never as "no XMP needed".
-    private static func correctedXMPPacket(imageSource: CGImageSource, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool, refusalNote: RefusalNote? = nil) -> Data? {
+    private static func correctedXMPPacket(imageSource: CGImageSource, date: Date?, removeDate: Bool, latitude: Double?, longitude: Double?, removeLocation: Bool, sourcePacket: Data? = nil, refusalNote: RefusalNote? = nil) -> Data? {
         // Mirror the writer's own construction (updateImageMetadata): a
         // source without a readable metadata graph starts from an EMPTY
         // mutable graph, not from a refusal.
@@ -3300,7 +3845,22 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
             tagCount += 1
             return true
         }
-        guard tagCount > 0 else { return Data() }
+        guard tagCount > 0 else {
+            // Full-removal result: Guard A still accounts the source packet -
+            // every source property must be an exempt target, otherwise the
+            // removal would silently drop non-target carrier content.
+            if let sourcePacket = sourcePacket, !sourcePacket.isEmpty {
+                let guardViolations = xmpGuardViolations(sourcePacket: sourcePacket, correctedPacket: Data(),
+                                                         date: date, removeDate: removeDate,
+                                                         latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                                                         pixelWidth: nil, pixelHeight: nil)
+                guard guardViolations.isEmpty else {
+                    recordRefusal(refusalNote, "corrected XMP failed packet preservation checks [\(guardViolations.joined(separator: ", "))]")
+                    return nil
+                }
+            }
+            return Data()
+        }
         guard let xmpData = CGImageMetadataCreateXMPData(mutableMetadata, nil) else {
             recordRefusal(refusalNote, "corrected XMP graph failed to serialize")
             return nil
@@ -3317,6 +3877,23 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
         guard violations.isEmpty else {
             recordRefusal(refusalNote, "corrected XMP failed preservation checks [\(violations.joined(separator: ", "))]")
             return nil
+        }
+        // Guard A: packet-content accounting against the SOURCE packet. The
+        // graph-level check above cannot see source content ImageIO never
+        // surfaced (CI16: the post-IDAT PNG carrier surfaced only the
+        // synthesized dimensions), so survival is accounted at the packet
+        // level too; anything unaccounted refuses.
+        if let sourcePacket = sourcePacket, !sourcePacket.isEmpty {
+            let props = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
+            let guardViolations = xmpGuardViolations(sourcePacket: sourcePacket, correctedPacket: xmpData as Data,
+                                                     date: date, removeDate: removeDate,
+                                                     latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                                                     pixelWidth: (props?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+                                                     pixelHeight: (props?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue)
+            guard guardViolations.isEmpty else {
+                recordRefusal(refusalNote, "corrected XMP failed packet preservation checks [\(guardViolations.joined(separator: ", "))]")
+                return nil
+            }
         }
         return xmpData as Data
     }

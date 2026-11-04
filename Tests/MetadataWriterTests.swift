@@ -1417,8 +1417,11 @@ struct MetadataWriterTests {
     /// (no vacuity; CI15 showed the graph read does not surface this leaf,
     /// so packet bytes are the oracle), then asserted absent from the
     /// output packet bytes after. Conservative removalDateLeaves membership
-    /// is what strips it; a graph-surfaced non-target leaf (xmp:CreatorTool)
-    /// must survive the same rewrite.
+    /// is what strips it. The non-target control (xmp:CreatorTool) is now a
+    /// HARD preserve-or-refuse control: a passing rewrite must carry it, and a
+    /// refusal must leave the original byte-identical (M18 Guard A; CI16
+    /// proved this runtime does not surface the control into the graph, so
+    /// the refusal branch is the expected outcome today).
     static func runPNGMetadataDateSeedProbe(root: URL) throws {
         let staleSeed = "1999-12-31T23:59:59Z"
         let png = root.appendingPathComponent("m18-metadatadate-seed.png")
@@ -1440,7 +1443,6 @@ struct MetadataWriterTests {
                     "seeded fixture bytes must carry MetadataDate")
         // Diagnostic: what the runtime graph DOES surface from the carrier,
         // so the graph-vs-carrier layering is documented on actual bytes.
-        var creatorToolSurfaced = false
         if let seedSource = CGImageSourceCreateWithURL(png as CFURL, nil),
            let seedGraph = CGImageSourceCopyMetadataAtIndex(seedSource, 0, nil) {
             var paths: [String] = []
@@ -1448,27 +1450,28 @@ struct MetadataWriterTests {
                 paths.append(path as String)
                 return true
             }
-            creatorToolSurfaced = paths.contains("xmp:CreatorTool")
             FileHandle.standardError.write(Data("M18 probe: seeded PNG graph tags = \(paths.sorted().joined(separator: ", "))\n".utf8))
         } else {
             FileHandle.standardError.write(Data("M18 probe: seeded PNG graph unreadable\n".utf8))
         }
-        // Removal: conservative membership strips the leaf from the
-        // rewritten carrier.
-        try require(MetadataWriter.updateImageMetadata(sourceURL: png, destinationURL: png, date: nil, removeDate: true,
-                                                       latitude: nil, longitude: nil, removeLocation: false),
-                    "PNG date removal with a seeded MetadataDate carrier must pass")
-        try require(try Data(contentsOf: png).range(of: Data("MetadataDate".utf8)) == nil,
-                    "xmp:MetadataDate must be absent from the output packet bytes after removal")
-        // Non-target control: a graph-SURFACED non-target leaf must survive
-        // the rewrite; a leaf ImageIO never surfaced is dropped with the
-        // replaced carrier by design (the corrected packet carries graph
-        // content, not raw source packet bytes).
-        if creatorToolSurfaced {
+        // Removal is preserve-or-refuse at the packet level: either the
+        // rewrite strips the target AND preserves the non-target CreatorTool
+        // control, or the write refuses and the original is byte-identical.
+        let removalBefore = try Data(contentsOf: png)
+        let removalNote = MetadataWriter.RefusalNote()
+        let removalOK = MetadataWriter.updateImageMetadata(sourceURL: png, destinationURL: png, date: nil, removeDate: true,
+                                                           latitude: nil, longitude: nil, removeLocation: false,
+                                                           refusalNote: removalNote)
+        if removalOK {
+            try require(try Data(contentsOf: png).range(of: Data("MetadataDate".utf8)) == nil,
+                        "xmp:MetadataDate must be absent from the output packet bytes after removal")
             try require(try xmpPacketString(png)?.contains("PinmageSeedTest") == true,
-                        "graph-surfaced non-target xmp:CreatorTool must survive the removal rewrite")
+                        "non-target xmp:CreatorTool control must survive a removal rewrite that passes")
+            FileHandle.standardError.write(Data("M18 probe: removal passed with CreatorTool control preserved\n".utf8))
         } else {
-            FileHandle.standardError.write(Data("M18 probe: xmp:CreatorTool not graph-surfaced at baseline; carrier-level drop documented\n".utf8))
+            try require(try Data(contentsOf: png) == removalBefore,
+                        "a refused removal must leave the original file byte-identical")
+            FileHandle.standardError.write(Data("M18 probe: removal refused, original preserved [\(removalNote.reason ?? "no reason")]\n".utf8))
         }
     }
 
@@ -1624,6 +1627,142 @@ struct MetadataWriterTests {
     /// (reviewer v3 + main's fast-path correction): every GPS degree
     /// candidate is validated before any admission, including identical
     /// bytes with equal types.
+    /// Guard unit matrix (M18, reviewer completeness bar): the XMP packet
+    /// parser model and Guard A accounting - total callback accounting,
+    /// model totality, evasion resistance, resource bounds. Pure parse and
+    /// compare, independent of ImageIO.
+    static func runXMPGuardUnits() throws {
+        let xmpNS = "http://ns.adobe.com/xap/1.0/"
+        let exifNS = "http://ns.adobe.com/exif/1.0/"
+        let iioNS = "http://ns.apple.com/ImageIO/1.0/"
+        func packet(_ body: String, descriptionAttrs: String = "rdf:about=\"\"") -> Data {
+            Data(("<?xpacket begin=\"\u{FEFF}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>"
+                + "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">"
+                + "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
+                + "<rdf:Description \(descriptionAttrs)>"
+                + body
+                + "</rdf:Description></rdf:RDF></x:xmpmeta>"
+                + "<?xpacket end=\"w\"?>").utf8)
+        }
+        func guardViolations(_ source: Data, _ corrected: Data, date: Date? = nil, removeDate: Bool = false,
+                             latitude: Double? = nil, longitude: Double? = nil, removeLocation: Bool = false,
+                             pixelWidth: Int? = nil, pixelHeight: Int? = nil) -> [String] {
+            MetadataWriter.xmpGuardViolations(sourcePacket: source, correctedPacket: corrected,
+                                              date: date, removeDate: removeDate,
+                                              latitude: latitude, longitude: longitude, removeLocation: removeLocation,
+                                              pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+        }
+        // Baseline parses.
+        try require(MetadataWriter.xmpPacketTree(packet("")) != nil, "guard: empty Description packet must parse")
+        try require(MetadataWriter.xmpPacketTree(packet("<xmp:Label xmlns:xmp=\"\(xmpNS)\">hello</xmp:Label>")) != nil,
+                    "guard: plain packet must parse")
+        // Evasion: encoding-smuggled declarations (UTF-16 bytes) refuse at the UTF-8 prerequisite.
+        try require(MetadataWriter.xmpPacketTree(Data("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>".utf16)) == nil,
+                    "guard: UTF-16 packet must refuse")
+        // Evasion: DOCTYPE / ENTITY declarations refuse (byte scan AND callback).
+        try require(MetadataWriter.xmpPacketTree(Data(("<!DOCTYPE x>" + String(data: packet(""), encoding: .utf8)!).utf8)) == nil,
+                    "guard: empty DOCTYPE must refuse")
+        try require(MetadataWriter.xmpPacketTree(Data(("<!DOCTYPE x [<!ENTITY e \"v\">]>" + String(data: packet(""), encoding: .utf8)!).utf8)) == nil,
+                    "guard: ENTITY declaration must refuse")
+        // Evasion: comment smuggling a target refuses (comments are rejected, not ignored).
+        try require(MetadataWriter.xmpPacketTree(packet("<!-- <xmp:MetadataDate xmlns:xmp=\"\(xmpNS)\">x</xmp:MetadataDate> -->")) == nil,
+                    "guard: comment smuggling must refuse")
+        // CDATA is character data: a CDATA-wrapped value equals the plain form.
+        let cdataTree = MetadataWriter.xmpPacketTree(packet("<xmp:MetadataDate xmlns:xmp=\"\(xmpNS)\"><![CDATA[1999-12-31T23:59:59Z]]></xmp:MetadataDate>"))
+        let plainTree = MetadataWriter.xmpPacketTree(packet("<xmp:MetadataDate xmlns:xmp=\"\(xmpNS)\">1999-12-31T23:59:59Z</xmp:MetadataDate>"))
+        try require(cdataTree != nil && plainTree != nil && MetadataWriter.xmpTreeEqual(cdataTree!, plainTree!),
+                    "guard: CDATA must model as character data")
+        // Evasion: a foreign-namespace lookalike is NOT a removal target - it
+        // must survive or the write refuses (disclosed behavior change).
+        let lookalike = packet("<foo:MetadataDate xmlns:foo=\"http://example.com/\">x</foo:MetadataDate>")
+        try require(!guardViolations(lookalike, packet(""), removeDate: true).isEmpty,
+                    "guard: foreign-namespace lookalike must refuse rather than be removed")
+        try require(guardViolations(lookalike, lookalike, removeDate: true).isEmpty,
+                    "guard: preserved foreign content must not violate")
+        // Attribute-vs-element disguise of a real target: URI-matched, exempt
+        // under removal, required to survive otherwise.
+        let attrTarget = packet("", descriptionAttrs: "rdf:about=\"\" xmlns:xmp=\"\(xmpNS)\" xmp:MetadataDate=\"1999-12-31T23:59:59Z\"")
+        try require(guardViolations(attrTarget, packet(""), removeDate: true).isEmpty,
+                    "guard: attribute-form URI-matched target must be exempt under removal")
+        try require(!guardViolations(attrTarget, packet(""), removeDate: false).isEmpty,
+                    "guard: attribute-form target must survive when no removal is planned")
+        // Bounds: nesting past the depth cap refuses.
+        let deep = String(repeating: "<a xmlns=\"u\">", count: 13) + "x" + String(repeating: "</a>", count: 13)
+        try require(MetadataWriter.xmpPacketTree(packet(deep)) == nil, "guard: nesting past the depth cap must refuse")
+        // Bounds: text past the cap refuses.
+        let bigText = String(repeating: "a", count: 1_100_000)
+        try require(MetadataWriter.xmpPacketTree(packet("<xmp:Label xmlns:xmp=\"\(xmpNS)\">\(bigText)</xmp:Label>")) == nil,
+                    "guard: text past the cap must refuse")
+        // Model totality: duplicates, mixed content, unmodeled attributes and
+        // wrong structure all refuse.
+        try require(MetadataWriter.xmpPacketTree(packet("<exif:ImageWidth xmlns:exif=\"\(exifNS)\">1</exif:ImageWidth><exif:ImageWidth xmlns:exif=\"\(exifNS)\">2</exif:ImageWidth>")) == nil,
+                    "guard: duplicate keys must refuse")
+        try require(MetadataWriter.xmpPacketTree(packet("<xmp:Label xmlns:xmp=\"\(xmpNS)\">hello<exif:Foo xmlns:exif=\"\(exifNS)\">x</exif:Foo></xmp:Label>")) == nil,
+                    "guard: mixed content must refuse")
+        try require(MetadataWriter.xmpPacketTree(packet("", descriptionAttrs: "rdf:about=\"uuid:123\"")) == nil,
+                    "guard: non-empty rdf:about must refuse")
+        try require(MetadataWriter.xmpPacketTree(packet("", descriptionAttrs: "rdf:about=\"\" rdf:ID=\"x\"")) == nil,
+                    "guard: rdf:ID must refuse")
+        try require(MetadataWriter.xmpPacketTree(packet("<xmp:Label xmlns:xmp=\"\(xmpNS)\" foo:bar=\"1\" xmlns:foo=\"http://example.com/\">x</xmp:Label>")) == nil,
+                    "guard: unmodeled attribute on a property element must refuse")
+        try require(MetadataWriter.xmpPacketTree(packet("<?xml-stylesheet href=\"x\"?>")) == nil,
+                    "guard: non-xpacket processing instruction must refuse")
+        try require(MetadataWriter.xmpPacketTree(Data("<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"></rdf:RDF>".utf8)) == nil,
+                    "guard: wrong root wrapper must refuse")
+        // Normalization equivalence: attribute form == element form.
+        let attrForm = MetadataWriter.xmpPacketTree(packet("", descriptionAttrs: "rdf:about=\"\" xmlns:xmp=\"\(xmpNS)\" xmp:Label=\"hello\""))
+        let elemForm = MetadataWriter.xmpPacketTree(packet("<xmp:Label xmlns:xmp=\"\(xmpNS)\">hello</xmp:Label>"))
+        try require(attrForm != nil && elemForm != nil && MetadataWriter.xmpTreeEqual(attrForm!, elemForm!),
+                    "guard: attribute form must equal element form")
+        // Normalization equivalence: parseType="Resource" == nested rdf:Description.
+        let parseTypeForm = MetadataWriter.xmpPacketTree(packet("<exif:Flash xmlns:exif=\"\(exifNS)\" rdf:parseType=\"Resource\"><exif:Fired>True</exif:Fired></exif:Flash>"))
+        let nestedForm = MetadataWriter.xmpPacketTree(packet("<exif:Flash xmlns:exif=\"\(exifNS)\"><rdf:Description><exif:Fired>True</exif:Fired></rdf:Description></exif:Flash>"))
+        try require(parseTypeForm != nil && nestedForm != nil && MetadataWriter.xmpTreeEqual(parseTypeForm!, nestedForm!),
+                    "guard: parseType=Resource must equal nested Description")
+        // Array order and kind participate; structure field order does not.
+        func seq(_ a: String, _ b: String, kind: String = "Seq") -> Data {
+            packet("<xmp:List xmlns:xmp=\"\(xmpNS)\"><rdf:\(kind)><rdf:li>\(a)</rdf:li><rdf:li>\(b)</rdf:li></rdf:\(kind)></xmp:List>")
+        }
+        try require(!MetadataWriter.xmpTreeEqual(MetadataWriter.xmpPacketTree(seq("a", "b"))!, MetadataWriter.xmpPacketTree(seq("b", "a"))!),
+                    "guard: array order must participate")
+        try require(!MetadataWriter.xmpTreeEqual(MetadataWriter.xmpPacketTree(seq("a", "b"))!, MetadataWriter.xmpPacketTree(seq("a", "b", kind: "Bag"))!),
+                    "guard: array kind must participate")
+        let structAB = MetadataWriter.xmpPacketTree(packet("<exif:S xmlns:exif=\"\(exifNS)\" rdf:parseType=\"Resource\"><exif:A>1</exif:A><exif:B>2</exif:B></exif:S>"))
+        let structBA = MetadataWriter.xmpPacketTree(packet("<exif:S xmlns:exif=\"\(exifNS)\" rdf:parseType=\"Resource\"><exif:B>2</exif:B><exif:A>1</exif:A></exif:S>"))
+        try require(structAB != nil && structBA != nil && MetadataWriter.xmpTreeEqual(structAB!, structBA!),
+                    "guard: structure field order must not participate")
+        // xml:lang participates in the compare.
+        let langA = MetadataWriter.xmpPacketTree(packet("<dc:title xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><rdf:Alt><rdf:li xml:lang=\"x-default\">t</rdf:li></rdf:Alt></dc:title>"))
+        let langB = MetadataWriter.xmpPacketTree(packet("<dc:title xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><rdf:Alt><rdf:li xml:lang=\"en\">t</rdf:li></rdf:Alt></dc:title>"))
+        try require(langA != nil && langB != nil && !MetadataWriter.xmpTreeEqual(langA!, langB!),
+                    "guard: xml:lang must participate")
+        // Guard A: non-target preserved vs altered.
+        let src = packet("<xmp:Label xmlns:xmp=\"\(xmpNS)\">hello</xmp:Label>")
+        try require(guardViolations(src, src).isEmpty, "guard A: identical non-target must not violate")
+        let altered = packet("<xmp:Label xmlns:xmp=\"\(xmpNS)\">world</xmp:Label>")
+        try require(!guardViolations(src, altered).isEmpty, "guard A: altered non-target must violate")
+        // Guard A: a removal target surviving in the corrected packet violates.
+        let targetPkt = packet("", descriptionAttrs: "rdf:about=\"\" xmlns:xmp=\"\(xmpNS)\" xmp:MetadataDate=\"1999-12-31T23:59:59Z\"")
+        try require(!guardViolations(targetPkt, targetPkt, removeDate: true).isEmpty,
+                    "guard A: surviving removal target must violate")
+        // Guard A: a full removal over a target-only source yields an empty corrected packet, no violation.
+        try require(guardViolations(targetPkt, Data(), removeDate: true).isEmpty,
+                    "guard A: target-only source with empty corrected packet must not violate")
+        try require(!guardViolations(src, Data(), removeDate: true).isEmpty,
+                    "guard A: non-target source with empty corrected packet must violate")
+        // Guard A: planned sets are admitted; verified synthesis is admitted;
+        // unverified synthesis refuses.
+        let plannedPkt = packet("", descriptionAttrs: "rdf:about=\"\" xmlns:xmp=\"\(xmpNS)\" xmp:CreateDate=\"2020-01-02T03:04:05\"")
+        try require(guardViolations(packet(""), plannedPkt, date: Date()).isEmpty,
+                    "guard A: planned-set key must be admitted")
+        let dimsPkt = packet("<exif:PixelXDimension xmlns:exif=\"\(exifNS)\">4032</exif:PixelXDimension><iio:hasXMP xmlns:iio=\"\(iioNS)\">True</iio:hasXMP>")
+        try require(guardViolations(packet(""), dimsPkt, pixelWidth: 4032).isEmpty,
+                    "guard A: verified synthesis must be admitted")
+        try require(!guardViolations(packet(""), dimsPkt, pixelWidth: 100).isEmpty,
+                    "guard A: unverified synthesis must violate")
+        print("M18 guard units: all cases passed")
+    }
+
     static func runGPSCompareUnits() throws {
         func beRats(_ pairs: [(UInt32, UInt32)]) -> Data {
             var d = Data()
@@ -2831,6 +2970,7 @@ struct MetadataWriterTests {
         }
 
         try runGPSCompareUnits()
+        try runXMPGuardUnits()
         // M18 probes are independent: a failure in one must not abort the
         // harvest of the rest. Capture each probe's error, print it, and
         // throw one aggregate failure at the end - nothing turns green, but
