@@ -1546,6 +1546,51 @@ struct MetadataWriterTests {
         }
     }
 
+    /// Reviewer-requested evidence for the F2 representation question:
+    /// replicates the production copy-write staging path (applyMetadataPlan
+    /// + CGImageDestinationCopyImageSource, merge off) on the actual Nokia
+    /// file and prints the GPS IFD entries (type/count/value bytes) from
+    /// both the source and the staged output, so the SRATIONAL->RATIONAL
+    /// question is settled on this file's own staged Exif.
+    static func printNokiaGPSEvidence(_ file: URL, date: Date) {
+        func gpsLines(_ data: Data, _ label: String) -> [String] {
+            guard let inv = jpegInventory(data) else { return ["\(label): not a JPEG"] }
+            for (name, _, payload) in inv where name == "FFE1" {
+                if payload.count > 6, payload.starts(with: Data([0x45, 0x78, 0x69, 0x66, 0, 0])),
+                   let lines = tiffInventory(Data(payload.dropFirst(6))) {
+                    return lines.filter { $0.contains("34853") }.map { "\(label) \($0)" }
+                }
+            }
+            return ["\(label): no Exif APP1"]
+        }
+        do {
+            let srcData = try Data(contentsOf: file)
+            for line in gpsLines(srcData, "F2-source") {
+                FileHandle.standardError.write(Data("M18 probe: \(line)\n".utf8))
+            }
+            let simURL = file.deletingLastPathComponent().appendingPathComponent("HMD_Nokia_8.3_5G-copysim.jpg")
+            guard let src = CGImageSourceCreateWithURL(file as CFURL, nil),
+                  let dest = CGImageDestinationCreateWithURL(simURL as CFURL, "public.jpeg" as CFString, 1, nil),
+                  let meta = CGImageSourceCopyMetadataAtIndex(src, 0, nil).flatMap({ CGImageMetadataCreateMutableCopy($0) }) else {
+                FileHandle.standardError.write(Data("M18 probe: F2 staged simulation setup failed\n".utf8))
+                return
+            }
+            _ = MetadataWriter.applyMetadataPlan(meta, date: date, removeDate: false, latitude: nil, longitude: nil, removeLocation: false)
+            var copyError: Unmanaged<CFError>?
+            let options: [CFString: Any] = [kCGImageDestinationMetadata: meta, kCGImageDestinationMergeMetadata: kCFBooleanFalse as Any]
+            guard CGImageDestinationCopyImageSource(dest, src, options as CFDictionary, &copyError) else {
+                FileHandle.standardError.write(Data("M18 probe: F2 staged simulation copy failed\n".utf8))
+                return
+            }
+            let simData = try Data(contentsOf: simURL)
+            for line in gpsLines(simData, "F2-staged") {
+                FileHandle.standardError.write(Data("M18 probe: \(line)\n".utf8))
+            }
+        } catch {
+            FileHandle.standardError.write(Data("M18 probe: F2 staged simulation error \(error.localizedDescription)\n".utf8))
+        }
+    }
+
     /// M18: lawfully-licensed public camera fixtures (CC BY-SA 4.0,
     /// ianare/exif-py; fetched by CI with pinned SHA-256). Skipped when
     /// PINMAGE_FIXTURES_DIR is unset, enforced when set.
@@ -1561,42 +1606,66 @@ struct MetadataWriterTests {
             return dst
         }
         let date = Date(timeIntervalSince1970: 981173106)
-        let f1 = try staged("DSCN0010.jpg")
-        try require(!MetadataWriter.updateImageMetadata(sourceURL: f1, destinationURL: f1, date: nil, removeDate: false,
-                                                        latitude: nil, longitude: nil, removeLocation: true),
-                    "F1 Nikon MakerNote removeLocation must refuse")
-        let f2a = try staged("HMD_Nokia_8.3_5G.jpg")
-        try require(MetadataWriter.updateImageMetadata(sourceURL: f2a, destinationURL: f2a, date: date, removeDate: false,
-                                                       latitude: nil, longitude: nil, removeLocation: false),
-                    "F2 Nokia date set must pass (B2 semantic compare)")
-        try require(MetadataWriter.readExistingCoordinates(from: f2a) != nil, "F2 GPS must survive a date set")
-        let f2b = try staged("HMD_Nokia_8.3_5G.jpg", as: "HMD_Nokia_8.3_5G-b.jpg")
-        try require(MetadataWriter.updateImageMetadata(sourceURL: f2b, destinationURL: f2b, date: nil, removeDate: false,
-                                                       latitude: nil, longitude: nil, removeLocation: true),
-                    "F2 Nokia removeLocation must pass (B1 whole-IFD exemption)")
-        try require(MetadataWriter.readExistingCoordinates(from: f2b) == nil, "F2 GPS must be gone after removeLocation")
-        let f3 = try staged("iphone_13_pro_max.heic")
-        try require(!MetadataWriter.updateImageMetadata(sourceURL: f3, destinationURL: f3, date: nil, removeDate: false,
-                                                        latitude: nil, longitude: nil, removeLocation: true),
-                    "F3 Apple HEIC removeLocation must refuse (MakerNote policy)")
-        let f4 = try staged("Canon_40D.jpg")
-        try require(MetadataWriter.updateImageMetadata(sourceURL: f4, destinationURL: f4, date: date, removeDate: false,
-                                                       latitude: nil, longitude: nil, removeLocation: false),
-                    "F4 Canon date set must pass")
-        guard let f4Source = CGImageSourceCreateWithURL(f4 as CFURL, nil),
-              let f4Props = CGImageSourceCopyPropertiesAtIndex(f4Source, 0, nil) as? [CFString: Any],
-              let f4Exif = f4Props[kCGImagePropertyExifDictionary] as? [CFString: Any] else {
-            throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "F4 output must read back"])
+        // F-cases are independent staged copies: collect per-case failures
+        // so one run surfaces every fixture outcome, then throw one
+        // aggregate (same independence rule as the probe harness).
+        var caseFailures: [String] = []
+        func fcase(_ name: String, _ body: () throws -> Void) {
+            do { try body() } catch {
+                caseFailures.append("\(name): \(error.localizedDescription)")
+                FileHandle.standardError.write(Data("M18 fixture case \(name) FAILED: \(error.localizedDescription)\n".utf8))
+            }
         }
-        try require(f4Exif[kCGImagePropertyExifSubsecTimeOriginal] != nil, "F4 SubSecTimeOriginal must survive")
-        let f6 = try staged("Tless0.tiff")
-        try require(MetadataWriter.updateImageMetadata(sourceURL: f6, destinationURL: f6, date: date, removeDate: false,
-                                                       latitude: nil, longitude: nil, removeLocation: false),
-                    "F6 Tless0.tiff date set must pass")
-        let f7 = try staged("Arbitro.tiff")
-        try require(MetadataWriter.updateImageMetadata(sourceURL: f7, destinationURL: f7, date: nil, removeDate: true,
-                                                       latitude: nil, longitude: nil, removeLocation: false),
-                    "F7 Arbitro.tiff removeDate must pass (tag 700 surgery)")
+        fcase("F1") {
+            let f1 = try staged("DSCN0010.jpg")
+            try require(!MetadataWriter.updateImageMetadata(sourceURL: f1, destinationURL: f1, date: nil, removeDate: false,
+                                                            latitude: nil, longitude: nil, removeLocation: true),
+                        "F1 Nikon MakerNote removeLocation must refuse")
+        }
+        fcase("F2") {
+            let f2a = try staged("HMD_Nokia_8.3_5G.jpg")
+            printNokiaGPSEvidence(f2a, date: date)
+            try require(MetadataWriter.updateImageMetadata(sourceURL: f2a, destinationURL: f2a, date: date, removeDate: false,
+                                                           latitude: nil, longitude: nil, removeLocation: false),
+                        "F2 Nokia date set must pass (B2 semantic compare)")
+            try require(MetadataWriter.readExistingCoordinates(from: f2a) != nil, "F2 GPS must survive a date set")
+            let f2b = try staged("HMD_Nokia_8.3_5G.jpg", as: "HMD_Nokia_8.3_5G-b.jpg")
+            try require(MetadataWriter.updateImageMetadata(sourceURL: f2b, destinationURL: f2b, date: nil, removeDate: false,
+                                                           latitude: nil, longitude: nil, removeLocation: true),
+                        "F2 Nokia removeLocation must pass (B1 whole-IFD exemption)")
+            try require(MetadataWriter.readExistingCoordinates(from: f2b) == nil, "F2 GPS must be gone after removeLocation")
+        }
+        fcase("F3") {
+            let f3 = try staged("iphone_13_pro_max.heic")
+            try require(!MetadataWriter.updateImageMetadata(sourceURL: f3, destinationURL: f3, date: nil, removeDate: false,
+                                                            latitude: nil, longitude: nil, removeLocation: true),
+                        "F3 Apple HEIC removeLocation must refuse (MakerNote policy)")
+        }
+        fcase("F4") {
+            let f4 = try staged("Canon_40D.jpg")
+            try require(MetadataWriter.updateImageMetadata(sourceURL: f4, destinationURL: f4, date: date, removeDate: false,
+                                                           latitude: nil, longitude: nil, removeLocation: false),
+                        "F4 Canon date set must pass")
+            guard let f4Source = CGImageSourceCreateWithURL(f4 as CFURL, nil),
+                  let f4Props = CGImageSourceCopyPropertiesAtIndex(f4Source, 0, nil) as? [CFString: Any],
+                  let f4Exif = f4Props[kCGImagePropertyExifDictionary] as? [CFString: Any] else {
+                throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "F4 output must read back"])
+            }
+            try require(f4Exif[kCGImagePropertyExifSubsecTimeOriginal] != nil, "F4 SubSecTimeOriginal must survive")
+        }
+        fcase("F6") {
+            let f6 = try staged("Tless0.tiff")
+            try require(MetadataWriter.updateImageMetadata(sourceURL: f6, destinationURL: f6, date: date, removeDate: false,
+                                                           latitude: nil, longitude: nil, removeLocation: false),
+                        "F6 Tless0.tiff date set must pass")
+        }
+        fcase("F7") {
+            let f7 = try staged("Arbitro.tiff")
+            try require(MetadataWriter.updateImageMetadata(sourceURL: f7, destinationURL: f7, date: nil, removeDate: true,
+                                                           latitude: nil, longitude: nil, removeLocation: false),
+                        "F7 Arbitro.tiff removeDate must pass (tag 700 surgery)")
+        }
+        try require(caseFailures.isEmpty, "public fixture case failures [\(caseFailures.count)]: \(caseFailures.joined(separator: " | "))")
     }
 
     /// M18 (G1/S5): large camera-shaped HEIC (4032x3024) with full GPS.
