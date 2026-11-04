@@ -119,41 +119,88 @@ struct RefusalUISnapshot {
         for (label, width) in [("refusal-ui-queue-row", 600.0), ("refusal-ui-queue-row-narrow", 400.0)] {
             let row = QueueRowView(item: item, manager: manager, settings: settings,
                                    selectedIds: .constant([]), onRemove: {}, onEditLocation: {})
-            // Real context: the queue row lives in an inset List over the
-            // content area's .underWindowBackground material (MainView).
-            // A visual-effect material cannot sample a real window in an
-            // offscreen render, so the closest faithful substitute is the
-            // dark under-page color behind the row with the list's row
-            // padding - reported as an approximation, not window chrome.
+            // Real window, real backdrop: the queue row's actual context is
+            // an inset List over the content area's .underWindowBackground
+            // material (MainView), which only renders against a real window.
+            // A bare NSHostingView cannot provide either, and its
+            // fittingSize returned the collapsed row height (106pt) while
+            // the wrapped caption drew past it - so layout is driven by a
+            // real (borderless, never-fronted) NSWindow and the bitmap is
+            // captured generously tall, then auto-cropped to the actual
+            // content. No dependence on fittingSize. Offscreen window is
+            // still not an app-launch session.
             let framed = ZStack {
-                Color(nsColor: .underPageBackgroundColor)
+                VisualEffectView(material: .underWindowBackground, blendingMode: .withinWindow)
                 row
                     .padding(.vertical, 4)
                     .padding(.horizontal, 16)
             }
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 600),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.appearance = NSAppearance(named: .darkAqua)
             let hosting = NSHostingView(rootView: framed)
-            hosting.appearance = NSAppearance(named: .darkAqua)
-            // Fitting pass with an unbounded height proposal: the wrapped
-            // refusal caption must report its FULL laid-out height. (The
-            // first pass used a 10pt proposal and the returned fitting
-            // height stayed at the collapsed row height, cropping the
-            // wrapped text in the bitmap - caught on pixel inspection.)
-            hosting.frame = NSRect(x: 0, y: 0, width: width, height: 2000)
+            window.contentView = hosting
+            window.orderBack(nil)
             hosting.layoutSubtreeIfNeeded()
-            let fitting = hosting.fittingSize
-            let size = NSSize(width: width, height: max(fitting.height, 48))
-            hosting.frame = NSRect(origin: .zero, size: size)
-            hosting.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+
+            // Diagnose: does the laid-out view hierarchy CONTAIN the caption,
+            // or does text draw past its declared bounds? Print the deepest
+            // laid-out bottom edge of any subview as evidence.
+            func deepestBottom(_ view: NSView) -> CGFloat {
+                var bottom = view.subviews.map { deepestBottom($0) }.max() ?? 0
+                let own = view.frame.maxY
+                if own > bottom { bottom = own }
+                return bottom
+            }
+            FileHandle.standardError.write(Data("REFUSAL-UI-VERIFY \(label) hosting bounds \(hosting.bounds), deepest subview bottom \(deepestBottom(hosting))\n".utf8))
+
             guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
                 throw NSError(domain: "RefusalUISnapshot", code: 5, userInfo: [NSLocalizedDescriptionKey: "bitmap rep failed"])
             }
             hosting.cacheDisplay(in: hosting.bounds, to: rep)
-            guard let png = rep.representation(using: .png, properties: [:]) else {
-                throw NSError(domain: "RefusalUISnapshot", code: 6, userInfo: [NSLocalizedDescriptionKey: "png encoding failed"])
+            guard let full = rep.cgImage else {
+                throw NSError(domain: "RefusalUISnapshot", code: 6, userInfo: [NSLocalizedDescriptionKey: "cgImage failed"])
+            }
+
+            // Auto-crop to actual content: last row differing from the
+            // backdrop sample (top-left), plus a small margin.
+            guard let data = full.dataProvider?.data,
+                  let ptr = CFDataGetBytePtr(data) else {
+                throw NSError(domain: "RefusalUISnapshot", code: 7, userInfo: [NSLocalizedDescriptionKey: "pixels unavailable"])
+            }
+            let bpr = full.bytesPerRow
+            let bpp = full.bitsPerPixel / 8
+            let bgR = Int(ptr[0]), bgG = Int(ptr[1]), bgB = Int(ptr[2])
+            var lastContentRow = 0
+            for y in 0..<full.height {
+                var differs = false
+                var x = 0
+                while x < full.width && !differs {
+                    let o = y * bpr + x * bpp
+                    if abs(Int(ptr[o]) - bgR) > 10 || abs(Int(ptr[o+1]) - bgG) > 10 || abs(Int(ptr[o+2]) - bgB) > 10 {
+                        differs = true
+                    }
+                    x += 4
+                }
+                if differs { lastContentRow = y }
+            }
+            // Coordinates: bitmap y grows downward from top; crop keeps the
+            // top of the image through the content bottom + 12pt margin.
+            let cropHeight = min(lastContentRow + 13, full.height)
+            let cropRect = CGRect(x: 0, y: 0, width: CGFloat(full.width), height: CGFloat(cropHeight))
+            guard let cropped = full.cropping(to: cropRect) else {
+                throw NSError(domain: "RefusalUISnapshot", code: 8, userInfo: [NSLocalizedDescriptionKey: "crop failed"])
+            }
+            let outRep = NSBitmapImageRep(cgImage: cropped)
+            guard let png = outRep.representation(using: .png, properties: [:]) else {
+                throw NSError(domain: "RefusalUISnapshot", code: 9, userInfo: [NSLocalizedDescriptionKey: "png encoding failed"])
             }
             let out = URL(fileURLWithPath: artifactDir).appendingPathComponent("\(label).png")
             try png.write(to: out)
-            FileHandle.standardError.write(Data("REFUSAL-UI-VERIFY wrote \(out.path) (\(Int(size.width))x\(Int(size.height)))\n".utf8))
+            FileHandle.standardError.write(Data("REFUSAL-UI-VERIFY wrote \(out.path) (\(cropped.width)x\(cropped.height), content bottom at row \(lastContentRow) of \(full.height))\n".utf8))
+            window.orderOut(nil)
         }
     }
 }
