@@ -2045,16 +2045,11 @@ struct MetadataWriter {
         guard iinfs.count == 1, let items = heicIinfItems(iinfs[0].payload) else { return layoutBail() }
         let mimeIDs = items.filter { $0.type == "mime" && $0.contentType == "application/rdf+xml" }.map { $0.id }
         guard mimeIDs.count == 1 else {
-            // No single staged carrier to splice into. One accounted case:
-            // the plan legitimately emptied the packet and the staged file
-            // PROVABLY carries no XMP packet bytes anywhere - item
-            // enumeration succeeded above, and the byte scan proves no
-            // unreferenced packet content survives. Anything else refuses.
-            if corrected.isEmpty && mimeIDs.isEmpty && sourceItem.present,
-               stagedData.range(of: Data("ns.adobe.com/xap".utf8)) == nil,
-               stagedData.range(of: Data("<x:xmpmeta".utf8)) == nil {
-                return nil
-            }
+            // No single staged carrier to splice into. With a source packet
+            // present this is unaccountable and refuses original-intact
+            // (layoutBail) - no heuristic absence proof, no mdat surgery
+            // expansion. The legacy nil fallthrough remains only for
+            // carrier-less sources, where graph verification decides.
             return layoutBail()
         }
         // A removal can empty the packet: splice the minimal well-formed
