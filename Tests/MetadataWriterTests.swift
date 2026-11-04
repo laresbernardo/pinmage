@@ -1724,6 +1724,38 @@ struct MetadataWriterTests {
     /// rest. Positive GPS-in-XMP write coverage is intentionally ABSENT
     /// (documented gap): success coverage for these operations lives on the
     /// no-GPS fixtures and the mixed set-date-plus-remove-location loop.
+    /// Positive complete-form parser for the ONE reviewed refusal class:
+    /// the whole reason must be exactly the packet-preservation wrapper
+    /// whose every violation record is an ALTERED-form Guard A source-side
+    /// entry for one of the three reviewed GPS keys, with both source and
+    /// corrected briefs present. Absence/drop records, other keys, other
+    /// violation kinds riding in the same list, and any extra prose or tail
+    /// all fail to parse and therefore fail the case (fail-closed). The
+    /// reason is free text - no structured violation codes exist at this
+    /// surface, and no production change adds them for the tests' sake.
+    static func isReviewedBoundaryRefusal(_ reason: String) -> Bool {
+        let wrapper = "corrected XMP failed packet preservation checks ["
+        let marker = "non-target XMP property would not survive: "
+        guard reason.hasPrefix(wrapper), reason.hasSuffix("]") else { return false }
+        let inner = reason.dropFirst(wrapper.count).dropLast(1)
+        guard inner.hasPrefix(marker) else { return false }
+        let pieces = String(inner.dropFirst(marker.count)).components(separatedBy: ", " + marker)
+        let keys = ["GPSAltitude", "GPSImgDirection", "GPSTimeStamp"]
+        return pieces.allSatisfy { piece in
+            keys.contains { key in
+                let uri = "http://ns.adobe.com/exif/1.0/"
+                let head = "\(key) [\(uri)] (source \(key) [\(uri)] = "
+                let mid = " vs corrected \(key) [\(uri)] = "
+                guard piece.hasPrefix(head), piece.hasSuffix(")") else { return false }
+                let rest = String(piece.dropFirst(head.count).dropLast(1))
+                let parts = rest.components(separatedBy: mid)
+                return parts.count == 2 && !parts[0].isEmpty && !parts[1].isEmpty
+                    && !parts[0].contains("(") && !parts[0].contains(")")
+                    && !parts[1].contains("(") && !parts[1].contains(")")
+            }
+        }
+    }
+
     static func runBoundaryScenario(_ label: String, source: URL, destination: URL,
                                     date: Date?, removeDate: Bool,
                                     latitude: Double?, longitude: Double?, removeLocation: Bool,
@@ -1748,10 +1780,7 @@ struct MetadataWriterTests {
         let intact = (try? Data(contentsOf: source)) == before
         let noPublish = destination.path == source.path || !FileManager.default.fileExists(atPath: destination.path)
         let reason = note.reason ?? "(no refusal reason recorded)"
-        let reviewedKeys: Set<String> = ["GPSAltitude", "GPSImgDirection", "GPSTimeStamp"]
-        let named = reason.components(separatedBy: "would not survive: ").dropFirst()
-            .map { String($0.prefix(while: { $0.isLetter || $0.isDigit })) }
-        let reviewedCause = !named.isEmpty && named.allSatisfy { reviewedKeys.contains($0) }
+        let reviewedCause = MetadataWriterTests.isReviewedBoundaryRefusal(reason)
         if reviewedCause && intact && noPublish {
             FileHandle.standardError.write(Data("M18 scenario \(label): REFUSED (ruled GPS textual-form boundary), original intact, no publish\n".utf8))
         } else {
@@ -1975,6 +2004,30 @@ struct MetadataWriterTests {
         // ImageIO-terminated source packet parses and compares clean.
         try require(guardViolations(terminated, packet("")).isEmpty,
                     "guard A: ImageIO-terminated source packet must parse and compare")
+        // Boundary-refusal classifier: positive complete-form parsing only,
+        // so a real regression riding alongside the GPS mismatch still fails.
+        let reviewed = "corrected XMP failed packet preservation checks [non-target XMP property would not survive: GPSAltitude [http://ns.adobe.com/exif/1.0/] (source GPSAltitude [http://ns.adobe.com/exif/1.0/] = 12 vs corrected GPSAltitude [http://ns.adobe.com/exif/1.0/] = 12/1)]"
+        try require(MetadataWriterTests.isReviewedBoundaryRefusal(reviewed),
+                    "classifier: the exact CI23-observed refusal must pass")
+        let reviewedPair = "corrected XMP failed packet preservation checks [non-target XMP property would not survive: GPSAltitude [http://ns.adobe.com/exif/1.0/] (source GPSAltitude [http://ns.adobe.com/exif/1.0/] = 12 vs corrected GPSAltitude [http://ns.adobe.com/exif/1.0/] = 12/1), non-target XMP property would not survive: GPSImgDirection [http://ns.adobe.com/exif/1.0/] (source GPSImgDirection [http://ns.adobe.com/exif/1.0/] = 90 vs corrected GPSImgDirection [http://ns.adobe.com/exif/1.0/] = 90/1)]"
+        try require(MetadataWriterTests.isReviewedBoundaryRefusal(reviewedPair),
+                    "classifier: multiple reviewed violations must pass")
+        let mixedSurvivor = "corrected XMP failed packet preservation checks [non-target XMP property would not survive: GPSAltitude [http://ns.adobe.com/exif/1.0/] (source GPSAltitude [http://ns.adobe.com/exif/1.0/] = 12 vs corrected GPSAltitude [http://ns.adobe.com/exif/1.0/] = 12/1), removal target survived in the corrected XMP packet: xmp:ModifyDate [http://ns.adobe.com/xap/1.0/]]"
+        try require(!MetadataWriterTests.isReviewedBoundaryRefusal(mixedSurvivor),
+                    "classifier: a removal-target survivor riding in the list must fail")
+        let nonGPSDrop = "corrected XMP failed packet preservation checks [non-target XMP property would not survive: CreatorTool [http://ns.adobe.com/xap/1.0/] (absent from corrected)]"
+        try require(!MetadataWriterTests.isReviewedBoundaryRefusal(nonGPSDrop),
+                    "classifier: a non-GPS drop must fail")
+        let absentForm = "corrected XMP failed packet preservation checks [non-target XMP property would not survive: GPSAltitude [http://ns.adobe.com/exif/1.0/] (absent from corrected)]"
+        try require(!MetadataWriterTests.isReviewedBoundaryRefusal(absentForm),
+                    "classifier: a reviewed key in the ABSENT form must fail")
+        let graphAlteration = "corrected XMP failed packet preservation checks [alters a graph-sourced property: subject [http://purl.org/dc/elements/1.1/]]"
+        try require(!MetadataWriterTests.isReviewedBoundaryRefusal(graphAlteration),
+                    "classifier: a graph-sourced alteration must fail")
+        try require(!MetadataWriterTests.isReviewedBoundaryRefusal(reviewed + " trailing prose"),
+                    "classifier: an unexpected tail must fail")
+        try require(!MetadataWriterTests.isReviewedBoundaryRefusal("Refusing PNG set: could not build or stage the corrected XMP packet"),
+                    "classifier: an unrelated refusal must fail")
         FileHandle.standardError.write(Data("M18 guard units: all cases passed\n".utf8))
     }
 
