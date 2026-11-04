@@ -1390,7 +1390,16 @@ struct MetadataWriterTests {
            let v = CGImageMetadataTagCopyValue(tag) as? String {
             value = v
         }
-        var line = "M18 probe: \(label) xmp:MetadataDate value = \(value) (seed \(seed)"
+        // Raw-packet cross-check (CI11: the graph read "absent" even for the
+        // seeded fixture, so graph-level absence alone cannot distinguish
+        // "never serialized" from "carried but not surfaced" - the
+        // GPSDateStamp lesson). The XMP packet is plain XML inside the file,
+        // so a byte scan settles which it is.
+        var rawHit = "unknown"
+        if let raw = try? Data(contentsOf: url) {
+            rawHit = raw.range(of: Data("MetadataDate".utf8)) != nil ? "present" : "absent"
+        }
+        var line = "M18 probe: \(label) xmp:MetadataDate value = \(value), raw-packet bytes = \(rawHit) (seed \(seed)"
         if let clock = writeClock {
             line += ", write clock \(ISO8601DateFormatter().string(from: clock))"
         }
@@ -1546,48 +1555,50 @@ struct MetadataWriterTests {
         }
     }
 
-    /// Reviewer-requested evidence for the F2 representation question:
-    /// replicates the production copy-write staging path (applyMetadataPlan
-    /// + CGImageDestinationCopyImageSource, merge off) on the actual Nokia
-    /// file and prints the GPS IFD entries (type/count/value bytes) from
-    /// both the source and the staged output, so the SRATIONAL->RATIONAL
-    /// question is settled on this file's own staged Exif.
-    static func printNokiaGPSEvidence(_ file: URL, date: Date) {
-        func gpsLines(_ data: Data, _ label: String) -> [String] {
-            guard let inv = jpegInventory(data) else { return ["\(label): not a JPEG"] }
+    /// Reviewer-requested staged-Exif evidence: replicates the production
+    /// copy-write staging path (applyMetadataPlan +
+    /// CGImageDestinationCopyImageSource, merge off) on an actual fixture
+    /// and prints the Exif IFD entries (type/count/value bytes) from both
+    /// the source and the staged output, so representation questions are
+    /// settled on each file's own staged Exif. `filter` narrows the printed
+    /// lines (e.g. "34853" for the GPS IFD).
+    static func printStagedExifEvidence(_ file: URL, date: Date, label: String, filter: String? = nil) {
+        func gpsLines(_ data: Data, _ tag: String) -> [String] {
+            guard let inv = jpegInventory(data) else { return ["\(tag): not a JPEG"] }
             for (name, _, payload) in inv where name == "FFE1" {
                 if payload.count > 6, payload.starts(with: Data([0x45, 0x78, 0x69, 0x66, 0, 0])),
                    let lines = tiffInventory(Data(payload.dropFirst(6))) {
-                    return lines.filter { $0.contains("34853") }.map { "\(label) \($0)" }
+                    let kept = filter.map { f in lines.filter { $0.contains(f) } } ?? lines
+                    return kept.map { "\(tag) \($0)" }
                 }
             }
-            return ["\(label): no Exif APP1"]
+            return ["\(tag): no Exif APP1"]
         }
         do {
             let srcData = try Data(contentsOf: file)
-            for line in gpsLines(srcData, "F2-source") {
+            for line in gpsLines(srcData, "\(label)-source") {
                 FileHandle.standardError.write(Data("M18 probe: \(line)\n".utf8))
             }
-            let simURL = file.deletingLastPathComponent().appendingPathComponent("HMD_Nokia_8.3_5G-copysim.jpg")
+            let simURL = file.deletingLastPathComponent().appendingPathComponent("\(label)-copysim.jpg")
             guard let src = CGImageSourceCreateWithURL(file as CFURL, nil),
                   let dest = CGImageDestinationCreateWithURL(simURL as CFURL, "public.jpeg" as CFString, 1, nil),
                   let meta = CGImageSourceCopyMetadataAtIndex(src, 0, nil).flatMap({ CGImageMetadataCreateMutableCopy($0) }) else {
-                FileHandle.standardError.write(Data("M18 probe: F2 staged simulation setup failed\n".utf8))
+                FileHandle.standardError.write(Data("M18 probe: \(label) staged simulation setup failed\n".utf8))
                 return
             }
             _ = MetadataWriter.applyMetadataPlan(meta, date: date, removeDate: false, latitude: nil, longitude: nil, removeLocation: false)
             var copyError: Unmanaged<CFError>?
             let options: [CFString: Any] = [kCGImageDestinationMetadata: meta, kCGImageDestinationMergeMetadata: kCFBooleanFalse as Any]
             guard CGImageDestinationCopyImageSource(dest, src, options as CFDictionary, &copyError) else {
-                FileHandle.standardError.write(Data("M18 probe: F2 staged simulation copy failed\n".utf8))
+                FileHandle.standardError.write(Data("M18 probe: \(label) staged simulation copy failed\n".utf8))
                 return
             }
             let simData = try Data(contentsOf: simURL)
-            for line in gpsLines(simData, "F2-staged") {
+            for line in gpsLines(simData, "\(label)-staged") {
                 FileHandle.standardError.write(Data("M18 probe: \(line)\n".utf8))
             }
         } catch {
-            FileHandle.standardError.write(Data("M18 probe: F2 staged simulation error \(error.localizedDescription)\n".utf8))
+            FileHandle.standardError.write(Data("M18 probe: \(label) staged simulation error \(error.localizedDescription)\n".utf8))
         }
     }
 
@@ -1624,7 +1635,7 @@ struct MetadataWriterTests {
         }
         fcase("F2") {
             let f2a = try staged("HMD_Nokia_8.3_5G.jpg")
-            printNokiaGPSEvidence(f2a, date: date)
+            printStagedExifEvidence(f2a, date: date, label: "F2", filter: "34853")
             try require(MetadataWriter.updateImageMetadata(sourceURL: f2a, destinationURL: f2a, date: date, removeDate: false,
                                                            latitude: nil, longitude: nil, removeLocation: false),
                         "F2 Nokia date set must pass (B2 semantic compare)")
@@ -1643,6 +1654,11 @@ struct MetadataWriterTests {
         }
         fcase("F4") {
             let f4 = try staged("Canon_40D.jpg")
+            // CI12 (run 41757482450): the writer refused the Canon set with
+            // 18 "missing or altered" Exif tags across IFD0/Exif/Interop/
+            // GPS/IFD1. Full staged-evidence inventory so the reviewer can
+            // classify dropped-vs-representation-altered per tag.
+            printStagedExifEvidence(f4, date: date, label: "F4")
             try require(MetadataWriter.updateImageMetadata(sourceURL: f4, destinationURL: f4, date: date, removeDate: false,
                                                            latitude: nil, longitude: nil, removeLocation: false),
                         "F4 Canon date set must pass")
