@@ -1296,7 +1296,7 @@ struct MetadataWriterTests {
     static func runTIFFIPTCRefusalProbe(root: URL) throws {
         // Minimal little-endian 8x6 gray TIFF with an inline 4-byte IPTC-NAA tag.
         let pixelCount = 8 * 6
-        let ifdBytes = 2 + 12 * 11 + 4
+        let ifdBytes = 2 + 12 * 10 + 4
         let pixelOffset = 8 + ifdBytes
         var tiff = Data([0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00])
         func entry(_ tag: UInt16, _ type: UInt16, _ count: UInt32, _ value: UInt32) {
@@ -1304,7 +1304,7 @@ struct MetadataWriterTests {
                                      UInt8(count & 0xFF), UInt8((count >> 8) & 0xFF), UInt8((count >> 16) & 0xFF), UInt8((count >> 24) & 0xFF),
                                      UInt8(value & 0xFF), UInt8((value >> 8) & 0xFF), UInt8((value >> 16) & 0xFF), UInt8((value >> 24) & 0xFF)])
         }
-        tiff.append(contentsOf: [0x0B, 0x00]) // 11 entries
+        tiff.append(contentsOf: [0x0A, 0x00]) // 10 entries
         entry(256, 3, 1, 8)                    // ImageWidth
         entry(257, 3, 1, 6)                    // ImageLength
         entry(258, 3, 1, 8)                    // BitsPerSample
