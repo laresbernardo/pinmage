@@ -1475,6 +1475,89 @@ struct MetadataWriterTests {
         }
     }
 
+    /// R3 (reviewer-requested deterministic unit): the removal plan strips a
+    /// known xmp:MetadataDate at the GRAPH level, carrier-independent. The
+    /// baseline asserts the seeded leaf is really in the mutable graph (no
+    /// vacuity); after applyMetadataPlan(removeDate: true) the leaf must be
+    /// gone and the non-target control must survive. No encode/decode and no
+    /// carrier-visibility assumption involved.
+    static func runMetadataDateGraphUnit() throws {
+        let staleSeed = "1999-12-31T23:59:59Z"
+        let meta = CGImageMetadataCreateMutable()
+        try require(CGImageMetadataSetValueWithPath(meta, nil, "xmp:MetadataDate" as CFString, staleSeed as CFString),
+                    "R3 unit: seeding xmp:MetadataDate failed")
+        try require(CGImageMetadataSetValueWithPath(meta, nil, "xmp:CreatorTool" as CFString, "PinmageSeedTest" as CFString),
+                    "R3 unit: seeding xmp:CreatorTool failed")
+        func graphValue(_ metadata: CGImageMetadata, _ path: String) -> String? {
+            guard let tag = CGImageMetadataCopyTagWithPath(metadata, nil, path as CFString) else { return nil }
+            return CGImageMetadataTagCopyValue(tag) as? String
+        }
+        try require(graphValue(meta, "xmp:MetadataDate") == staleSeed,
+                    "R3 unit baseline: graph must carry the seeded xmp:MetadataDate (no vacuity)")
+        let note = MetadataWriter.RefusalNote()
+        try require(MetadataWriter.applyMetadataPlan(meta, date: nil, removeDate: true,
+                                                     latitude: nil, longitude: nil, removeLocation: false,
+                                                     refusalNote: note),
+                    "R3 unit: removal plan must apply to a graph carrying xmp:MetadataDate [\(note.reason ?? "no reason")]")
+        try require(graphValue(meta, "xmp:MetadataDate") == nil,
+                    "R3 unit: removal plan must strip xmp:MetadataDate from the graph")
+        try require(graphValue(meta, "xmp:CreatorTool") == "PinmageSeedTest",
+                    "R3 unit: non-target control must survive the removal plan")
+        print("M18 graph unit: MetadataDate strip-positive passed")
+    }
+
+    /// M18 (R3 extra evidence): the JPEG APP1 carrier variant of the
+    /// MetadataDate strip. The deterministic graph-level unit is
+    /// runMetadataDateGraphUnit; this probe adds carrier evidence WITHOUT a
+    /// must-pass visibility assumption: if the runtime does not surface the
+    /// seeded leaf from JPEG APP1, it prints and skips (no new red cycle).
+    /// When the baseline surfaces, a passing write must prove the strip at
+    /// graph AND byte level with the non-target control preserved; a refusal
+    /// must leave the original byte-identical.
+    static func runJPEGMetadataDateSeedProbe(root: URL) throws {
+        let staleSeed = "1999-12-31T23:59:59Z"
+        let jpeg = root.appendingPathComponent("m18-metadatadate-seed.jpg")
+        try fixture(at: jpeg, type: "public.jpeg" as CFString)
+        let packet = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description rdf:about=\"\" xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmp:CreatorTool=\"PinmageSeedTest\" xmp:MetadataDate=\"\(staleSeed)\"/></rdf:RDF></x:xmpmeta>"
+        let payload = Data("http://ns.adobe.com/xap/1.0/\0".utf8) + Data(packet.utf8)
+        guard let spliced = spliceJPEGMarkers(try Data(contentsOf: jpeg), [(0xE1, payload)]) else {
+            throw NSError(domain: "M18", code: 1, userInfo: [NSLocalizedDescriptionKey: "JPEG XMP APP1 splice failed"])
+        }
+        try spliced.write(to: jpeg)
+        try require(try Data(contentsOf: jpeg).range(of: Data(staleSeed.utf8)) != nil,
+                    "seeded JPEG bytes must carry the stale MetadataDate value")
+        func graphValue(_ url: URL) -> String? {
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let metadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil),
+                  let tag = CGImageMetadataCopyTagWithPath(metadata, nil, "xmp:MetadataDate" as CFString) else { return nil }
+            return CGImageMetadataTagCopyValue(tag) as? String
+        }
+        let baseline = graphValue(jpeg)
+        FileHandle.standardError.write(Data("M18 probe: JPEG-seed baseline graph xmp:MetadataDate = \(baseline ?? "not surfaced")\n".utf8))
+        guard baseline == staleSeed else {
+            FileHandle.standardError.write(Data("M18 probe: JPEG APP1 carrier not graph-surfaced on this runtime; skipping carrier-level strip evidence\n".utf8))
+            return
+        }
+        let before = try Data(contentsOf: jpeg)
+        let note = MetadataWriter.RefusalNote()
+        let removalOK = MetadataWriter.updateImageMetadata(sourceURL: jpeg, destinationURL: jpeg, date: nil, removeDate: true,
+                                                           latitude: nil, longitude: nil, removeLocation: false, refusalNote: note)
+        if removalOK {
+            try require(graphValue(jpeg) == nil,
+                        "output graph must lack xmp:MetadataDate after a passing removal")
+            try require(try Data(contentsOf: jpeg).range(of: Data(staleSeed.utf8)) == nil,
+                        "output bytes must lack the stale MetadataDate value after a passing removal")
+            try require(try Data(contentsOf: jpeg).range(of: Data("PinmageSeedTest".utf8)) != nil,
+                        "non-target xmp:CreatorTool control must survive a passing removal")
+            FileHandle.standardError.write(Data("M18 probe: JPEG-seed removal passed with strip proven at graph and byte level\n".utf8))
+        } else {
+            try require(try Data(contentsOf: jpeg) == before,
+                        "a refused removal must leave the original byte-identical")
+            FileHandle.standardError.write(Data("M18 probe: JPEG-seed removal refused, original preserved [\(note.reason ?? "no reason")]\n".utf8))
+        }
+    }
+
+
     /// M18 (B4): 16-bit sources keep native precision through the PNG
     /// re-encode paths; interlaced sources pass only while the re-encode
     /// provably keeps the interlace method (CI9), otherwise the writer
@@ -1657,7 +1740,7 @@ struct MetadataWriterTests {
         try require(MetadataWriter.xmpPacketTree(packet("<xmp:Label xmlns:xmp=\"\(xmpNS)\">hello</xmp:Label>")) != nil,
                     "guard: plain packet must parse")
         // Evasion: encoding-smuggled declarations (UTF-16 bytes) refuse at the UTF-8 prerequisite.
-        try require(MetadataWriter.xmpPacketTree(Data("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>".utf16)) == nil,
+        try require(MetadataWriter.xmpPacketTree("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>".data(using: .utf16)!) == nil,
                     "guard: UTF-16 packet must refuse")
         // Evasion: DOCTYPE / ENTITY declarations refuse (byte scan AND callback).
         try require(MetadataWriter.xmpPacketTree(Data(("<!DOCTYPE x>" + String(data: packet(""), encoding: .utf8)!).utf8)) == nil,
@@ -1760,6 +1843,17 @@ struct MetadataWriterTests {
                     "guard A: verified synthesis must be admitted")
         try require(!guardViolations(packet(""), dimsPkt, pixelWidth: 100).isEmpty,
                     "guard A: unverified synthesis must violate")
+        // R2: a planned scalar-key exemption cannot waive struct/array or
+        // qualifiers carrying untouched content.
+        let structCreated = packet("<xmp:CreateDate xmlns:xmp=\"\(xmpNS)\" rdf:parseType=\"Resource\"><xmp:Sub>1</xmp:Sub></xmp:CreateDate>")
+        try require(!guardViolations(structCreated, plannedPkt, date: Date()).isEmpty,
+                    "guard A: planned key with a struct value must violate (R2)")
+        let langCreated = packet("<xmp:CreateDate xmlns:xmp=\"\(xmpNS)\" xml:lang=\"en\">2020-01-02T03:04:05</xmp:CreateDate>")
+        try require(!guardViolations(langCreated, plannedPkt, date: Date()).isEmpty,
+                    "guard A: planned key with a qualifier must violate (R2)")
+        let scalarCreated = packet("<xmp:CreateDate xmlns:xmp=\"\(xmpNS)\">2019-05-06T07:08:09</xmp:CreateDate>")
+        try require(guardViolations(scalarCreated, plannedPkt, date: Date()).isEmpty,
+                    "guard A: plain scalar planned key stays exempt (R2)")
         print("M18 guard units: all cases passed")
     }
 
@@ -2971,6 +3065,7 @@ struct MetadataWriterTests {
 
         try runGPSCompareUnits()
         try runXMPGuardUnits()
+        try runMetadataDateGraphUnit()
         // M18 probes are independent: a failure in one must not abort the
         // harvest of the rest. Capture each probe's error, print it, and
         // throw one aggregate failure at the end - nothing turns green, but
@@ -2986,6 +3081,7 @@ struct MetadataWriterTests {
         runProbe("TIFFIPTCRefusal") { try runTIFFIPTCRefusalProbe(root: root) }
         runProbe("HEICEmptyPacket") { try runHEICEmptyPacketProbe(root: root) }
         runProbe("PNGMetadataDateSeed") { try runPNGMetadataDateSeedProbe(root: root) }
+        runProbe("JPEGMetadataDateSeed") { try runJPEGMetadataDateSeedProbe(root: root) }
         runProbe("16Bit") { try run16BitProbe(root: root) }
         runProbe("PngSuite") { try runPngSuiteProbe(root: root) }
         runProbe("P3HEIC") { try runP3HEICProbe(root: root) }

@@ -1389,15 +1389,22 @@ struct MetadataWriter {
             recordRefusal(refusalNote, "Refusing TIFF \(operation): source carries a native IPTC-NAA tag (33723) whose date/location semantics cannot be verified")
             return false
         }
-        let sourceHas700 = sourceIFDs.ifds.contains { label, entries, _ in
-            label == "IFD0" && entries.contains { $0.tag == 700 }
+        // Duplicate or oddly-placed carriers are not handled by "first
+        // entry": every tag 700 anywhere must be accounted, so exactly one
+        // carrier in IFD0 or the write refuses.
+        let tag700Entries: [(label: String, value: Data?)] = sourceIFDs.ifds.flatMap { label, entries, _ in
+            entries.filter { $0.tag == 700 }.map { (label: label, value: $0.value) }
         }
-        if sourceHas700 { exempt["IFD0", default: []].insert(700) }
+        let sourceHas700 = !tag700Entries.isEmpty
         if sourceHas700 {
+            guard tag700Entries.count == 1, tag700Entries[0].label == "IFD0" else {
+                recordRefusal(refusalNote, "Refusing TIFF \(operation): multiple or non-IFD0 tag 700 XMP carriers cannot be accounted\n")
+                return false
+            }
+            exempt["IFD0", default: []].insert(700)
             // Guard A accounts the source packet's content; a tag 700 whose
             // value cannot be resolved is known-but-unverifiable metadata.
-            let sourcePacket700 = sourceIFDs.ifds.first { label, _, _ in label == "IFD0" }?.entries.first { $0.tag == 700 }?.value
-            guard sourcePacket700 != nil else {
+            guard let sourcePacket700 = tag700Entries[0].value else {
                 recordRefusal(refusalNote, "Refusing TIFF \(operation): source tag 700 value could not be verified\n")
                 return false
             }
@@ -1426,9 +1433,9 @@ struct MetadataWriter {
                 recordRefusal(refusalNote, "Refusing TIFF \(operation): corrected tag 700 did not verify\n")
                 return false
             }
-            let final700 = finalIFDs.ifds.first { label, _, _ in label == "IFD0" }?.entries.filter { $0.tag == 700 } ?? []
+            let final700 = finalIFDs.ifds.flatMap { _, entries, _ in entries.filter { $0.tag == 700 } }
             let expected700: [Data] = packet.isEmpty ? [] : [packet]
-            guard final700.compactMap({ $0.value }) == expected700 else {
+            guard final700.count == expected700.count, final700.compactMap({ $0.value }) == expected700 else {
                 recordRefusal(refusalNote, "Refusing TIFF \(operation): corrected tag 700 did not verify\n")
                 return false
             }
@@ -1994,23 +2001,19 @@ struct MetadataWriter {
     /// verified corrected packet as the staged mime item's payload via
     /// heicSplicingItemPayload. nil when the staged file carries no single
     /// XMP mime item or the layout does not support the splice - the full
-    /// verification then decides the write as before.
+    /// verification then decides the write as before, UNLESS the source
+    /// carries an XMP item: present-but-unaccountable always refuses (R1).
     private static func heicRestoringXmpItem(stagedData: Data, sourceData: Data, imageSource: CGImageSource,
                                              date: Date?, removeDate: Bool,
                                              latitude: Double?, longitude: Double?, removeLocation: Bool,
                                              refusalNote: RefusalNote? = nil, refused: inout Bool) -> Data? {
-        guard let boxes = heicBoxes(stagedData, range: 0..<stagedData.count),
-              boxes.allSatisfy({ $0.type == "ftyp" || $0.type == "meta" || $0.type == "mdat" }) else { return nil }
-        let metas = boxes.filter { $0.type == "meta" }
-        guard metas.count == 1, metas[0].payload.count >= 4,
-              let children = heicBoxes(metas[0].payload, range: 4..<metas[0].payload.count) else { return nil }
-        let iinfs = children.filter { $0.type == "iinf" }
-        guard iinfs.count == 1, let items = heicIinfItems(iinfs[0].payload) else { return nil }
-        let mimeIDs = items.filter { $0.type == "mime" && $0.contentType == "application/rdf+xml" }.map { $0.id }
-        guard mimeIDs.count == 1 else { return nil }
-        // Guard A needs the SOURCE packet. A source XMP item that exists
-        // but cannot be read bounds-checked must refuse, not fall through to
-        // the graph-level verification, which cannot see carrier-only content.
+        // Account the SOURCE carrier before any layout bail (R1): a source
+        // XMP item that exists but cannot be read bounds-checked refuses
+        // hard; with a readable source packet Guard A must run no matter how
+        // the staged layout turns out, so correctedXMPPacket is reached
+        // first and every later bail with a source packet present refuses
+        // rather than falling through to the graph-level verification, which
+        // cannot see carrier-only content.
         let sourceItem = heicSourceXMPItem(sourceData)
         if sourceItem.present && sourceItem.payload == nil {
             recordRefusal(refusalNote, "source HEIC XMP item could not be verified")
@@ -2026,6 +2029,34 @@ struct MetadataWriter {
             refused = true
             return nil
         }
+        func layoutBail() -> Data? {
+            if sourceItem.present {
+                recordRefusal(refusalNote, "source HEIC XMP item present but the staged layout does not support a verified restore")
+                refused = true
+            }
+            return nil
+        }
+        guard let boxes = heicBoxes(stagedData, range: 0..<stagedData.count),
+              boxes.allSatisfy({ $0.type == "ftyp" || $0.type == "meta" || $0.type == "mdat" }) else { return layoutBail() }
+        let metas = boxes.filter { $0.type == "meta" }
+        guard metas.count == 1, metas[0].payload.count >= 4,
+              let children = heicBoxes(metas[0].payload, range: 4..<metas[0].payload.count) else { return layoutBail() }
+        let iinfs = children.filter { $0.type == "iinf" }
+        guard iinfs.count == 1, let items = heicIinfItems(iinfs[0].payload) else { return layoutBail() }
+        let mimeIDs = items.filter { $0.type == "mime" && $0.contentType == "application/rdf+xml" }.map { $0.id }
+        guard mimeIDs.count == 1 else {
+            // No single staged carrier to splice into. One accounted case:
+            // the plan legitimately emptied the packet and the staged file
+            // PROVABLY carries no XMP packet bytes anywhere - item
+            // enumeration succeeded above, and the byte scan proves no
+            // unreferenced packet content survives. Anything else refuses.
+            if corrected.isEmpty && mimeIDs.isEmpty && sourceItem.present,
+               stagedData.range(of: Data("ns.adobe.com/xap".utf8)) == nil,
+               stagedData.range(of: Data("<x:xmpmeta".utf8)) == nil {
+                return nil
+            }
+            return layoutBail()
+        }
         // A removal can empty the packet: splice the minimal well-formed
         // empty packet so the mime item carries no metadata instead of
         // refusing (S2). The verifier asserts the staged item reparses to a
@@ -2033,7 +2064,7 @@ struct MetadataWriter {
         let packet = corrected.isEmpty ? emptyXMPPacket : corrected
         guard let spliced = heicSplicingItemPayload(stagedData, itemID: mimeIDs[0], newPayload: packet) else {
             FileHandle.standardError.write(Data("HEIC note: staged XMP item layout does not support verified-packet restore; verification decides\n".utf8))
-            return nil
+            return layoutBail()
         }
         return spliced
     }
@@ -3760,9 +3791,18 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
             }
             return false
         }
+        // R2: a planned-set exemption waives only a plain scalar property -
+        // a planned key carrying qualifiers or a struct/array/URI-reference
+        // value holds untouched content a scalar set cannot account for, so
+        // it must survive identically instead (and won't), refusing the write.
+        func isPlainScalar(_ prop: XMPProperty) -> Bool {
+            guard prop.qualifiers.isEmpty, case .text = prop.value else { return false }
+            return true
+        }
         var violations: [String] = []
         for (key, prop) in sourceByKey {
-            if targets.contains(key) || planned.contains(key) || isGPSPrefixTarget(key) { continue }
+            if targets.contains(key) || isGPSPrefixTarget(key) { continue }
+            if planned.contains(key) && isPlainScalar(prop) { continue }
             guard let other = correctedByKey[key], xmpPropertyEqual(prop, other) else {
                 violations.append("non-target XMP property would not survive: \(key.name) [\(key.uri)]")
                 continue
@@ -3773,7 +3813,7 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
                 violations.append("removal target survived in the corrected XMP packet: \(key.name) [\(key.uri)]")
                 continue
             }
-            if sourceByKey[key] != nil || planned.contains(key) || isVerifiedSynthesis(prop) { continue }
+            if sourceByKey[key] != nil || (planned.contains(key) && isPlainScalar(prop)) || isVerifiedSynthesis(prop) { continue }
             violations.append("corrected XMP packet carries an unplanned property: \(key.name) [\(key.uri)]")
         }
         return violations.sorted()
