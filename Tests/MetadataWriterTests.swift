@@ -1752,7 +1752,31 @@ struct MetadataWriterTests {
                 return parts.count == 2 && !parts[0].isEmpty && !parts[1].isEmpty
                     && !parts[0].contains("(") && !parts[0].contains(")")
                     && !parts[1].contains("(") && !parts[1].contains(")")
+                    && isReviewedValueRelation(key: key, source: parts[0], corrected: parts[1])
             }
+        }
+    }
+
+    /// The two ruled textual-normalization classes, key-specific: the GPS
+    /// rationals gain "/1"; the GPSTimeStamp datetime gains "+0000". Source
+    /// forms are validated to the observed shapes, so an arbitrary same-key
+    /// value change (or the other key's suffix) never classifies.
+    private static func isReviewedValueRelation(key: String, source: String, corrected: String) -> Bool {
+        switch key {
+        case "GPSAltitude", "GPSImgDirection":
+            let chunks = source.split(separator: ".", omittingEmptySubsequences: false)
+            let numeric = (1...2).contains(chunks.count)
+                && chunks.allSatisfy { chunk in !chunk.isEmpty && chunk.allSatisfy { $0.isASCII && $0.isNumber } }
+            return numeric && corrected == source + "/1"
+        case "GPSTimeStamp":
+            let separators: Set<Int> = [4, 7, 10, 13, 16]
+            let chars = Array(source)
+            let datetime = chars.count == 19
+                && chars[4] == "-" && chars[7] == "-" && chars[10] == "T" && chars[13] == ":" && chars[16] == ":"
+                && chars.enumerated().allSatisfy { separators.contains($0.offset) || ($0.element.isASCII && $0.element.isNumber) }
+            return datetime && corrected == source + "+0000"
+        default:
+            return false
         }
     }
 
@@ -2028,6 +2052,26 @@ struct MetadataWriterTests {
                     "classifier: an unexpected tail must fail")
         try require(!MetadataWriterTests.isReviewedBoundaryRefusal("Refusing PNG set: could not build or stage the corrected XMP packet"),
                     "classifier: an unrelated refusal must fail")
+        // Key-specific value relations: only the two ruled normalization
+        // forms classify, never an arbitrary same-key change.
+        let tsForm = "corrected XMP failed packet preservation checks [non-target XMP property would not survive: GPSTimeStamp [http://ns.adobe.com/exif/1.0/] (source GPSTimeStamp [http://ns.adobe.com/exif/1.0/] = 2001-02-03T04:05:06 vs corrected GPSTimeStamp [http://ns.adobe.com/exif/1.0/] = 2001-02-03T04:05:06+0000)]"
+        try require(MetadataWriterTests.isReviewedBoundaryRefusal(tsForm),
+                    "classifier: the observed GPSTimeStamp zone form must pass")
+        let dirForm = "corrected XMP failed packet preservation checks [non-target XMP property would not survive: GPSImgDirection [http://ns.adobe.com/exif/1.0/] (source GPSImgDirection [http://ns.adobe.com/exif/1.0/] = 90 vs corrected GPSImgDirection [http://ns.adobe.com/exif/1.0/] = 90/1)]"
+        try require(MetadataWriterTests.isReviewedBoundaryRefusal(dirForm),
+                    "classifier: the observed GPSImgDirection rational form must pass")
+        let arbitrary = "corrected XMP failed packet preservation checks [non-target XMP property would not survive: GPSAltitude [http://ns.adobe.com/exif/1.0/] (source GPSAltitude [http://ns.adobe.com/exif/1.0/] = 12 vs corrected GPSAltitude [http://ns.adobe.com/exif/1.0/] = 999)]"
+        try require(!MetadataWriterTests.isReviewedBoundaryRefusal(arbitrary),
+                    "classifier: an arbitrary same-key value change must fail")
+        let wrongSuffix = "corrected XMP failed packet preservation checks [non-target XMP property would not survive: GPSAltitude [http://ns.adobe.com/exif/1.0/] (source GPSAltitude [http://ns.adobe.com/exif/1.0/] = 12 vs corrected GPSAltitude [http://ns.adobe.com/exif/1.0/] = 12+0000)]"
+        try require(!MetadataWriterTests.isReviewedBoundaryRefusal(wrongSuffix),
+                    "classifier: the other key's suffix must fail")
+        let tsWrongSuffix = "corrected XMP failed packet preservation checks [non-target XMP property would not survive: GPSTimeStamp [http://ns.adobe.com/exif/1.0/] (source GPSTimeStamp [http://ns.adobe.com/exif/1.0/] = 2001-02-03T04:05:06 vs corrected GPSTimeStamp [http://ns.adobe.com/exif/1.0/] = 2001-02-03T04:05:06/1)]"
+        try require(!MetadataWriterTests.isReviewedBoundaryRefusal(tsWrongSuffix),
+                    "classifier: a rational suffix on the timestamp must fail")
+        let nonNumeric = "corrected XMP failed packet preservation checks [non-target XMP property would not survive: GPSAltitude [http://ns.adobe.com/exif/1.0/] (source GPSAltitude [http://ns.adobe.com/exif/1.0/] = abc vs corrected GPSAltitude [http://ns.adobe.com/exif/1.0/] = abc/1)]"
+        try require(!MetadataWriterTests.isReviewedBoundaryRefusal(nonNumeric),
+                    "classifier: a non-numeric rational source must fail")
         FileHandle.standardError.write(Data("M18 guard units: all cases passed\n".utf8))
     }
 
