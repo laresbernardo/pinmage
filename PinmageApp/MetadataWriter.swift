@@ -1135,21 +1135,64 @@ struct MetadataWriter {
         return (n, d)
     }
 
-    /// Type-verified value equality for the aux-tag compare (B2). Byte
-    /// equality always passes. Otherwise only semantics proven for the field
-    /// type: RATIONAL/SRATIONAL compare element-wise by exact reduction
-    /// (endianness read per file); GPS degree tags (IFD0>34853 tags 2/4)
-    /// compose DMS numerically because ImageIO legally recomposes them
-    /// (40/24/0 == 40/23/60.00), with axis bounds checked and a 1e-9
-    /// tolerance confined to this composition; ASCII compares NUL-trimmed
-    /// strings. The field TYPE must match (fail-closed: a SHORT->LONG
-    /// re-encode refuses even when the value is equal). Everything else
-    /// stays byte-exact.
-    static func tiffValuesMatch(label: String, tag: Int, type: Int,
-                                        sourceValue: Data, sourceLittle: Bool,
-                                        outputValue: Data, outputLittle: Bool) -> Bool {
+    /// Type compatibility for the aux-tag compare (B2/F2). Equal types are
+    /// always compatible. The single scoped exception: GPS degree tags
+    /// (IFD0>34853 tags 2/4) may pair RATIONAL(5) with SRATIONAL(10),
+    /// because ImageIO regenerates coordinates as type 5 from graph doubles
+    /// while cameras like the HMD Nokia write type 10 (CI12 run
+    /// 41757482450: staged value bytes identical to source, only the type
+    /// field changed). Every other tag/IFD/type pair refuses, unchanged.
+    static func tiffTypeCompatible(label: String, tag: Int, sourceType: Int, outputType: Int) -> Bool {
+        if sourceType == outputType { return true }
+        return label == "IFD0>34853" && (tag == 2 || tag == 4)
+            && (sourceType == 5 || sourceType == 10) && (outputType == 5 || outputType == 10)
+    }
+
+    /// Type-verified value equality for the aux-tag compare (B2/F2).
+    /// GPS degree tags (IFD0>34853 tags 2/4) NEVER take a byte-equality
+    /// fast path - not even with equal types: every candidate is validated
+    /// first (per-side signed decode, reduced-rational normalization with
+    /// the denominator sign folded into the numerator, zero denominator
+    /// refused, non-negative magnitudes only, count 1-3 equal, axis bounds
+    /// lat<=90/lon<=180 on both sides), then composed DMS degrees compare
+    /// at the 1e-9 tolerance confined to this composition, because ImageIO
+    /// legally recomposes DMS (40/24/0 == 40/23/60.00). A true negative
+    /// component however encoded (including 1/-1) refuses; a doubly-
+    /// negative pair encoding a positive value normalizes to positive and
+    /// is judged on its value. For every other tag the byte-equality fast
+    /// path requires equal types; RATIONAL/SRATIONAL then compare element-
+    /// wise by exact reduction (per-side signedness, endianness per file);
+    /// ASCII compares NUL-trimmed strings. Everything else stays byte-exact.
+    static func tiffValuesMatch(label: String, tag: Int,
+                                        sourceType: Int, sourceValue: Data, sourceLittle: Bool,
+                                        outputType: Int, outputValue: Data, outputLittle: Bool) -> Bool {
+        if label == "IFD0>34853" && (tag == 2 || tag == 4) {
+            // Composed DMS degrees: the only place a tolerance applies, and
+            // the only cross-type pair admitted ({5, 10} via the caller's
+            // compatibility check). Validity runs BEFORE any admission.
+            guard (sourceType == 5 || sourceType == 10), (outputType == 5 || outputType == 10),
+                  sourceValue.count == outputValue.count else { return false }
+            func composed(_ v: Data, _ type: Int, _ little: Bool) -> Double? {
+                guard v.count % 8 == 0 else { return nil }
+                let count = v.count / 8
+                guard count >= 1, count <= 3 else { return nil }
+                var result = 0.0, divisor = 1.0
+                for i in 0..<count {
+                    guard let (rawN, rawD) = tiffRationalAt(v, i, type == 10, little),
+                          let (n, d) = reducedRational(num: rawN, den: rawD), n >= 0 else { return nil }
+                    result += Double(n) / Double(d) / divisor
+                    divisor *= 60
+                }
+                return result.isFinite ? result : nil
+            }
+            guard let a = composed(sourceValue, sourceType, sourceLittle),
+                  let b = composed(outputValue, outputType, outputLittle),
+                  a <= (tag == 2 ? 90 : 180), b <= (tag == 2 ? 90 : 180) else { return false }
+            return abs(a - b) < 1e-9
+        }
+        guard sourceType == outputType else { return false }
         if sourceValue == outputValue { return true }
-        switch type {
+        switch sourceType {
         case 2:
             func ascii(_ d: Data) -> String? {
                 var bytes = [UInt8](d)
@@ -1159,26 +1202,10 @@ struct MetadataWriter {
             guard let a = ascii(sourceValue), let b = ascii(outputValue) else { return false }
             return a == b
         case 5, 10:
-            let signed = type == 10
+            let signed = sourceType == 10
             guard sourceValue.count % 8 == 0 else { return false }
             let scount = sourceValue.count / 8
             guard scount == outputValue.count / 8, outputValue.count % 8 == 0 else { return false }
-            if label == "IFD0>34853" && (tag == 2 || tag == 4) {
-                // Composed DMS degrees: the only place a tolerance applies.
-                func composed(_ v: Data, _ little: Bool) -> Double? {
-                    guard scount >= 1, scount <= 3 else { return nil }
-                    var result = 0.0, divisor = 1.0
-                    for i in 0..<scount {
-                        guard let (n, d) = tiffRationalAt(v, i, false, little), d > 0, n >= 0 else { return nil }
-                        result += Double(n) / Double(d) / divisor
-                        divisor *= 60
-                    }
-                    return result.isFinite ? result : nil
-                }
-                guard let a = composed(sourceValue, sourceLittle), let b = composed(outputValue, outputLittle),
-                      a <= (tag == 2 ? 90 : 180), b <= (tag == 2 ? 90 : 180) else { return false }
-                return abs(a - b) < 1e-9
-            }
             for i in 0..<scount {
                 guard let s = tiffRationalAt(sourceValue, i, signed, sourceLittle),
                       let o = tiffRationalAt(outputValue, i, signed, outputLittle),
@@ -1227,9 +1254,10 @@ struct MetadataWriter {
                 }
                 let candidates = outValues[label]?[entry.tag] ?? []
                 let matched = candidates.contains(where: { candidate in
-                    candidate.0 == entry.type && tiffValuesMatch(label: label, tag: entry.tag, type: entry.type,
-                                                                 sourceValue: value, sourceLittle: source.little,
-                                                                 outputValue: candidate.1, outputLittle: output.little)
+                    tiffTypeCompatible(label: label, tag: entry.tag, sourceType: entry.type, outputType: candidate.0) &&
+                    tiffValuesMatch(label: label, tag: entry.tag,
+                                    sourceType: entry.type, sourceValue: value, sourceLittle: source.little,
+                                    outputType: candidate.0, outputValue: candidate.1, outputLittle: output.little)
                 })
                 if !matched {
                     violations.append("tag \(entry.tag) missing or altered at \(label)")

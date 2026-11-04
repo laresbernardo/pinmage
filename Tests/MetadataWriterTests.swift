@@ -1555,6 +1555,78 @@ struct MetadataWriterTests {
         }
     }
 
+    /// F2 control matrix for the scoped GPS {5,10} type-pair admission
+    /// (reviewer v3 + main's fast-path correction): every GPS degree
+    /// candidate is validated before any admission, including identical
+    /// bytes with equal types.
+    static func runGPSCompareUnits() throws {
+        func beRats(_ pairs: [(UInt32, UInt32)]) -> Data {
+            var d = Data()
+            for (n, dn) in pairs {
+                d.append(contentsOf: [UInt8(n >> 24 & 255), UInt8(n >> 16 & 255), UInt8(n >> 8 & 255), UInt8(n & 255),
+                                      UInt8(dn >> 24 & 255), UInt8(dn >> 16 & 255), UInt8(dn >> 8 & 255), UInt8(dn & 255)])
+            }
+            return d
+        }
+        func neg(_ v: Int32) -> UInt32 { UInt32(bitPattern: v) }
+        let gps = "IFD0>34853"
+        func match(_ label: String, _ tag: Int, _ st: Int, _ sv: Data, _ ot: Int, _ ov: Data) -> Bool {
+            MetadataWriter.tiffTypeCompatible(label: label, tag: tag, sourceType: st, outputType: ot) &&
+            MetadataWriter.tiffValuesMatch(label: label, tag: tag, sourceType: st, sourceValue: sv, sourceLittle: false,
+                                           outputType: ot, outputValue: ov, outputLittle: false)
+        }
+        // 1. Nokia CI12 case: identical DMS bytes, type 10 source vs type 5 output - admit.
+        try require(match(gps, 2, 10, beRats([(60, 1), (8, 1), (4814, 100)]), 5, beRats([(60, 1), (8, 1), (4814, 100)])),
+                    "F2 u1: Nokia lat type 10 vs 5 must admit")
+        try require(match(gps, 4, 10, beRats([(24, 1), (54, 1), (2438, 100)]), 5, beRats([(24, 1), (54, 1), (2438, 100)])),
+                    "F2 u2: Nokia lon type 10 vs 5 must admit")
+        // 2. Legal DMS recomposition, equal types - admit.
+        try require(match(gps, 2, 5, beRats([(40, 1), (24, 1), (0, 1)]), 5, beRats([(40, 1), (23, 1), (60, 1)])),
+                    "F2 u3: DMS recomposition 40/24/0 == 40/23/60 must admit")
+        // 3. Identical bytes, equal signed type, negative value - REFUSE (no fast path).
+        let negBytes = beRats([(neg(-1), 1), (0, 1), (0, 1)])
+        try require(!match(gps, 2, 10, negBytes, 10, negBytes),
+                    "F2 u4: identical negative SRATIONAL GPS bytes must refuse")
+        // 4. Negative denominator encodes a true negative (1/-1 = -1) - refuse.
+        try require(!match(gps, 2, 10, beRats([(1, neg(-1)), (0, 1), (0, 1)]), 5, beRats([(0, 1), (0, 1), (0, 1)])),
+                    "F2 u5: 1/-1 must refuse, not read as tiny positive")
+        // 5. Doubly-negative encodes a genuine positive (-4814/-100 = 48.14) - admit on value.
+        try require(match(gps, 4, 10, beRats([(neg(-4814), neg(-100))]), 5, beRats([(2407, 50)])),
+                    "F2 u6: doubly-negative +48.14 must admit against 2407/50")
+        // 6. Int32.min numerator - refuse safely.
+        try require(!match(gps, 2, 10, beRats([(neg(Int32.min), 1), (0, 1), (0, 1)]), 5, beRats([(0, 1), (0, 1), (0, 1)])),
+                    "F2 u7: Int32.min numerator must refuse")
+        // 7. Zero denominator, identical bytes, equal types - refuse (no fast path).
+        let zeroDen = beRats([(1, 0), (0, 1), (0, 1)])
+        try require(!match(gps, 2, 5, zeroDen, 5, zeroDen),
+                    "F2 u8: zero-denominator identical bytes must refuse")
+        // 8. Count mismatch - refuse.
+        try require(!match(gps, 2, 5, beRats([(60, 1), (8, 1), (0, 1)]), 5, beRats([(60, 1), (8, 1)])),
+                    "F2 u9: count mismatch must refuse")
+        // 9. Axis bounds on both sides.
+        try require(!match(gps, 2, 5, beRats([(91, 1)]), 5, beRats([(91, 1)])),
+                    "F2 u10: latitude 91 must refuse")
+        try require(!match(gps, 4, 5, beRats([(181, 1)]), 5, beRats([(181, 1)])),
+                    "F2 u11: longitude 181 must refuse")
+        // 10. Type compatibility scope.
+        try require(!MetadataWriter.tiffTypeCompatible(label: gps, tag: 7, sourceType: 5, outputType: 10),
+                    "F2 u12: GPS tag 7 stays type-strict")
+        try require(!MetadataWriter.tiffTypeCompatible(label: gps, tag: 2, sourceType: 3, outputType: 4),
+                    "F2 u13: GPS SHORT/LONG pair stays refused")
+        try require(!MetadataWriter.tiffTypeCompatible(label: "IFD0", tag: 2, sourceType: 5, outputType: 10),
+                    "F2 u14: type pair only admitted at IFD0>34853")
+        try require(MetadataWriter.tiffTypeCompatible(label: gps, tag: 2, sourceType: 5, outputType: 5),
+                    "F2 u15: equal types compatible")
+        // 11. Genuine value difference - refuse.
+        try require(!match(gps, 2, 5, beRats([(60, 1), (9, 1), (0, 1)]), 5, beRats([(60, 1), (8, 1), (4814, 100)])),
+                    "F2 u16: differing minutes must refuse")
+        // 12. Non-GPS rational semantics unchanged: exact reduction admits, cross-type refuses.
+        try require(match("IFD0", 282, 5, beRats([(72, 1)]), 5, beRats([(144, 2)])),
+                    "F2 u17: 72/1 == 144/2 by exact reduction")
+        try require(!match("IFD0", 282, 5, beRats([(72, 1)]), 10, beRats([(72, 1)])),
+                    "F2 u18: non-GPS RATIONAL/SRATIONAL pair refuses")
+    }
+
     /// Reviewer-requested staged-Exif evidence: replicates the production
     /// copy-write staging path (applyMetadataPlan +
     /// CGImageDestinationCopyImageSource, merge off) on an actual fixture
@@ -1776,18 +1848,18 @@ struct MetadataWriterTests {
         let ratNeg = Data([0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 2])
         try require(MetadataWriter.tiffRationalAt(ratNeg, 0, true, false).map { $0.0 == -1 && $0.1 == 2 } == true, "srational sign")
         // Semantic TIFF value equality (B2).
-        try require(MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 282, type: 5, sourceValue: ratBE, sourceLittle: false, outputValue: ratLE, outputLittle: true), "cross-endian rational equal")
+        try require(MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 282, sourceType: 5, sourceValue: ratBE, sourceLittle: false, outputType: 5, outputValue: ratLE, outputLittle: true), "cross-endian rational equal")
         let halfA = Data([0, 0, 0, 1, 0, 0, 0, 2])
         let halfB = Data([0, 0, 0, 2, 0, 0, 0, 4])
         let third = Data([0, 0, 0, 1, 0, 0, 0, 3])
-        try require(MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 282, type: 5, sourceValue: halfA, sourceLittle: false, outputValue: halfB, outputLittle: false), "1/2 == 2/4 by reduction")
-        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 282, type: 5, sourceValue: halfA, sourceLittle: false, outputValue: third, outputLittle: false), "1/2 != 1/3")
+        try require(MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 282, sourceType: 5, sourceValue: halfA, sourceLittle: false, outputType: 5, outputValue: halfB, outputLittle: false), "1/2 == 2/4 by reduction")
+        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 282, sourceType: 5, sourceValue: halfA, sourceLittle: false, outputType: 5, outputValue: third, outputLittle: false), "1/2 != 1/3")
         let zeroDenA = Data([0, 0, 0, 1, 0, 0, 0, 0])
         let zeroDenB = Data([0, 0, 0, 2, 0, 0, 0, 0])
-        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 282, type: 5, sourceValue: zeroDenA, sourceLittle: false, outputValue: zeroDenB, outputLittle: false), "zero denominators never semantically equal")
+        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 282, sourceType: 5, sourceValue: zeroDenA, sourceLittle: false, outputType: 5, outputValue: zeroDenB, outputLittle: false), "zero denominators never semantically equal")
         let negHalf = Data([0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 2])
         let negHalfB = Data([0, 0, 0, 1, 0xFF, 0xFF, 0xFF, 0xFE])
-        try require(MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 207, type: 10, sourceValue: negHalf, sourceLittle: false, outputValue: negHalfB, outputLittle: false), "srational -1/2 == 1/-2")
+        try require(MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 207, sourceType: 10, sourceValue: negHalf, sourceLittle: false, outputType: 10, outputValue: negHalfB, outputLittle: false), "srational -1/2 == 1/-2")
         // GPS DMS composition (tags 2/4 only): legal recomposition matches,
         // real differences and axis violations refuse.
         func dms(_ parts: [(Int, Int)]) -> Data {
@@ -1801,16 +1873,16 @@ struct MetadataWriterTests {
         let canon = dms([(40, 1), (24, 1), (0, 1)])
         let recomposed = dms([(40, 1), (23, 1), (6000, 100)])
         let different = dms([(41, 1), (0, 1), (0, 1)])
-        try require(MetadataWriter.tiffValuesMatch(label: "IFD0>34853", tag: 2, type: 5, sourceValue: canon, sourceLittle: false, outputValue: recomposed, outputLittle: false), "DMS 40/24/0 == 40/23/60.00")
-        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0>34853", tag: 2, type: 5, sourceValue: canon, sourceLittle: false, outputValue: different, outputLittle: false), "DMS 40.4 != 41.0")
-        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0>34853", tag: 2, type: 5, sourceValue: canon, sourceLittle: false, outputValue: dms([(40, 1), (24, 1)]), outputLittle: false), "DMS count mismatch refuses")
+        try require(MetadataWriter.tiffValuesMatch(label: "IFD0>34853", tag: 2, sourceType: 5, sourceValue: canon, sourceLittle: false, outputType: 5, outputValue: recomposed, outputLittle: false), "DMS 40/24/0 == 40/23/60.00")
+        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0>34853", tag: 2, sourceType: 5, sourceValue: canon, sourceLittle: false, outputType: 5, outputValue: different, outputLittle: false), "DMS 40.4 != 41.0")
+        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0>34853", tag: 2, sourceType: 5, sourceValue: canon, sourceLittle: false, outputType: 5, outputValue: dms([(40, 1), (24, 1)]), outputLittle: false), "DMS count mismatch refuses")
         // The same recomposition under a non-GPS tag stays byte-exact.
-        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 282, type: 5, sourceValue: canon, sourceLittle: false, outputValue: recomposed, outputLittle: false), "DMS tolerance confined to GPS degree tags")
+        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 282, sourceType: 5, sourceValue: canon, sourceLittle: false, outputType: 5, outputValue: recomposed, outputLittle: false), "DMS tolerance confined to GPS degree tags")
         // ASCII: NUL-trimmed equality, content differences refuse.
-        try require(MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 271, type: 2, sourceValue: Data("abc\0".utf8), sourceLittle: false, outputValue: Data("abc\0\0".utf8), outputLittle: false), "ASCII NUL-trim")
-        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 271, type: 2, sourceValue: Data("abc\0".utf8), sourceLittle: false, outputValue: Data("abd\0".utf8), outputLittle: false), "ASCII content differs")
+        try require(MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 271, sourceType: 2, sourceValue: Data("abc\0".utf8), sourceLittle: false, outputType: 2, outputValue: Data("abc\0\0".utf8), outputLittle: false), "ASCII NUL-trim")
+        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 271, sourceType: 2, sourceValue: Data("abc\0".utf8), sourceLittle: false, outputType: 2, outputValue: Data("abd\0".utf8), outputLittle: false), "ASCII content differs")
         // Unproven types stay byte-exact.
-        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 256, type: 3, sourceValue: Data([0, 8]), sourceLittle: false, outputValue: Data([0, 9]), outputLittle: false), "SHORT stays byte-exact")
+        try require(!MetadataWriter.tiffValuesMatch(label: "IFD0", tag: 256, sourceType: 3, sourceValue: Data([0, 8]), sourceLittle: false, outputType: 3, outputValue: Data([0, 9]), outputLittle: false), "SHORT stays byte-exact")
         // TIFF tag-700 surgery: replace and drop, header repointed, bytes sane.
         var tiff700 = Data([0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00])
         tiff700.append(contentsOf: [0x01, 0x00])                 // one entry
@@ -2621,6 +2693,7 @@ struct MetadataWriterTests {
             try require(try pixelData(f) != nil, "JPEG output must decode")
         }
 
+        try runGPSCompareUnits()
         // M18 probes are independent: a failure in one must not abort the
         // harvest of the rest. Capture each probe's error, print it, and
         // throw one aggregate failure at the end - nothing turns green, but
