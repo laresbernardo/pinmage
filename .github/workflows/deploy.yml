@@ -40,12 +40,54 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "Building Pinmage $VERSION"
 
+      # Camera sample fixtures: ianare/exif-py (and its archived predecessor
+      # ianare/exif-samples) project images, CC BY-SA 4.0 (attribution in
+      # Tests/Fixtures/FIXTURES.md). Fetched, never committed; every file is
+      # verified against its pinned SHA-256 before use. URLs verified to
+      # deliver the pinned bytes on 2026-11-03.
+      - name: Fetch public test fixtures
+        run: |
+          set -euo pipefail
+          FIXDIR="$RUNNER_TEMP/pinmage-fixtures"
+          mkdir -p "$FIXDIR"
+          BASE_PY="https://raw.githubusercontent.com/ianare/exif-py/master/tests/resources"
+          BASE_SAMPLES="https://raw.githubusercontent.com/ianare/exif-samples/master"
+          cat > "$FIXDIR/SHA256SUMS" <<'SUMS'
+          17307b1207eb6487d7908e9d154890b46e3d2e0192369cfd3f4c33d5a5af4035  DSCN0010.jpg
+          9be023624ccd5846beeb5b02d9b571251ef5bd8ed820389a430d114029f58eda  HMD_Nokia_8.3_5G.jpg
+          e760c80eed310e4f27c092d5487693ca8e104e7cc01d25ba4828deb28f679676  iphone_13_pro_max.heic
+          6bfdabd4fc33d112283c147acccc574e770bbe6fbdbc3d4da968ba7b606ecc2f  Canon_40D.jpg
+          32f6aab90dc2d284a83040debe379e01333107b83a98c1aa2e6dabf56790b48a  Tless0.tiff
+          26f4b11c45ad3e56a530d03967ff4627892b3264183b85fefba194ff1fe3e08e  Arbitro.tiff
+          SUMS
+          curl -fsSL "$BASE_SAMPLES/jpg/gps/DSCN0010.jpg" -o "$FIXDIR/DSCN0010.jpg"
+          curl -fsSL "$BASE_SAMPLES/jpg/mobile/HMD_Nokia_8.3_5G.jpg" -o "$FIXDIR/HMD_Nokia_8.3_5G.jpg"
+          curl -fsSL "$BASE_PY/heic/mobile/iphone_13_pro_max.heic" -o "$FIXDIR/iphone_13_pro_max.heic"
+          curl -fsSL "$BASE_PY/jpg/Canon_40D.jpg" -o "$FIXDIR/Canon_40D.jpg"
+          curl -fsSL "$BASE_PY/tiff/Tless0.tiff" -o "$FIXDIR/Tless0.tiff"
+          curl -fsSL "$BASE_PY/tiff/Arbitro.tiff" -o "$FIXDIR/Arbitro.tiff"
+          cd "$FIXDIR" && shasum -a 256 -c SHA256SUMS
+          echo "PINMAGE_FIXTURES_DIR=$FIXDIR" >> "$GITHUB_ENV"
+
       - name: Test metadata write safety
         env:
           PRESERVATION_ARTIFACT_DIR: ${{ runner.temp }}/preservation-artifacts
         run: |
           swiftc PinmageApp/MetadataWriter.swift Tests/MetadataWriterTests.swift -o "$RUNNER_TEMP/metadata-writer-tests"
           "$RUNNER_TEMP/metadata-writer-tests"
+
+      # Visual verification: render the REAL per-item refusal UI (QueueRowView)
+      # with a REAL refused write's error through the actual app sources
+      # (everything except the @main entry) and save actual pixels as
+      # artifacts. Verifies presentation of the real long refusal string at
+      # the real list width; not an app-launch session. See
+      # Tests/RefusalUISnapshot.swift for scope.
+      - name: Snapshot refused-write UI
+        env:
+          PRESERVATION_ARTIFACT_DIR: ${{ runner.temp }}/preservation-artifacts
+        run: |
+          swiftc $(find PinmageApp -name '*.swift' ! -name 'PinmageApp.swift' | sort) Tests/RefusalUISnapshot.swift -o "$RUNNER_TEMP/refusal-ui-snapshot"
+          "$RUNNER_TEMP/refusal-ui-snapshot"
 
       - name: Upload preservation evidence
         if: always()

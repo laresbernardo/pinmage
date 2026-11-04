@@ -1121,6 +1121,10 @@ struct QueueRowView: View {
                         .foregroundColor(.red)
                         .padding(.top, 2)
                         .textSelection(.enabled)
+                        // Let the full refusal cause wrap and grow the row
+                        // instead of truncating: a refused write must be
+                        // self-evidencing on screen, not only via copy.
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             

@@ -1034,6 +1034,7 @@ import MapKit
             let removeLocationTag = (processingMode == .both || processingMode == .locationOnly) && item.removeLocation
             
             // Write Metadata to copy file
+            let refusalNote = MetadataWriter.RefusalNote()
             let success = MetadataWriter.updateImageMetadata(
                 sourceURL: item.fileURL,
                 destinationURL: outputURL,
@@ -1041,13 +1042,18 @@ import MapKit
                 removeDate: removeDateTag,
                 latitude: latitude,
                 longitude: longitude,
-                removeLocation: removeLocationTag
+                removeLocation: removeLocationTag,
+                refusalNote: refusalNote
             )
             
             if success {
                 return .success(outputURL)
             } else {
-                return .failure(NSError(domain: "PinmageManager", code: 6, userInfo: [NSLocalizedDescriptionKey: "Failed to compile/save final image metadata"]))
+                // Surface the guard's first refusal cause so a refused write
+                // is self-evidencing in the compact UI instead of a bare
+                // "failed" (S8).
+                let detail = refusalNote.reason.map { ": \($0)" } ?? ""
+                return .failure(NSError(domain: "PinmageManager", code: 6, userInfo: [NSLocalizedDescriptionKey: "Metadata write refused\(detail)"]))
             }
         } catch {
             return .failure(error)
