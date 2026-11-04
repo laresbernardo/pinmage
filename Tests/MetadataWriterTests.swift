@@ -1714,6 +1714,52 @@ struct MetadataWriterTests {
     /// parser model and Guard A accounting - total callback accounting,
     /// model totality, evasion resistance, resource bounds. Pure parse and
     /// compare, independent of ImageIO.
+    /// CI23 boundary ruling: a write on a fixture whose XMP packet carries
+    /// GPS values in destination-serializer textual forms ("12"/"90" for the
+    /// rationals, the unzoned GPSTimeStamp datetime) honestly refuses under
+    /// Guard A - reviewer-ruled, no canonicalization. A refusal is accepted
+    /// ONLY for exactly that reviewed cause, with the source byte-identical
+    /// afterwards and nothing published; ANY other refusal fails the case.
+    /// Outcomes print to stderr and aggregate, so one case never masks the
+    /// rest. Positive GPS-in-XMP write coverage is intentionally ABSENT
+    /// (documented gap): success coverage for these operations lives on the
+    /// no-GPS fixtures and the mixed set-date-plus-remove-location loop.
+    static func runBoundaryScenario(_ label: String, source: URL, destination: URL,
+                                    date: Date?, removeDate: Bool,
+                                    latitude: Double?, longitude: Double?, removeLocation: Bool,
+                                    failures: inout [String],
+                                    onSuccess: () throws -> Void) throws {
+        let before = try Data(contentsOf: source)
+        let note = MetadataWriter.RefusalNote()
+        let wrote = MetadataWriter.updateImageMetadata(sourceURL: source, destinationURL: destination,
+                                                       date: date, removeDate: removeDate,
+                                                       latitude: latitude, longitude: longitude,
+                                                       removeLocation: removeLocation, refusalNote: note)
+        if wrote {
+            do {
+                try onSuccess()
+                FileHandle.standardError.write(Data("M18 scenario \(label): SUCCESS, checks passed\n".utf8))
+            } catch {
+                failures.append("\(label): write succeeded but checks failed: \(error.localizedDescription)")
+                FileHandle.standardError.write(Data("M18 scenario \(label): FAILURE - write succeeded but checks failed: \(error.localizedDescription)\n".utf8))
+            }
+            return
+        }
+        let intact = (try? Data(contentsOf: source)) == before
+        let noPublish = destination.path == source.path || !FileManager.default.fileExists(atPath: destination.path)
+        let reason = note.reason ?? "(no refusal reason recorded)"
+        let reviewedKeys: Set<String> = ["GPSAltitude", "GPSImgDirection", "GPSTimeStamp"]
+        let named = reason.components(separatedBy: "would not survive: ").dropFirst()
+            .map { String($0.prefix(while: { $0.isLetter || $0.isDigit })) }
+        let reviewedCause = !named.isEmpty && named.allSatisfy { reviewedKeys.contains($0) }
+        if reviewedCause && intact && noPublish {
+            FileHandle.standardError.write(Data("M18 scenario \(label): REFUSED (ruled GPS textual-form boundary), original intact, no publish\n".utf8))
+        } else {
+            failures.append("\(label): unexpected refusal [\(reason)] (original intact: \(intact), no publish: \(noPublish))")
+            FileHandle.standardError.write(Data("M18 scenario \(label): FAILURE - unexpected refusal [\(reason)]\n".utf8))
+        }
+    }
+
     static func runXMPGuardUnits() throws {
         let xmpNS = "http://ns.adobe.com/xap/1.0/"
         let exifNS = "http://ns.adobe.com/exif/1.0/"
@@ -2859,50 +2905,65 @@ struct MetadataWriterTests {
             try require(MetadataWriter.readExistingCoordinates(from: mixed) == nil, "GPS survived mixed write in \(ext)")
         }
         // Reverse mixed request: set location, remove date. Date must be gone, GPS must be the requested one.
+        // CI23: outcomes are classified per format instead of one fatal -
+        // success requires the full readback checks; a refusal is accepted
+        // only for the ruled Guard A textual-form boundary with the original
+        // byte-identical and nothing published. No format masks the others.
+        var scenarioFailures: [String] = []
         for (ext, uti) in [("png", "public.png"), ("jpg", "public.jpeg"), ("tiff", "public.tiff"), ("heic", "public.heic")] {
             let mixed = root.appendingPathComponent("mixed2.\(ext)")
             try fixtureWithMetadata(at: mixed, type: uti as CFString)
-            try require(MetadataWriter.updateImageMetadata(sourceURL: mixed, destinationURL: mixed,
-                date: nil, removeDate: true, latitude: 12.5, longitude: -45.25, removeLocation: false), "Remove date + set location failed for \(ext)")
-            let coords = MetadataWriter.readExistingCoordinates(from: mixed)
-            try require(coords != nil && abs(coords!.latitude - 12.5) < 0.001 && abs(coords!.longitude + 45.25) < 0.001, "Requested GPS missing after mixed write in \(ext)")
-            let props = CGImageSourceCopyPropertiesAtIndex(CGImageSourceCreateWithURL(mixed as CFURL, nil)!, 0, nil) as? [CFString: Any]
-            let exif = props?[kCGImagePropertyExifDictionary] as? [CFString: Any]
-            try require(exif?[kCGImagePropertyExifDateTimeOriginal] == nil, "Date survived mixed removal in \(ext)")
+            try runBoundaryScenario("reverse-mixed \(ext)", source: mixed, destination: mixed,
+                                    date: nil, removeDate: true, latitude: 12.5, longitude: -45.25, removeLocation: false,
+                                    failures: &scenarioFailures) {
+                let coords = MetadataWriter.readExistingCoordinates(from: mixed)
+                try require(coords != nil && abs(coords!.latitude - 12.5) < 0.001 && abs(coords!.longitude + 45.25) < 0.001, "Requested GPS missing after mixed write in \(ext)")
+                let props = CGImageSourceCopyPropertiesAtIndex(CGImageSourceCreateWithURL(mixed as CFURL, nil)!, 0, nil) as? [CFString: Any]
+                let exif = props?[kCGImagePropertyExifDictionary] as? [CFString: Any]
+                try require(exif?[kCGImagePropertyExifDateTimeOriginal] == nil, "Date survived mixed removal in \(ext)")
+            }
         }
         // Regression (diagnostic probe evidence, run 41660381865): plain
-        // metadata sets on a PNG must succeed too - the destination-synthesized
-        // iTXt XMP carrier used to trip the aux guard, and xmp:ModifyDate kept
-        // the stale source date on a date set because the plan never wrote the
-        // MWG-canonical TIFF DateTime location.
+        // metadata sets on a PNG go through the copy-write path - the
+        // destination-synthesized iTXt XMP carrier used to trip the aux
+        // guard, and xmp:ModifyDate kept the stale source date on a date set
+        // because the plan never wrote the MWG-canonical TIFF DateTime
+        // location. CI23: on this GPS-bearing fixture the ruled Guard A
+        // textual-form boundary may refuse honestly instead; the readback
+        // checks below gate the SUCCESS outcome.
         let setOnly = root.appendingPathComponent("setonly.png")
         try fixtureWithMetadata(at: setOnly, type: "public.png" as CFString)
         let requestedDate = Date(timeIntervalSince1970: 1_700_000_000)
-        try require(MetadataWriter.updateImageMetadata(sourceURL: setOnly, destinationURL: setOnly,
-            date: requestedDate, removeDate: false, latitude: nil, longitude: nil, removeLocation: false), "Set date only failed for png")
-        let setOnlyProps = CGImageSourceCopyPropertiesAtIndex(CGImageSourceCreateWithURL(setOnly as CFURL, nil)!, 0, nil) as? [CFString: Any]
-        let setOnlyExif = setOnlyProps?[kCGImagePropertyExifDictionary] as? [CFString: Any]
-        let exifFormatter = DateFormatter()
-        exifFormatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-        try require(setOnlyExif?[kCGImagePropertyExifDateTimeOriginal] as? String == exifFormatter.string(from: requestedDate), "Set date missing in png readback")
-        var modifyDateValue: String?
-        if let setOnlyGraph = CGImageSourceCopyMetadataAtIndex(CGImageSourceCreateWithURL(setOnly as CFURL, nil)!, 0, nil) {
-            CGImageMetadataEnumerateTagsUsingBlock(setOnlyGraph, nil, nil) { path, tag in
-                if (path as String) == "xmp:ModifyDate" {
-                    modifyDateValue = CGImageMetadataTagCopyValue(tag) as? String
+        try runBoundaryScenario("set-date-only png", source: setOnly, destination: setOnly,
+                                date: requestedDate, removeDate: false, latitude: nil, longitude: nil, removeLocation: false,
+                                failures: &scenarioFailures) {
+            let setOnlyProps = CGImageSourceCopyPropertiesAtIndex(CGImageSourceCreateWithURL(setOnly as CFURL, nil)!, 0, nil) as? [CFString: Any]
+            let setOnlyExif = setOnlyProps?[kCGImagePropertyExifDictionary] as? [CFString: Any]
+            let exifFormatter = DateFormatter()
+            exifFormatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+            try require(setOnlyExif?[kCGImagePropertyExifDateTimeOriginal] as? String == exifFormatter.string(from: requestedDate), "Set date missing in png readback")
+            var modifyDateValue: String?
+            if let setOnlyGraph = CGImageSourceCopyMetadataAtIndex(CGImageSourceCreateWithURL(setOnly as CFURL, nil)!, 0, nil) {
+                CGImageMetadataEnumerateTagsUsingBlock(setOnlyGraph, nil, nil) { path, tag in
+                    if (path as String) == "xmp:ModifyDate" {
+                        modifyDateValue = CGImageMetadataTagCopyValue(tag) as? String
+                    }
+                    return true
                 }
-                return true
             }
+            let xmpFormatter = DateFormatter()
+            xmpFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+            try require(modifyDateValue == xmpFormatter.string(from: requestedDate), "xmp:ModifyDate stale after png date set")
         }
-        let xmpFormatter = DateFormatter()
-        xmpFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
-        try require(modifyDateValue == xmpFormatter.string(from: requestedDate), "xmp:ModifyDate stale after png date set")
         let locOnly = root.appendingPathComponent("loconly.png")
         try fixtureWithMetadata(at: locOnly, type: "public.png" as CFString)
-        try require(MetadataWriter.updateImageMetadata(sourceURL: locOnly, destinationURL: locOnly,
-            date: nil, removeDate: false, latitude: 12.5, longitude: -45.25, removeLocation: false), "Set location only failed for png")
-        let locCoords = MetadataWriter.readExistingCoordinates(from: locOnly)
-        try require(locCoords != nil && abs(locCoords!.latitude - 12.5) < 0.001 && abs(locCoords!.longitude + 45.25) < 0.001, "Requested GPS missing after png set")
+        try runBoundaryScenario("set-location-only png", source: locOnly, destination: locOnly,
+                                date: nil, removeDate: false, latitude: 12.5, longitude: -45.25, removeLocation: false,
+                                failures: &scenarioFailures) {
+            let locCoords = MetadataWriter.readExistingCoordinates(from: locOnly)
+            try require(locCoords != nil && abs(locCoords!.latitude - 12.5) < 0.001 && abs(locCoords!.longitude + 45.25) < 0.001, "Requested GPS missing after png set")
+        }
+        try require(scenarioFailures.isEmpty, "Boundary scenario failures: \(scenarioFailures.joined(separator: " | "))")
 
         // No-op copy of a symlinked source yields a regular file.
         let linkSource = root.appendingPathComponent("link-source.png")
