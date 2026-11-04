@@ -1895,6 +1895,40 @@ struct MetadataWriterTests {
         try require(guardViolations(dateOnly, graphPacket, sourceGraphPacket: Data("not xml".utf8))
                         .contains { $0.contains("source graph XMP serialization failed to parse") },
                     "guard: unparseable graph serialization must refuse")
+        // CI22 ImageIO envelope: exactly one terminal NUL after the xpacket
+        // end PI (ImageIO's C-string terminator) is admitted through the
+        // parser VIEW only; the unchanged strict parse is the completeness
+        // proof. Every shape beyond the observed envelope refuses.
+        let terminated = packet("") + Data([0x00])
+        try require(MetadataWriter.xmpPacketTree(terminated) != nil,
+                    "guard: one terminal NUL after the xpacket end PI must parse (ImageIO envelope)")
+        let rawBytes = packet("<xmp:Label xmlns:xmp=\"\(xmpNS)\">keep</xmp:Label>") + Data([0x00])
+        let rawBefore = rawBytes
+        _ = MetadataWriter.xmpPacketTree(rawBytes)
+        try require(rawBytes == rawBefore, "guard: parsing must never mutate the caller's raw bytes")
+        var interiorNUL = packet("")
+        interiorNUL.insert(0x00, at: interiorNUL.count / 2)
+        try require(MetadataWriter.xmpPacketTree(interiorNUL) == nil, "guard: interior NUL must refuse")
+        try require(MetadataWriter.xmpPacketTree(packet("") + Data([0x00, 0x00])) == nil,
+                    "guard: double terminal NUL must refuse")
+        try require(MetadataWriter.xmpPacketTree(packet("") + Data([0x00]) + Data("garbage".utf8)) == nil,
+                    "guard: NUL plus trailing garbage must refuse")
+        try require(MetadataWriter.xmpPacketTree(Data(packet("").prefix(40)) + Data([0x00])) == nil,
+                    "guard: truncated document plus NUL must refuse")
+        try require(MetadataWriter.xmpPacketTree(Data("not xml at all\u{0}".utf8)) == nil,
+                    "guard: malformed document plus NUL must refuse")
+        try require(MetadataWriter.xmpPacketTree(packet("<?xml-stylesheet href=\"x\"?>") + Data([0x00])) == nil,
+                    "guard: forged non-xpacket PI with terminator must refuse")
+        let noEndPI = Data(("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">"
+            + "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
+            + "<rdf:Description rdf:about=\"\"/>"
+            + "</rdf:RDF></x:xmpmeta>").utf8) + Data([0x00])
+        try require(MetadataWriter.xmpPacketTree(noEndPI) == nil,
+                    "guard: NUL without the xpacket end PI must refuse")
+        // Guard A source-side benefits from the same parser view: an
+        // ImageIO-terminated source packet parses and compares clean.
+        try require(guardViolations(terminated, packet("")).isEmpty,
+                    "guard A: ImageIO-terminated source packet must parse and compare")
         FileHandle.standardError.write(Data("M18 guard units: all cases passed\n".utf8))
     }
 

@@ -3446,6 +3446,9 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
     private final class XMPPacketParserDelegate: NSObject, XMLParserDelegate {
         private(set) var root: XMPDOMNode?
         private(set) var failed = false
+        /// Set when an xpacket PI arrives after the root element closed
+        /// (the end PI); the NUL-terminator admission requires it.
+        private(set) var sawTrailingXpacketPI = false
         private var stack: [XMPDOMNode] = []
         private var prefixURIs: [String: [String]] = ["xml": [MetadataWriter.xmlNamespaceURI]]
         private var nodeCount = 0
@@ -3526,6 +3529,7 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
 
         func parser(_ parser: XMLParser, foundProcessingInstructionWithTarget target: String, data: String?) {
             guard target == "xpacket" else { reject(); return }
+            if stack.isEmpty, root != nil { sawTrailingXpacketPI = true }
         }
 
         func parser(_ parser: XMLParser, foundInternalEntityDeclarationWithName name: String, value: String?) { reject() }
@@ -3568,9 +3572,27 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
     static func xmpPacketTreeDiagnosed(_ packet: Data) -> (tree: [XMPProperty]?, diagnosis: String?) {
         guard !packet.isEmpty else { return (nil, "empty packet") }
         guard packet.count <= 1_000_000 else { return (nil, "packet over the size bound") }
-        guard let text = String(data: packet, encoding: .utf8) else { return (nil, "not valid UTF-8") }
+        // ImageIO's destination serializer terminates the XMP packet with a
+        // single C NUL after the closing <?xpacket end?> PI (CI22: 14/14
+        // JPEG APP1 packets, NSXMLParserErrorDomain 111 at the terminal
+        // column; the padding before the end PI is spaces). That byte is
+        // envelope, not content: drop AT MOST ONE trailing 0x00 from the
+        // parser's VIEW, then let the unchanged total strict parse be the
+        // completeness proof - an interior NUL, a second NUL, or NUL plus
+        // any other trailing byte all still fail the parse. The strip is
+        // admitted only when the parse observes an xpacket PI after the root
+        // element closes (the end PI): an unterminated document plus NUL
+        // stays refused. The caller's raw bytes are never modified and every
+        // carrier byte-identity check keeps the original payload.
+        var view = packet
+        var strippedTerminator = false
+        if view.last == 0x00 {
+            view = view.dropLast()
+            strippedTerminator = true
+        }
+        guard let text = String(data: view, encoding: .utf8) else { return (nil, "not valid UTF-8") }
         guard !text.contains("<!DOCTYPE"), !text.contains("<!ENTITY") else { return (nil, "DOCTYPE/ENTITY construct") }
-        let parser = XMLParser(data: packet)
+        let parser = XMLParser(data: view)
         let delegate = XMPPacketParserDelegate()
         parser.delegate = delegate
         parser.shouldProcessNamespaces = true
@@ -3583,6 +3605,9 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
             return (nil, "parser resource bound rejected (nodes/depth/text)")
         }
         guard let root = delegate.root else { return (nil, "no root element") }
+        if strippedTerminator, !delegate.sawTrailingXpacketPI {
+            return (nil, "terminal NUL without a trailing xpacket end PI")
+        }
         guard let tree = xmpPacketFromDOM(root) else {
             let children = root.children.map { "\($0.name)(children=\($0.children.count))" }.joined(separator: ",")
             return (nil, "packet model rejected (root=\(root.name), children=[\(children)])")
@@ -3959,6 +3984,17 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
         for (key, prop) in sourceByKey {
             if targets.contains(key) || isGPSPrefixTarget(key) { continue }
             if planned.contains(key) && isPlainScalar(prop) { continue }
+            // Observed serializer forms (CI20/CI21, reviewer-ruled honest
+            // refusals - no canonicalization): the destination serializer
+            // writes GPS rationals as plain numbers ("12", "90") while
+            // CreateXMPData writes "12/1", "90/1", and GPSTimeStamp as the
+            // merged datetime without zone ("2001-02-03T04:05:06") where the
+            // corrected packet carries the zoned form ("...+0000").
+            // These semantically-equal textual differences refuse here by
+            // design: a textual canonicalizer for rationals and date/time
+            // forms could hide real precision/timezone alterations. A write
+            // to a file whose source XMP carries such forms refuses with
+            // the original intact; that is a documented support boundary.
             if let other = correctedByKey[key] {
                 if !xmpPropertyEqual(prop, other) {
                     violations.append("non-target XMP property would not survive: \(key.name) [\(key.uri)] (source \(xmpPropertyBrief(prop)) vs corrected \(xmpPropertyBrief(other)))")
