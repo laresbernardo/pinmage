@@ -1503,7 +1503,7 @@ struct MetadataWriterTests {
                     "R3 unit: removal plan must strip xmp:MetadataDate from the graph")
         try require(graphValue(meta, "xmp:CreatorTool") == "PinmageSeedTest",
                     "R3 unit: non-target control must survive the removal plan")
-        print("M18 graph unit: MetadataDate strip-positive passed")
+        FileHandle.standardError.write(Data("M18 graph unit: MetadataDate strip-positive passed\n".utf8))
     }
 
     /// M18 (R3 extra evidence): the JPEG APP1 carrier variant of the
@@ -1895,7 +1895,7 @@ struct MetadataWriterTests {
         try require(guardViolations(dateOnly, graphPacket, sourceGraphPacket: Data("not xml".utf8))
                         .contains { $0.contains("source graph XMP serialization failed to parse") },
                     "guard: unparseable graph serialization must refuse")
-        print("M18 guard units: all cases passed")
+        FileHandle.standardError.write(Data("M18 guard units: all cases passed\n".utf8))
     }
 
     static func runGPSCompareUnits() throws {
@@ -3142,6 +3142,6 @@ struct MetadataWriterTests {
 
         try require(probeFailures.isEmpty, "M18 probe failures [\(probeFailures.count)]: \(probeFailures.joined(separator: " | "))")
         try require(softFailures.isEmpty, "\(softFailures.count) check(s) failed across format stages: \(softFailures.joined(separator: " | "))")
-        print("Metadata write safety tests passed (PNG, JPEG, TIFF, HEIC).")
+        FileHandle.standardError.write(Data("Metadata write safety tests passed (PNG, JPEG, TIFF, HEIC).\n".utf8))
     }
 }

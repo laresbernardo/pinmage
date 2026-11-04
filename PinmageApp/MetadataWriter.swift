@@ -996,11 +996,17 @@ struct MetadataWriter {
             guard let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
                                                            latitude: latitude, longitude: longitude, removeLocation: removeLocation,
                                                            sourcePacket: Data(sourceParts.xmp[0].dropFirst(xmpPrefix.count)),
-                                                           refusalNote: refusalNote),
-                  !expectedPacket.isEmpty,
-                  let stagedTree = xmpPacketTree(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))),
-                  let expectedTree = xmpPacketTree(expectedPacket) else {
-                return refuse("staged XMP packet failed verification")
+                                                           refusalNote: refusalNote) else {
+                return refuse("staged XMP packet failed verification: verified packet unavailable")
+            }
+            guard !expectedPacket.isEmpty else {
+                return refuse("staged XMP packet failed verification: verified packet empty")
+            }
+            guard let stagedTree = xmpPacketTree(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))) else {
+                return refuse("staged XMP packet failed verification: staged packet unparseable under the guard [\(xmpPacketPreview(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))))]")
+            }
+            guard let expectedTree = xmpPacketTree(expectedPacket) else {
+                return refuse("staged XMP packet failed verification: verified packet unparseable under the guard [\(xmpPacketPreview(expectedPacket))]")
             }
             guard xmpTreeEqual(stagedTree, expectedTree) else {
                 return refuse("staged XMP packet failed verification [\(xmpTreeDiffSummary(stagedTree, expectedTree))]")
@@ -1010,15 +1016,25 @@ struct MetadataWriter {
             // staged packet against the expected corrected packet - no
             // exemptions, strictly stronger than the previous graph compare
             // plus synthesis allowlist. The source had no packet, so Guard A
-            // does not apply; ImageIO's synthesis lands in both packets
-            // identically.
+            // does not apply. CI18 disproved the earlier premise that the
+            // destination serializer and CreateXMPData emit identical packets
+            // (photoshop: vs exif: DateTimeOriginal, destination-time
+            // synthesis, native-carrier routing); CI20 localized the mismatch
+            // to the parse guard, so each condition now refuses with its own
+            // evidence.
             guard let expectedPacket = correctedXMPPacket(imageSource: imageSource, date: date, removeDate: removeDate,
                                                           latitude: latitude, longitude: longitude, removeLocation: removeLocation,
-                                                          refusalNote: refusalNote),
-                  !expectedPacket.isEmpty,
-                  let stagedTree = xmpPacketTree(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))),
-                  let expectedTree = xmpPacketTree(expectedPacket) else {
-                return refuse("added XMP APP1 carrier differs from the verified packet")
+                                                          refusalNote: refusalNote) else {
+                return refuse("added XMP APP1 carrier differs from the verified packet: verified packet unavailable")
+            }
+            guard !expectedPacket.isEmpty else {
+                return refuse("added XMP APP1 carrier differs from the verified packet: verified packet empty")
+            }
+            guard let stagedTree = xmpPacketTree(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))) else {
+                return refuse("added XMP APP1 carrier differs from the verified packet: staged packet unparseable under the guard [\(xmpPacketPreview(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))))]")
+            }
+            guard let expectedTree = xmpPacketTree(expectedPacket) else {
+                return refuse("added XMP APP1 carrier differs from the verified packet: verified packet unparseable under the guard [\(xmpPacketPreview(expectedPacket))]")
             }
             guard xmpTreeEqual(stagedTree, expectedTree) else {
                 return refuse("added XMP APP1 carrier differs from the verified packet [\(xmpTreeDiffSummary(stagedTree, expectedTree))]")
@@ -3690,6 +3706,48 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
     }
 
     /// Whole-tree equality: the two packets carry exactly the same properties.
+    /// Bounded one-line rendering of a property for refusal diagnostics:
+    /// key plus a truncated value sketch. Never used for comparisons.
+    private static func xmpPropertyBrief(_ prop: XMPProperty) -> String {
+        let text: String
+        switch prop.value {
+        case .text(let value): text = value
+        case .uriReference(let value): text = "uri:" + value
+        case .array(let kind, let entries): text = "array(" + kind + ", " + String(entries.count) + ")"
+        case .structure(let fields): text = "struct(" + String(fields.count) + ")"
+        }
+        let truncated = text.count > 48 ? String(text.prefix(48)) + "..." : text
+        let qualifiers = prop.qualifiers.isEmpty ? "" : " (q:\(prop.qualifiers.count))"
+        return "\(prop.key.name) [\(prop.key.uri)] = \(truncated)\(qualifiers)"
+    }
+
+    /// Bounded printable preview of a packet that failed the guard's parse:
+    /// byte count plus the first bytes, newlines and control characters
+    /// escaped. Diagnostic only (CI20: the Guard B parse-guard refusal did
+    /// not say WHICH side failed or what shape the parser rejected).
+    private static func xmpPacketPreview(_ packet: Data) -> String {
+        guard let text = String(data: packet, encoding: .utf8) else {
+            return "bytes=\(packet.count) <non-utf8>"
+        }
+        var flat = ""
+        flat.reserveCapacity(min(text.count, 420))
+        for scalar in text.unicodeScalars {
+            if flat.count > 400 { flat += "..."; break }
+            switch scalar {
+            case "\n": flat += "\\n"
+            case "\r": flat += "\\r"
+            case "\t": flat += "\\t"
+            default:
+                if scalar.value < 0x20 || scalar.value == 0x7F {
+                    flat += String(format: "\\x%02X", scalar.value)
+                } else {
+                    flat.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        return "bytes=\(packet.count) \(flat)"
+    }
+
     /// Bounded staged-vs-expected tree diff for Guard B refusal diagnostics:
     /// URI-scoped keys that are staged-only, expected-only, or present with
     /// unequal content, values truncated. Diagnostic only - it never weakens
@@ -3703,28 +3761,16 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
         }
         let stagedByKey = keyMap(staged)
         let expectedByKey = keyMap(expected)
-        func summary(_ prop: XMPProperty) -> String {
-            let text: String
-            switch prop.value {
-            case .text(let value): text = value
-            case .uriReference(let value): text = "uri:" + value
-            case .array(let kind, let entries): text = "array(" + kind + ", " + String(entries.count) + ")"
-            case .structure(let fields): text = "struct(" + String(fields.count) + ")"
-            }
-            let truncated = text.count > 48 ? String(text.prefix(48)) + "..." : text
-            let qualifiers = prop.qualifiers.isEmpty ? "" : " (q:\(prop.qualifiers.count))"
-            return "\(prop.key.name) [\(prop.key.uri)] = \(truncated)\(qualifiers)"
-        }
         var lines: [String] = []
         for (key, prop) in stagedByKey where expectedByKey[key] == nil {
-            lines.append("staged-only " + summary(prop))
+            lines.append("staged-only " + xmpPropertyBrief(prop))
         }
         for (key, prop) in expectedByKey where stagedByKey[key] == nil {
-            lines.append("expected-only " + summary(prop))
+            lines.append("expected-only " + xmpPropertyBrief(prop))
         }
         for (key, prop) in stagedByKey {
             if let other = expectedByKey[key], !xmpPropertyEqual(prop, other) {
-                lines.append("differs " + summary(prop) + " | expected " + summary(other))
+                lines.append("differs " + xmpPropertyBrief(prop) + " | expected " + xmpPropertyBrief(other))
             }
         }
         let sorted = lines.sorted()
@@ -3862,10 +3908,13 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
         for (key, prop) in sourceByKey {
             if targets.contains(key) || isGPSPrefixTarget(key) { continue }
             if planned.contains(key) && isPlainScalar(prop) { continue }
-            guard let other = correctedByKey[key], xmpPropertyEqual(prop, other) else {
-                violations.append("non-target XMP property would not survive: \(key.name) [\(key.uri)]")
+            if let other = correctedByKey[key] {
+                if !xmpPropertyEqual(prop, other) {
+                    violations.append("non-target XMP property would not survive: \(key.name) [\(key.uri)] (source \(xmpPropertyBrief(prop)) vs corrected \(xmpPropertyBrief(other)))")
+                }
                 continue
             }
+            violations.append("non-target XMP property would not survive: \(key.name) [\(key.uri)] (absent from corrected)")
         }
         for (key, prop) in correctedByKey {
             if targets.contains(key) || isGPSPrefixTarget(key) {
