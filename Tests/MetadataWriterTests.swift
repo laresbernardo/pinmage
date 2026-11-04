@@ -1869,8 +1869,8 @@ struct MetadataWriterTests {
         try require(guardViolations(dateOnly, graphPacket, sourceGraphPacket: graphPacket).isEmpty,
                     "guard: equal graph-sourced property must be admitted")
         // An altered graph-sourced scalar refuses.
-        let altered = packet(createDateEl + "<tiff:Orientation xmlns:tiff=\"\(tiffNS)\">6</tiff:Orientation>")
-        try require(guardViolations(dateOnly, altered, sourceGraphPacket: graphPacket)
+        let alteredOrient = packet(createDateEl + "<tiff:Orientation xmlns:tiff=\"\(tiffNS)\">6</tiff:Orientation>")
+        try require(guardViolations(dateOnly, alteredOrient, sourceGraphPacket: graphPacket)
                         .contains { $0.contains("alters a graph-sourced property: Orientation") },
                     "guard: altered graph-sourced property must refuse")
         // A graph-sourced property with an altered SUBTREE refuses (array content).
