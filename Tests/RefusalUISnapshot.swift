@@ -133,7 +133,13 @@ struct RefusalUISnapshot {
             }
             let hosting = NSHostingView(rootView: framed)
             hosting.appearance = NSAppearance(named: .darkAqua)
-            hosting.frame = NSRect(x: 0, y: 0, width: width, height: 10)
+            // Fitting pass with an unbounded height proposal: the wrapped
+            // refusal caption must report its FULL laid-out height. (The
+            // first pass used a 10pt proposal and the returned fitting
+            // height stayed at the collapsed row height, cropping the
+            // wrapped text in the bitmap - caught on pixel inspection.)
+            hosting.frame = NSRect(x: 0, y: 0, width: width, height: 2000)
+            hosting.layoutSubtreeIfNeeded()
             let fitting = hosting.fittingSize
             let size = NSSize(width: width, height: max(fitting.height, 48))
             hosting.frame = NSRect(origin: .zero, size: size)
