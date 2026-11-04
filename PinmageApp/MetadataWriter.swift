@@ -787,8 +787,11 @@ struct MetadataWriter {
             exempt["IFD0>34665", default: []].formUnion([36867, 36868])
         }
         if removeDate {
-            // GPSDateStamp is a capture-date alias the removal strips (S7).
-            exempt["IFD0>34853", default: []].insert(29)
+            // GPSDateStamp (29) and GPSTimeStamp (7) are capture-date/time
+            // aliases the removal strips (S7) - the same set named by
+            // removalDateLeaves, the removalDict strip, the verifyIntent
+            // survivor check and droppedUntouchedTags.
+            exempt["IFD0>34853", default: []].formUnion([7, 29])
         }
         if removeLocation {
             // The whole GPS IFD is intentionally removed; verifyIntent
