@@ -1729,11 +1729,12 @@ struct MetadataWriterTests {
         }
         func guardViolations(_ source: Data, _ corrected: Data, date: Date? = nil, removeDate: Bool = false,
                              latitude: Double? = nil, longitude: Double? = nil, removeLocation: Bool = false,
-                             pixelWidth: Int? = nil, pixelHeight: Int? = nil) -> [String] {
+                             pixelWidth: Int? = nil, pixelHeight: Int? = nil, sourceGraphPacket: Data? = nil) -> [String] {
             MetadataWriter.xmpGuardViolations(sourcePacket: source, correctedPacket: corrected,
                                               date: date, removeDate: removeDate,
                                               latitude: latitude, longitude: longitude, removeLocation: removeLocation,
-                                              pixelWidth: pixelWidth, pixelHeight: pixelHeight)
+                                              pixelWidth: pixelWidth, pixelHeight: pixelHeight,
+                                              sourceGraphPacket: sourceGraphPacket)
         }
         // Baseline parses.
         try require(MetadataWriter.xmpPacketTree(packet("")) != nil, "guard: empty Description packet must parse")
@@ -1854,6 +1855,46 @@ struct MetadataWriterTests {
         let scalarCreated = packet("<xmp:CreateDate xmlns:xmp=\"\(xmpNS)\">2019-05-06T07:08:09</xmp:CreateDate>")
         try require(guardViolations(scalarCreated, plannedPkt, date: Date()).isEmpty,
                     "guard A: plain scalar planned key stays exempt (R2)")
+        // C1 graph-sourced admission (CI18, run 41764385119): a corrected
+        // property absent from the source packet is admitted only as an
+        // EXACT replica (value, qualifiers, subtree) of a source-graph
+        // property; removal targets are checked first; alterations refuse.
+        let tiffNS = "http://ns.adobe.com/tiff/1.0/"
+        let dcNS = "http://purl.org/dc/elements/1.1/"
+        let createDateEl = "<xmp:CreateDate xmlns:xmp=\"\(xmpNS)\">2001-02-03T04:05:06</xmp:CreateDate>"
+        let dateOnly = packet(createDateEl)
+        let orient1 = "<tiff:Orientation xmlns:tiff=\"\(tiffNS)\">1</tiff:Orientation>"
+        let graphPacket = packet(createDateEl + orient1)
+        // Equal graph-sourced property admitted (Exif-item orientation in a HEIC).
+        try require(guardViolations(dateOnly, graphPacket, sourceGraphPacket: graphPacket).isEmpty,
+                    "guard: equal graph-sourced property must be admitted")
+        // An altered graph-sourced scalar refuses.
+        let altered = packet(createDateEl + "<tiff:Orientation xmlns:tiff=\"\(tiffNS)\">6</tiff:Orientation>")
+        try require(guardViolations(dateOnly, altered, sourceGraphPacket: graphPacket)
+                        .contains { $0.contains("alters a graph-sourced property: Orientation") },
+                    "guard: altered graph-sourced property must refuse")
+        // A graph-sourced property with an altered SUBTREE refuses (array content).
+        let bagA = "<dc:subject xmlns:dc=\"\(dcNS)\"><rdf:Bag><rdf:li>a</rdf:li></rdf:Bag></dc:subject>"
+        let bagB = "<dc:subject xmlns:dc=\"\(dcNS)\"><rdf:Bag><rdf:li>b</rdf:li></rdf:Bag></dc:subject>"
+        let graphBag = packet(bagA)
+        try require(guardViolations(packet(""), packet(bagB), sourceGraphPacket: graphBag)
+                        .contains { $0.contains("alters a graph-sourced property: subject") },
+                    "guard: altered graph-sourced subtree must refuse")
+        try require(guardViolations(packet(""), packet(bagA), sourceGraphPacket: graphBag).isEmpty,
+                    "guard: equal graph-sourced subtree must be admitted")
+        // Removal targets are checked BEFORE graph admission.
+        try require(guardViolations(dateOnly, dateOnly, removeDate: true, sourceGraphPacket: dateOnly)
+                        .contains { $0.contains("removal target survived") },
+                    "guard: graph-sourced removal target must refuse before admission")
+        // Graph admission never excuses a source-packet drop.
+        let labeled = packet("<xmp:Label xmlns:xmp=\"\(xmpNS)\">keep</xmp:Label>")
+        try require(guardViolations(labeled, packet(""), sourceGraphPacket: packet(""))
+                        .contains { $0.contains("would not survive: Label") },
+                    "guard: graph admission must not excuse source-packet drops")
+        // A graph serialization the guard cannot model refuses (fail-closed).
+        try require(guardViolations(dateOnly, graphPacket, sourceGraphPacket: Data("not xml".utf8))
+                        .contains { $0.contains("source graph XMP serialization failed to parse") },
+                    "guard: unparseable graph serialization must refuse")
         print("M18 guard units: all cases passed")
     }
 
@@ -2176,6 +2217,29 @@ struct MetadataWriterTests {
         runAuxTransportProbe(root: root)
         runRouteProbe(root: root)
         runDeepProbe(root: root)
+        // M18 independent guard units and probes run FIRST (CI18's trap in a
+        // fatal legacy scenario hid their entire harvest). Each failure is
+        // captured, printed, and gated at the end of main, so no suite
+        // section hides another section's evidence again.
+        var probeFailures: [String] = []
+        func runProbe(_ name: String, _ body: () throws -> Void) {
+            do { try body() } catch {
+                probeFailures.append("\(name): \(error.localizedDescription)")
+                FileHandle.standardError.write(Data("M18 probe \(name) FAILED: \(error.localizedDescription)\n".utf8))
+            }
+        }
+        runProbe("GPSCompareUnits") { try runGPSCompareUnits() }
+        runProbe("XMPGuardUnits") { try runXMPGuardUnits() }
+        runProbe("MetadataDateGraphUnit") { try runMetadataDateGraphUnit() }
+        runProbe("TIFFIPTCRefusal") { try runTIFFIPTCRefusalProbe(root: root) }
+        runProbe("HEICEmptyPacket") { try runHEICEmptyPacketProbe(root: root) }
+        runProbe("PNGMetadataDateSeed") { try runPNGMetadataDateSeedProbe(root: root) }
+        runProbe("JPEGMetadataDateSeed") { try runJPEGMetadataDateSeedProbe(root: root) }
+        runProbe("16Bit") { try run16BitProbe(root: root) }
+        runProbe("PngSuite") { try runPngSuiteProbe(root: root) }
+        runProbe("P3HEIC") { try runP3HEICProbe(root: root) }
+        runProbe("PublicFixture") { try runPublicFixtureProbe(root: root) }
+        runProbe("LargeHEIC") { try runLargeHEICProbe(root: root) }
         // GPS coordinate parsing is strict and axis-aware: the hemisphere
         // reference must belong to the axis and sets the sign; malformed,
         // out-of-range or trailing-data values never parse; genuinely
@@ -3063,31 +3127,9 @@ struct MetadataWriterTests {
             try require(try pixelData(f) != nil, "JPEG output must decode")
         }
 
-        try runGPSCompareUnits()
-        try runXMPGuardUnits()
-        try runMetadataDateGraphUnit()
-        // M18 probes are independent: a failure in one must not abort the
-        // harvest of the rest. Capture each probe's error, print it, and
-        // throw one aggregate failure at the end - nothing turns green, but
-        // every later probe still executes. Genuinely shared setup (fixture
-        // root, earlier scenario units) stays fatal above.
-        var probeFailures: [String] = []
-        func runProbe(_ name: String, _ body: () throws -> Void) {
-            do { try body() } catch {
-                probeFailures.append("\(name): \(error.localizedDescription)")
-                FileHandle.standardError.write(Data("M18 probe \(name) FAILED: \(error.localizedDescription)\n".utf8))
-            }
-        }
-        runProbe("TIFFIPTCRefusal") { try runTIFFIPTCRefusalProbe(root: root) }
-        runProbe("HEICEmptyPacket") { try runHEICEmptyPacketProbe(root: root) }
-        runProbe("PNGMetadataDateSeed") { try runPNGMetadataDateSeedProbe(root: root) }
-        runProbe("JPEGMetadataDateSeed") { try runJPEGMetadataDateSeedProbe(root: root) }
-        runProbe("16Bit") { try run16BitProbe(root: root) }
-        runProbe("PngSuite") { try runPngSuiteProbe(root: root) }
-        runProbe("P3HEIC") { try runP3HEICProbe(root: root) }
-        runProbe("PublicFixture") { try runPublicFixtureProbe(root: root) }
-        runProbe("LargeHEIC") { try runLargeHEICProbe(root: root) }
-        try require(probeFailures.isEmpty, "M18 probe failures [\(probeFailures.count)]: \(probeFailures.joined(separator: " | "))")
+        // (The M18 guard units and probes run FIRST, right after fixture
+        // setup - a fatal legacy scenario can no longer hide their harvest,
+        // CI18. Their aggregate gate sits with the softFailures gate below.)
         // M18 (B3): the IPTC presence check and its removal exemptions.
         let iptcSource: [CFString: Any] = [kCGImagePropertyIPTCDictionary: ["DateCreated": "2001:02:03", "City": "Madrid", "Caption": "x"] as [CFString: Any]]
         var iptcDropped = MetadataWriter.droppedUntouchedTags(source: iptcSource, output: [:], removeDate: true, removeLocation: false)
@@ -3098,6 +3140,7 @@ struct MetadataWriterTests {
         let gpsDropped = MetadataWriter.droppedUntouchedTags(source: gpsDateSource, output: [:], removeDate: true, removeLocation: false)
         try require(gpsDropped.count == 1 && !gpsDropped[0].contains("DateStamp"), "GPSDateStamp exempt under removeDate: \(gpsDropped)")
 
+        try require(probeFailures.isEmpty, "M18 probe failures [\(probeFailures.count)]: \(probeFailures.joined(separator: " | "))")
         try require(softFailures.isEmpty, "\(softFailures.count) check(s) failed across format stages: \(softFailures.joined(separator: " | "))")
         print("Metadata write safety tests passed (PNG, JPEG, TIFF, HEIC).")
     }

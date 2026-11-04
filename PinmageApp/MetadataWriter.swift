@@ -999,9 +999,11 @@ struct MetadataWriter {
                                                            refusalNote: refusalNote),
                   !expectedPacket.isEmpty,
                   let stagedTree = xmpPacketTree(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))),
-                  let expectedTree = xmpPacketTree(expectedPacket),
-                  xmpTreeEqual(stagedTree, expectedTree) else {
+                  let expectedTree = xmpPacketTree(expectedPacket) else {
                 return refuse("staged XMP packet failed verification")
+            }
+            guard xmpTreeEqual(stagedTree, expectedTree) else {
+                return refuse("staged XMP packet failed verification [\(xmpTreeDiffSummary(stagedTree, expectedTree))]")
             }
         } else if stagedParts.xmp.count == 1 {
             // Guard B (added carrier): strict tree equality of the actual
@@ -1015,9 +1017,11 @@ struct MetadataWriter {
                                                           refusalNote: refusalNote),
                   !expectedPacket.isEmpty,
                   let stagedTree = xmpPacketTree(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))),
-                  let expectedTree = xmpPacketTree(expectedPacket),
-                  xmpTreeEqual(stagedTree, expectedTree) else {
+                  let expectedTree = xmpPacketTree(expectedPacket) else {
                 return refuse("added XMP APP1 carrier differs from the verified packet")
+            }
+            guard xmpTreeEqual(stagedTree, expectedTree) else {
+                return refuse("added XMP APP1 carrier differs from the verified packet [\(xmpTreeDiffSummary(stagedTree, expectedTree))]")
             }
         }
         return true
@@ -3686,6 +3690,48 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
     }
 
     /// Whole-tree equality: the two packets carry exactly the same properties.
+    /// Bounded staged-vs-expected tree diff for Guard B refusal diagnostics:
+    /// URI-scoped keys that are staged-only, expected-only, or present with
+    /// unequal content, values truncated. Diagnostic only - it never weakens
+    /// the strict tree-equality requirement it explains (CI18: the added-
+    /// carrier refusal printed no delta, leaving the mismatch undiagnosable).
+    static func xmpTreeDiffSummary(_ staged: [XMPProperty], _ expected: [XMPProperty]) -> String {
+        func keyMap(_ tree: [XMPProperty]) -> [XMPKey: XMPProperty] {
+            var map: [XMPKey: XMPProperty] = [:]
+            for prop in tree { map[prop.key] = prop }
+            return map
+        }
+        let stagedByKey = keyMap(staged)
+        let expectedByKey = keyMap(expected)
+        func summary(_ prop: XMPProperty) -> String {
+            let text: String
+            switch prop.value {
+            case .text(let value): text = value
+            case .uriReference(let value): text = "uri:" + value
+            case .array(let kind, let entries): text = "array(" + kind + ", " + String(entries.count) + ")"
+            case .structure(let fields): text = "struct(" + String(fields.count) + ")"
+            }
+            let truncated = text.count > 48 ? String(text.prefix(48)) + "..." : text
+            let qualifiers = prop.qualifiers.isEmpty ? "" : " (q:\(prop.qualifiers.count))"
+            return "\(prop.key.name) [\(prop.key.uri)] = \(truncated)\(qualifiers)"
+        }
+        var lines: [String] = []
+        for (key, prop) in stagedByKey where expectedByKey[key] == nil {
+            lines.append("staged-only " + summary(prop))
+        }
+        for (key, prop) in expectedByKey where stagedByKey[key] == nil {
+            lines.append("expected-only " + summary(prop))
+        }
+        for (key, prop) in stagedByKey {
+            if let other = expectedByKey[key], !xmpPropertyEqual(prop, other) {
+                lines.append("differs " + summary(prop) + " | expected " + summary(other))
+            }
+        }
+        let sorted = lines.sorted()
+        let capped = sorted.prefix(12).joined(separator: "; ")
+        return sorted.count > 12 ? capped + "; ...(\(sorted.count - 12) more)" : capped
+    }
+
     static func xmpTreeEqual(_ lhs: [XMPProperty], _ rhs: [XMPProperty]) -> Bool {
         xmpFieldMapEqual(lhs, rhs)
     }
@@ -3734,15 +3780,20 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
     /// property must either survive IDENTICALLY in the corrected packet or be
     /// an explicit URI-scoped removal target or planned-set key. RESULT side:
     /// the corrected packet may carry only source properties (possibly
-    /// updated), planned-set keys, or positively verified image-derived
-    /// synthesis; a removal target still present is a violation. Anything
+    /// updated), planned-set keys, positively verified image-derived
+    /// synthesis, or an exact replica (value, qualifiers, subtree) of a
+    /// source-GRAPH property - the graph merges native-carrier content (Exif
+    /// item, GPS properties, pHYs) the source packet never carried (CI18,
+    /// run 41764385119). A removal target still present is a violation and is
+    /// checked before any admission. Anything
     /// unaccounted refuses; an empty corrected packet is the legitimate
     /// full-removal result (empty tree), and an unparseable source packet
     /// refuses because the guard cannot account for it.
     static func xmpGuardViolations(sourcePacket: Data, correctedPacket: Data,
                                    date: Date?, removeDate: Bool,
                                    latitude: Double?, longitude: Double?, removeLocation: Bool,
-                                   pixelWidth: Int?, pixelHeight: Int?) -> [String] {
+                                   pixelWidth: Int?, pixelHeight: Int?,
+                                   sourceGraphPacket: Data?) -> [String] {
         guard let sourceTree = xmpPacketTree(sourcePacket) else {
             return ["source XMP packet uses a shape the guard cannot model"]
         }
@@ -3767,6 +3818,19 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
         for prop in sourceTree { sourceByKey[prop.key] = prop }
         var correctedByKey: [XMPKey: XMPProperty] = [:]
         for prop in correctedTree { correctedByKey[prop.key] = prop }
+        // C1 basis: the source graph's OWN serialization (same serializer as
+        // the corrected packet), parsed into the guard's tree model. A
+        // corrected-packet property absent from the source packet is admitted
+        // only when it reproduces a source-graph property exactly; the graph
+        // merges native-carrier content the source packet never carried. A
+        // graph serialization the guard cannot model refuses - no admission.
+        var sourceGraphByKey: [XMPKey: XMPProperty] = [:]
+        if let sourceGraphPacket = sourceGraphPacket, !sourceGraphPacket.isEmpty {
+            guard let graphTree = xmpPacketTree(sourceGraphPacket) else {
+                return ["source graph XMP serialization failed to parse under the guard"]
+            }
+            for prop in graphTree { sourceGraphByKey[prop.key] = prop }
+        }
         func isVerifiedSynthesis(_ prop: XMPProperty) -> Bool {
             // ImageIO synthesizes pixel dimensions into every rebuilt packet,
             // and a hasXMP marker when it materializes a packet for a source
@@ -3809,6 +3873,14 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
                 continue
             }
             if sourceByKey[key] != nil || (planned.contains(key) && isPlainScalar(prop)) || isVerifiedSynthesis(prop) { continue }
+            if let graphProp = sourceGraphByKey[key] {
+                // Graph-sourced extras need full value/subtree/qualifier
+                // equivalence to the source property; removal targets were
+                // checked above. An altered one refuses.
+                if xmpPropertyEqual(prop, graphProp) { continue }
+                violations.append("corrected XMP packet alters a graph-sourced property: \(key.name) [\(key.uri)]")
+                continue
+            }
             violations.append("corrected XMP packet carries an unplanned property: \(key.name) [\(key.uri)]")
         }
         return violations.sorted()
@@ -3869,6 +3941,16 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
             sourceMetadata = empty
             mutableMetadata = empty
         }
+        // C1 basis for Guard A's graph-sourced admission: the source graph's
+        // own serialization via the same serializer used for the corrected
+        // packet below. nil or empty means no graph admission; content the
+        // guard cannot model refuses inside xmpGuardViolations.
+        let sourceGraphPacket: Data?
+        if let graphData = CGImageMetadataCreateXMPData(sourceMetadata, nil) {
+            sourceGraphPacket = graphData as Data
+        } else {
+            sourceGraphPacket = nil
+        }
         guard applyMetadataPlan(mutableMetadata, date: date, removeDate: removeDate,
                                 latitude: latitude, longitude: longitude, removeLocation: removeLocation,
                                 refusalNote: refusalNote) else {
@@ -3888,7 +3970,8 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
                 let guardViolations = xmpGuardViolations(sourcePacket: sourcePacket, correctedPacket: Data(),
                                                          date: date, removeDate: removeDate,
                                                          latitude: latitude, longitude: longitude, removeLocation: removeLocation,
-                                                         pixelWidth: nil, pixelHeight: nil)
+                                                         pixelWidth: nil, pixelHeight: nil,
+                                                         sourceGraphPacket: sourceGraphPacket)
                 guard guardViolations.isEmpty else {
                     recordRefusal(refusalNote, "corrected XMP failed packet preservation checks [\(guardViolations.joined(separator: ", "))]")
                     return nil
@@ -3924,7 +4007,8 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
                                                      date: date, removeDate: removeDate,
                                                      latitude: latitude, longitude: longitude, removeLocation: removeLocation,
                                                      pixelWidth: (props?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
-                                                     pixelHeight: (props?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue)
+                                                     pixelHeight: (props?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+                                                     sourceGraphPacket: sourceGraphPacket)
             guard guardViolations.isEmpty else {
                 recordRefusal(refusalNote, "corrected XMP failed packet preservation checks [\(guardViolations.joined(separator: ", "))]")
                 return nil
