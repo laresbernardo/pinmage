@@ -50,14 +50,20 @@ struct MetadataWriter {
     /// derive a regenerated GPSDateStamp from (CI run 41746083711: a
     /// copy-write removal left GPSDateStamp in the staged JPEG's Exif even
     /// though the graph never surfaces it).
-    /// xmp:MetadataDate is intentionally NOT a target while the serializer
-    /// regenerates it as the edit timestamp on every write; if evidence shows
-    /// it is not regenerated it must join this set. Location leaves are
-    /// MWG-mapped location names; anything GPS-prefixed is also a target.
+    /// xmp:MetadataDate is a conservative removal target (reviewer ruling):
+    /// the CI13 seeded probe (run 41759634840) found no serialized packet
+    /// for ONE HEIC fixture, but one fixture cannot prove the serializer
+    /// never carries a pre-existing packet value forward on arbitrary
+    /// inputs, so removal strips it from the regenerated packet instead of
+    /// trusting regeneration. A path that regenerates it as the edit
+    /// timestamp mismatches the expected packet and refuses - the
+    /// fail-closed direction. A deterministic known-packet seed/removal
+    /// proof remains open. Location leaves are MWG-mapped location names;
+    /// anything GPS-prefixed is also a target.
     private static let removalDateLeaves: Set<String> = [
         "DateTimeOriginal", "DateTimeDigitized", "DateTime",
         "DateCreated", "CreateDate", "ModifyDate", "created", "GPSDateStamp",
-        "GPSTimeStamp",
+        "GPSTimeStamp", "MetadataDate",
     ]
     private static let removalLocationLeaves: Set<String> = [
         "Location", "City", "SubLocation", "ProvinceState", "State",

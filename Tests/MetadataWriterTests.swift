@@ -1342,9 +1342,12 @@ struct MetadataWriterTests {
         // boolean presence print cannot distinguish serializer regeneration
         // from survival of an old value. The output value is compared
         // against the seed and the write clock: equal to the seed proves
-        // stale survival (the membership question flags back); near the
-        // write clock proves regeneration as the edit timestamp; absent
-        // proves the serializer drops it (no stale carry to remove).
+        // stale survival; near the write clock proves regeneration as the
+        // edit timestamp; absent means only that THIS fixture did not
+        // serialize it - one fixture cannot prove no stale carry on
+        // arbitrary inputs, so xmp:MetadataDate stays a conservative
+        // removal target (removalDateLeaves) until a deterministic
+        // known-packet seed/removal proof exists.
         let staleSeed = "1999-12-31T23:59:59Z"
         try fixtureWithSeededMetadataDate(at: heic, seed: staleSeed)
         printMetadataDateEvidence(heic, label: "fixture", seed: staleSeed)
@@ -1405,6 +1408,52 @@ struct MetadataWriterTests {
         }
         line += ")"
         FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
+
+    /// M18 (reviewer-directed deterministic MetadataDate proof, closing the
+    /// one-fixture HEIC limitation): a PNG spliced with a REAL, valid XMP
+    /// packet carrying a known-stale xmp:MetadataDate gets a date removal.
+    /// The seed is asserted present and graph-parseable BEFORE the write
+    /// (no vacuity), then asserted absent from the output packet bytes and
+    /// the output graph after. Conservative removalDateLeaves membership is
+    /// what strips it; a non-target leaf (xmp:CreatorTool) must survive the
+    /// same rewrite.
+    static func runPNGMetadataDateSeedProbe(root: URL) throws {
+        let staleSeed = "1999-12-31T23:59:59Z"
+        let png = root.appendingPathComponent("m18-metadatadate-seed.png")
+        try fixture(at: png, type: "public.png" as CFString)
+        let packet = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"><rdf:Description rdf:about=\"\" xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmp:CreatorTool=\"PinmageSeedTest\" xmp:MetadataDate=\"\(staleSeed)\"/></rdf:RDF></x:xmpmeta>"
+        var payload = Array("XML:com.adobe.xmp\0".utf8)
+        payload += [0, 0, 0, 0]
+        payload += [UInt8](packet.utf8)
+        try appendPNGChunk(png, type: "iTXt", payload: payload)
+        // Baseline (no vacuity): the seed is really present, byte-carried
+        // and parseable by the runtime's own XMP reader before the write.
+        try require(try xmpPacketString(png)?.contains(staleSeed) == true,
+                    "seeded packet must read back with the stale value")
+        try require(try Data(contentsOf: png).range(of: Data("MetadataDate".utf8)) != nil,
+                    "seeded fixture bytes must carry MetadataDate")
+        guard let seedSource = CGImageSourceCreateWithURL(png as CFURL, nil),
+              let seedGraph = CGImageSourceCopyMetadataAtIndex(seedSource, 0, nil),
+              let seedTag = CGImageMetadataCopyTagWithPath(seedGraph, nil, "xmp:MetadataDate" as CFString) else {
+            throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "seeded packet must parse to a graph carrying xmp:MetadataDate"])
+        }
+        try require(CGImageMetadataTagCopyValue(seedTag) as? String == staleSeed,
+                    "seeded MetadataDate graph value must equal the stale seed")
+        // Removal: conservative membership strips the leaf from the
+        // rewritten carrier.
+        try require(MetadataWriter.updateImageMetadata(sourceURL: png, destinationURL: png, date: nil, removeDate: true,
+                                                       latitude: nil, longitude: nil, removeLocation: false),
+                    "PNG date removal with a seeded MetadataDate carrier must pass")
+        try require(try Data(contentsOf: png).range(of: Data("MetadataDate".utf8)) == nil,
+                    "xmp:MetadataDate must be absent from the output packet bytes after removal")
+        if let outSource = CGImageSourceCreateWithURL(png as CFURL, nil),
+           let outGraph = CGImageSourceCopyMetadataAtIndex(outSource, 0, nil) {
+            try require(CGImageMetadataCopyTagWithPath(outGraph, nil, "xmp:MetadataDate" as CFString) == nil,
+                        "xmp:MetadataDate must be absent from the output graph after removal")
+        }
+        try require(try xmpPacketString(png)?.contains("PinmageSeedTest") == true,
+                    "non-target xmp:CreatorTool must survive the removal rewrite")
     }
 
     /// M18 (B4): 16-bit sources keep native precision through the PNG
@@ -1674,6 +1723,41 @@ struct MetadataWriterTests {
         }
     }
 
+    /// Reviewer-requested XMP carrier evidence: prints the XMP APP1 carrier
+    /// count on the source and on the production staging path's output for
+    /// the given plan, so the F2 boundary class is documented per operation
+    /// (which operations add an XMP carrier to a carrier-less source).
+    static func printXMPCarrierCounts(_ file: URL, date: Date?, removeLocation: Bool, label: String) {
+        let xmpAPP1Prefix = Data("http://ns.adobe.com/xap/1.0/\0".utf8)
+        func carriers(_ data: Data) -> Int {
+            guard let inv = jpegInventory(data) else { return -1 }
+            return inv.filter { $0.0 == "FFE1" && $0.2.starts(with: xmpAPP1Prefix) }.count
+        }
+        do {
+            var line = "M18 probe: \(label) XMP APP1 carriers source = \(carriers(try Data(contentsOf: file)))"
+            let simURL = file.deletingLastPathComponent().appendingPathComponent("\(label)-xmpsim.jpg")
+            if let src = CGImageSourceCreateWithURL(file as CFURL, nil),
+               let dest = CGImageDestinationCreateWithURL(simURL as CFURL, "public.jpeg" as CFString, 1, nil),
+               let meta = CGImageSourceCopyMetadataAtIndex(src, 0, nil).flatMap({ CGImageMetadataCreateMutableCopy($0) }) {
+                _ = MetadataWriter.applyMetadataPlan(meta, date: date, removeDate: false,
+                                                     latitude: nil, longitude: nil, removeLocation: removeLocation)
+                var copyError: Unmanaged<CFError>?
+                let options: [CFString: Any] = [kCGImageDestinationMetadata: meta, kCGImageDestinationMergeMetadata: kCFBooleanFalse as Any]
+                if CGImageDestinationCopyImageSource(dest, src, options as CFDictionary, &copyError),
+                   let simData = try? Data(contentsOf: simURL) {
+                    line += ", staged = \(carriers(simData))"
+                } else {
+                    line += ", staged = simulation-failed"
+                }
+            } else {
+                line += ", staged = simulation-setup-failed"
+            }
+            FileHandle.standardError.write(Data((line + "\n").utf8))
+        } catch {
+            FileHandle.standardError.write(Data("M18 probe: \(label) XMP carrier count error \(error.localizedDescription)\n".utf8))
+        }
+    }
+
     /// M18: lawfully-licensed public camera fixtures (CC BY-SA 4.0,
     /// ianare/exif-py; fetched by CI with pinned SHA-256). Skipped when
     /// PINMAGE_FIXTURES_DIR is unset, enforced when set.
@@ -1708,11 +1792,33 @@ struct MetadataWriterTests {
         fcase("F2") {
             let f2a = try staged("HMD_Nokia_8.3_5G.jpg")
             printStagedExifEvidence(f2a, date: date, label: "F2", filter: "34853")
-            try require(MetadataWriter.updateImageMetadata(sourceURL: f2a, destinationURL: f2a, date: date, removeDate: false,
-                                                           latitude: nil, longitude: nil, removeLocation: false),
-                        "F2 Nokia date set must pass (B2 semantic compare)")
-            try require(MetadataWriter.readExistingCoordinates(from: f2a) != nil, "F2 GPS must survive a date set")
+            printXMPCarrierCounts(f2a, date: date, removeLocation: false, label: "F2a")
+            // CI14 (run 41759992247): the scoped GPS {5,10} admission cleared
+            // the aux-compare layer, but the date SET on this carrier-less
+            // source refuses one layer later at the XMP carrier: ImageIO's
+            // destination adds an XMP APP1, the corrected-packet round trip
+            // alters exif:Flash/exif:ISOSpeedRatings (serializer struct/
+            // array normalization), the expected map stays empty and the
+            // added carrier's tags are unverified. Reviewer verdict:
+            // designed fail-closed boundary, no comparator bug, no Flash/ISO
+            // semantic admission. Codified as an honest must-refuse scoped
+            // to the date SET (the removal boundary is F2b's own evidence);
+            // the reason must name the XMP layer and the original must stay
+            // byte-identical.
+            let before2a = try Data(contentsOf: f2a)
+            let note2a = MetadataWriter.RefusalNote()
+            let ok2a = MetadataWriter.updateImageMetadata(sourceURL: f2a, destinationURL: f2a, date: date, removeDate: false,
+                                                          latitude: nil, longitude: nil, removeLocation: false, refusalNote: note2a)
+            FileHandle.standardError.write(Data("M18 probe: F2a date set outcome = \(ok2a ? "pass" : "refuse: \(note2a.reason ?? "unknown")")\n".utf8))
+            try require(!ok2a && (note2a.reason ?? "").contains("XMP"),
+                        "F2a Nokia date set must refuse at the XMP carrier layer (CI14), got: \(ok2a) \(note2a.reason ?? "none")")
+            try require(try Data(contentsOf: f2a) == before2a, "F2a refused write must leave the original byte-identical")
             let f2b = try staged("HMD_Nokia_8.3_5G.jpg", as: "HMD_Nokia_8.3_5G-b.jpg")
+            printXMPCarrierCounts(f2b, date: nil, removeLocation: true, label: "F2b")
+            // F2b has never executed in CI before this batch: f2a's failure
+            // aborted the shared case in CI10-CI14. The must-pass assertion
+            // below is the pre-existing expectation, kept unchanged per
+            // main; this run produces its first actual outcome evidence.
             try require(MetadataWriter.updateImageMetadata(sourceURL: f2b, destinationURL: f2b, date: nil, removeDate: false,
                                                            latitude: nil, longitude: nil, removeLocation: true),
                         "F2 Nokia removeLocation must pass (B1 whole-IFD exemption)")
@@ -1726,20 +1832,27 @@ struct MetadataWriterTests {
         }
         fcase("F4") {
             let f4 = try staged("Canon_40D.jpg")
-            // CI12 (run 41757482450): the writer refused the Canon set with
-            // 18 "missing or altered" Exif tags across IFD0/Exif/Interop/
-            // GPS/IFD1. Full staged-evidence inventory so the reviewer can
-            // classify dropped-vs-representation-altered per tag.
+            // CI12/CI13 (runs 41757482450/41759634840) classification of the
+            // 18 refused tags: 16 are a whole-file little- to big-endian
+            // Exif flip with numerically equal SHORT/LONG values (274, 296,
+            // 531, 34850, 34855, 37383, 37385, 40961-40963, 41488, 41986,
+            // IFD1 259/296) - a representation widening the reviewer
+            // declined; the rest are genuinely dropped by graph
+            // regeneration: UserComment 37510 (264 zero bytes), the Interop
+            // IFD (tags 1/2) and the version-only GPS IFD (tag 0). Opaque
+            // private payloads are never reattached by design, so the
+            // refusal is the correct verify-or-refuse outcome, asserted by
+            // name. Any silent support change (endian admission or private-
+            // tag reattachment) breaks this case and forces re-review.
             printStagedExifEvidence(f4, date: date, label: "F4")
-            try require(MetadataWriter.updateImageMetadata(sourceURL: f4, destinationURL: f4, date: date, removeDate: false,
-                                                           latitude: nil, longitude: nil, removeLocation: false),
-                        "F4 Canon date set must pass")
-            guard let f4Source = CGImageSourceCreateWithURL(f4 as CFURL, nil),
-                  let f4Props = CGImageSourceCopyPropertiesAtIndex(f4Source, 0, nil) as? [CFString: Any],
-                  let f4Exif = f4Props[kCGImagePropertyExifDictionary] as? [CFString: Any] else {
-                throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "F4 output must read back"])
-            }
-            try require(f4Exif[kCGImagePropertyExifSubsecTimeOriginal] != nil, "F4 SubSecTimeOriginal must survive")
+            let before = try Data(contentsOf: f4)
+            let note = MetadataWriter.RefusalNote()
+            let ok = MetadataWriter.updateImageMetadata(sourceURL: f4, destinationURL: f4, date: date, removeDate: false,
+                                                        latitude: nil, longitude: nil, removeLocation: false, refusalNote: note)
+            let reason = note.reason ?? ""
+            try require(!ok && reason.contains("tag 37510 missing or altered at IFD0>34665"),
+                        "F4 Canon date set must refuse naming the dropped UserComment 37510 (CI12/CI13), got: \(ok) \(reason)")
+            try require(try Data(contentsOf: f4) == before, "F4 refused write must leave the original byte-identical")
         }
         fcase("F6") {
             let f6 = try staged("Tless0.tiff")
@@ -2708,6 +2821,7 @@ struct MetadataWriterTests {
         }
         runProbe("TIFFIPTCRefusal") { try runTIFFIPTCRefusalProbe(root: root) }
         runProbe("HEICEmptyPacket") { try runHEICEmptyPacketProbe(root: root) }
+        runProbe("PNGMetadataDateSeed") { try runPNGMetadataDateSeedProbe(root: root) }
         runProbe("16Bit") { try run16BitProbe(root: root) }
         runProbe("PngSuite") { try runPngSuiteProbe(root: root) }
         runProbe("P3HEIC") { try runP3HEICProbe(root: root) }
