@@ -839,6 +839,20 @@ struct MetadataWriter {
             recordRefusal(refusalNote, "Refusing JPEG \(operation): \(message)\n")
             return false
         }
+        // Guard B parse failures dump the full staged and verified packet
+        // bytes for one-run diagnosis. CI-only: PRESERVATION_ARTIFACT_DIR is
+        // set by the workflow and never by the app, where a refusal stays
+        // the single line above.
+        func dumpGuardBPackets(stagedPacket: Data, expectedPacket: Data?, diagnosis: String) {
+            guard let dir = ProcessInfo.processInfo.environment["PRESERVATION_ARTIFACT_DIR"] else { return }
+            let base = URL(fileURLWithPath: dir)
+            let stamp = "\(operation)-\(UUID().uuidString)"
+            try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+            try? stagedPacket.write(to: base.appendingPathComponent("jpg-guardB-\(stamp)-staged.xmp"))
+            try? expectedPacket?.write(to: base.appendingPathComponent("jpg-guardB-\(stamp)-expected.xmp"))
+            try? ("Guard B parse failure diagnosis: \(diagnosis)\n")
+                .write(to: base.appendingPathComponent("jpg-guardB-\(stamp).txt"), atomically: true, encoding: .utf8)
+        }
         guard let source = jpegSegments(sourceData) else {
             return refuse("source did not parse as JPEG")
         }
@@ -1002,11 +1016,18 @@ struct MetadataWriter {
             guard !expectedPacket.isEmpty else {
                 return refuse("staged XMP packet failed verification: verified packet empty")
             }
-            guard let stagedTree = xmpPacketTree(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))) else {
-                return refuse("staged XMP packet failed verification: staged packet unparseable under the guard [\(xmpPacketPreview(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))))]")
+            let stagedPacket = Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))
+            let stagedParsed = xmpPacketTreeDiagnosed(stagedPacket)
+            guard let stagedTree = stagedParsed.tree else {
+                let diagnosis = stagedParsed.diagnosis ?? "unknown"
+                dumpGuardBPackets(stagedPacket: stagedPacket, expectedPacket: expectedPacket, diagnosis: diagnosis)
+                return refuse("staged XMP packet failed verification: staged packet unparseable under the guard (\(diagnosis)) [\(xmpPacketPreview(stagedPacket))]")
             }
-            guard let expectedTree = xmpPacketTree(expectedPacket) else {
-                return refuse("staged XMP packet failed verification: verified packet unparseable under the guard [\(xmpPacketPreview(expectedPacket))]")
+            let expectedParsed = xmpPacketTreeDiagnosed(expectedPacket)
+            guard let expectedTree = expectedParsed.tree else {
+                let diagnosis = expectedParsed.diagnosis ?? "unknown"
+                dumpGuardBPackets(stagedPacket: stagedPacket, expectedPacket: expectedPacket, diagnosis: "verified packet: \(diagnosis)")
+                return refuse("staged XMP packet failed verification: verified packet unparseable under the guard (\(diagnosis)) [\(xmpPacketPreview(expectedPacket))]")
             }
             guard xmpTreeEqual(stagedTree, expectedTree) else {
                 return refuse("staged XMP packet failed verification [\(xmpTreeDiffSummary(stagedTree, expectedTree))]")
@@ -1030,11 +1051,18 @@ struct MetadataWriter {
             guard !expectedPacket.isEmpty else {
                 return refuse("added XMP APP1 carrier differs from the verified packet: verified packet empty")
             }
-            guard let stagedTree = xmpPacketTree(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))) else {
-                return refuse("added XMP APP1 carrier differs from the verified packet: staged packet unparseable under the guard [\(xmpPacketPreview(Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))))]")
+            let addedPacket = Data(stagedParts.xmp[0].dropFirst(xmpPrefix.count))
+            let addedParsed = xmpPacketTreeDiagnosed(addedPacket)
+            guard let stagedTree = addedParsed.tree else {
+                let diagnosis = addedParsed.diagnosis ?? "unknown"
+                dumpGuardBPackets(stagedPacket: addedPacket, expectedPacket: expectedPacket, diagnosis: diagnosis)
+                return refuse("added XMP APP1 carrier differs from the verified packet: staged packet unparseable under the guard (\(diagnosis)) [\(xmpPacketPreview(addedPacket))]")
             }
-            guard let expectedTree = xmpPacketTree(expectedPacket) else {
-                return refuse("added XMP APP1 carrier differs from the verified packet: verified packet unparseable under the guard [\(xmpPacketPreview(expectedPacket))]")
+            let expectedParsed = xmpPacketTreeDiagnosed(expectedPacket)
+            guard let expectedTree = expectedParsed.tree else {
+                let diagnosis = expectedParsed.diagnosis ?? "unknown"
+                dumpGuardBPackets(stagedPacket: addedPacket, expectedPacket: expectedPacket, diagnosis: "verified packet: \(diagnosis)")
+                return refuse("added XMP APP1 carrier differs from the verified packet: verified packet unparseable under the guard (\(diagnosis)) [\(xmpPacketPreview(expectedPacket))]")
             }
             guard xmpTreeEqual(stagedTree, expectedTree) else {
                 return refuse("added XMP APP1 carrier differs from the verified packet [\(xmpTreeDiffSummary(stagedTree, expectedTree))]")
@@ -3529,18 +3557,37 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
     /// by parser callback; external resolution stays off; resource bounds
     /// apply at parse. Refusal on nil, never a partial tree.
     static func xmpPacketTree(_ packet: Data) -> [XMPProperty]? {
-        guard !packet.isEmpty, packet.count <= 1_000_000,
-              let text = String(data: packet, encoding: .utf8) else { return nil }
-        guard !text.contains("<!DOCTYPE"), !text.contains("<!ENTITY") else { return nil }
+        return xmpPacketTreeDiagnosed(packet).tree
+    }
+
+    /// Diagnosing variant of xmpPacketTree for Guard B refusal evidence: the
+    /// same total parse, plus WHICH stage rejected (byte prerequisites, XML
+    /// parse with line/column, a parser resource bound, or the packet model
+    /// with a bounded shape sketch). The diagnosis is evidence only; it is
+    /// never used for admission.
+    static func xmpPacketTreeDiagnosed(_ packet: Data) -> (tree: [XMPProperty]?, diagnosis: String?) {
+        guard !packet.isEmpty else { return (nil, "empty packet") }
+        guard packet.count <= 1_000_000 else { return (nil, "packet over the size bound") }
+        guard let text = String(data: packet, encoding: .utf8) else { return (nil, "not valid UTF-8") }
+        guard !text.contains("<!DOCTYPE"), !text.contains("<!ENTITY") else { return (nil, "DOCTYPE/ENTITY construct") }
         let parser = XMLParser(data: packet)
         let delegate = XMPPacketParserDelegate()
         parser.delegate = delegate
         parser.shouldProcessNamespaces = true
         parser.shouldReportNamespacePrefixes = true
         parser.shouldResolveExternalEntities = false
-        guard parser.parse(), !delegate.failed, parser.parserError == nil,
-              let root = delegate.root else { return nil }
-        return xmpPacketFromDOM(root)
+        guard parser.parse(), !delegate.failed, parser.parserError == nil else {
+            if let error = parser.parserError as NSError? {
+                return (nil, "XML parse error at line \(parser.lineNumber) col \(parser.columnNumber): \(error.localizedDescription)")
+            }
+            return (nil, "parser resource bound rejected (nodes/depth/text)")
+        }
+        guard let root = delegate.root else { return (nil, "no root element") }
+        guard let tree = xmpPacketFromDOM(root) else {
+            let children = root.children.map { "\($0.name)(children=\($0.children.count))" }.joined(separator: ",")
+            return (nil, "packet model rejected (root=\(root.name), children=[\(children)])")
+        }
+        return (tree, nil)
     }
 
     /// Envelope: one <x:xmpmeta> holding exactly one <rdf:RDF> whose children
@@ -3729,23 +3776,27 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
         guard let text = String(data: packet, encoding: .utf8) else {
             return "bytes=\(packet.count) <non-utf8>"
         }
-        var flat = ""
-        flat.reserveCapacity(min(text.count, 420))
-        for scalar in text.unicodeScalars {
-            if flat.count > 400 { flat += "..."; break }
-            switch scalar {
-            case "\n": flat += "\\n"
-            case "\r": flat += "\\r"
-            case "\t": flat += "\\t"
-            default:
-                if scalar.value < 0x20 || scalar.value == 0x7F {
-                    flat += String(format: "\\x%02X", scalar.value)
-                } else {
-                    flat.unicodeScalars.append(scalar)
+        func escaped(_ slice: Substring) -> String {
+            var flat = ""
+            for scalar in slice.unicodeScalars {
+                switch scalar {
+                case "\n": flat += "\\n"
+                case "\r": flat += "\\r"
+                case "\t": flat += "\\t"
+                default:
+                    if scalar.value < 0x20 || scalar.value == 0x7F {
+                        flat += String(format: "\\x%02X", scalar.value)
+                    } else {
+                        flat.unicodeScalars.append(scalar)
+                    }
                 }
             }
+            return flat
         }
-        return "bytes=\(packet.count) \(flat)"
+        if text.count <= 600 {
+            return "bytes=\(packet.count) \(escaped(text[...]))"
+        }
+        return "bytes=\(packet.count) head=\(escaped(text.prefix(300))) ... tail=\(escaped(text.suffix(200)))"
     }
 
     /// Bounded staged-vs-expected tree diff for Guard B refusal diagnostics:
