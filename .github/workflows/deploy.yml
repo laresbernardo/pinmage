@@ -76,6 +76,19 @@ jobs:
           swiftc PinmageApp/MetadataWriter.swift Tests/MetadataWriterTests.swift -o "$RUNNER_TEMP/metadata-writer-tests"
           "$RUNNER_TEMP/metadata-writer-tests"
 
+      # Visual verification: render the REAL per-item refusal UI (QueueRowView)
+      # with a REAL refused write's error through the actual app sources
+      # (everything except the @main entry) and save actual pixels as
+      # artifacts. Verifies presentation of the real long refusal string at
+      # the real list width; not an app-launch session. See
+      # Tests/RefusalUISnapshot.swift for scope.
+      - name: Snapshot refused-write UI
+        env:
+          PRESERVATION_ARTIFACT_DIR: ${{ runner.temp }}/preservation-artifacts
+        run: |
+          swiftc $(find PinmageApp -name '*.swift' ! -name 'PinmageApp.swift' | sort) Tests/RefusalUISnapshot.swift -o "$RUNNER_TEMP/refusal-ui-snapshot"
+          "$RUNNER_TEMP/refusal-ui-snapshot"
+
       - name: Upload preservation evidence
         if: always()
         uses: actions/upload-artifact@v6
