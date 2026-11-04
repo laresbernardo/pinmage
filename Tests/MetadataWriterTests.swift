@@ -1338,30 +1338,64 @@ struct MetadataWriterTests {
     /// verification item 4) for CI codification.
     static func runHEICEmptyPacketProbe(root: URL) throws {
         let heic = root.appendingPathComponent("m18-empty-packet.heic")
-        try fixture(at: heic, type: "public.heic" as CFString)
+        // Seeded known-stale xmp:MetadataDate (reviewer requirement): a
+        // boolean presence print cannot distinguish serializer regeneration
+        // from survival of an old value. The output value is compared
+        // against the seed and the write clock: equal to the seed proves
+        // stale survival (the membership question flags back); near the
+        // write clock proves regeneration as the edit timestamp; absent
+        // proves the serializer drops it (no stale carry to remove).
+        let staleSeed = "1999-12-31T23:59:59Z"
+        try fixtureWithSeededMetadataDate(at: heic, seed: staleSeed)
+        printMetadataDateEvidence(heic, label: "fixture", seed: staleSeed)
         let date = Date(timeIntervalSince1970: 981173106)
+        let setClock = Date()
         try require(MetadataWriter.updateImageMetadata(sourceURL: heic, destinationURL: heic, date: date, removeDate: false,
                                                        latitude: nil, longitude: nil, removeLocation: false),
                     "HEIC date set must succeed")
-        // Set-side evidence for the xmp:MetadataDate codification rule: the
-        // packet carrying a MetadataDate after a set proves serializer
-        // regeneration as the edit timestamp, so it stays out of the
-        // removal set; its absence would flag the membership question.
-        if let source = CGImageSourceCreateWithURL(heic as CFURL, nil),
-           let metadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil),
-           let xmp = CGImageMetadataCreateXMPData(metadata, nil) {
-            let text = String(data: xmp as Data, encoding: .utf8) ?? ""
-            FileHandle.standardError.write(Data("M18 probe: post-set XMP carries MetadataDate = \(text.contains("MetadataDate"))\n".utf8))
-        }
+        printMetadataDateEvidence(heic, label: "post-set", seed: staleSeed, writeClock: setClock)
+        let removalClock = Date()
         try require(MetadataWriter.updateImageMetadata(sourceURL: heic, destinationURL: heic, date: nil, removeDate: true,
                                                        latitude: nil, longitude: nil, removeLocation: false),
                     "HEIC removal emptying the XMP packet must succeed via the spliced minimal packet (S2)")
-        if let source = CGImageSourceCreateWithURL(heic as CFURL, nil),
-           let metadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil),
-           let xmp = CGImageMetadataCreateXMPData(metadata, nil) {
-            let text = String(data: xmp as Data, encoding: .utf8) ?? ""
-            FileHandle.standardError.write(Data("M18 probe: post-removal XMP carries MetadataDate = \(text.contains("MetadataDate"))\n".utf8))
+        printMetadataDateEvidence(heic, label: "post-removal", seed: staleSeed, writeClock: removalClock)
+    }
+
+    /// Minimal HEIC whose XMP packet carries a known-stale xmp:MetadataDate.
+    static func fixtureWithSeededMetadataDate(at url: URL, seed: String) throws {
+        let context = CGContext(data: nil, width: 8, height: 6, bitsPerComponent: 8,
+                                bytesPerRow: 32, space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 8, height: 6))
+        let image = context.makeImage()!
+        guard let writer = CGImageDestinationCreateWithURL(url as CFURL, "public.heic" as CFString, 1, nil) else {
+            throw NSError(domain: "Fixtures", code: 1)
         }
+        let meta = CGImageMetadataCreateMutable()
+        try require(CGImageMetadataSetValueWithPath(meta, nil, "xmp:MetadataDate" as CFString, seed as CFString),
+                    "seeded MetadataDate write failed")
+        CGImageDestinationAddImage(writer, image, [kCGImageDestinationMetadata: meta] as CFDictionary)
+        try require(CGImageDestinationFinalize(writer), "seeded HEIC finalize failed")
+    }
+
+    /// Prints the actual xmp:MetadataDate value (or "absent") with the seed
+    /// and the write clock, so the regeneration-vs-survival question is
+    /// decidable from the log alone.
+    static func printMetadataDateEvidence(_ url: URL, label: String, seed: String, writeClock: Date? = nil) {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let metadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil) else { return }
+        var value = "absent"
+        if let tag = CGImageMetadataCopyTagWithPath(metadata, nil, "xmp:MetadataDate" as CFString),
+           let v = CGImageMetadataTagCopyValue(tag) as? String {
+            value = v
+        }
+        var line = "M18 probe: \(label) xmp:MetadataDate value = \(value) (seed \(seed)"
+        if let clock = writeClock {
+            line += ", write clock \(ISO8601DateFormatter().string(from: clock))"
+        }
+        line += ")"
+        FileHandle.standardError.write(Data((line + "\n").utf8))
     }
 
     /// M18 (B4): 16-bit sources keep native precision through the PNG
@@ -1432,18 +1466,37 @@ struct MetadataWriterTests {
             try require(ok, "basi2c16 (interlaced) set must pass with the interlace method preserved (CI9 evidence): \(note.reason ?? "no note")")
             let out = try Data(contentsOf: interlaced)
             // PNG signature 8 bytes, then length(4) + type(4); IHDR payload
-            // starts at offset 16, interlace method is payload byte 12.
+            // starts at offset 16: width(4) height(4) bitDepth colorType
+            // compression filter interlace.
             if out.count > 28, [UInt8](out[8..<16]) == [0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52] {
-                FileHandle.standardError.write(Data("M18 probe: basi2c16 output IHDR interlace method = \(out[28])\n".utf8))
+                let ihdr = [UInt8](out[16..<29]).map { String(format: "%02x", $0) }.joined()
+                FileHandle.standardError.write(Data("M18 probe: basi2c16 output IHDR = \(ihdr) (bit depth \(out[24]), interlace \(out[28]))\n".utf8))
             }
+            guard let interlaceSource = CGImageSourceCreateWithURL(interlaced as CFURL, nil),
+                  let interlaceReread = CGImageSourceCreateImageAtIndex(interlaceSource, 0, nil) else {
+                throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "basi2c16 output must decode"])
+            }
+            FileHandle.standardError.write(Data("M18 probe: basi2c16 output reread bitsPerComponent = \(interlaceReread.bitsPerComponent)\n".utf8))
+            try require(interlaceReread.bitsPerComponent == 16, "basi2c16 output must stay 16bpc")
         }
-        for name in ["basn0g16.png", "cdun2c08.png"] {
-            if let f = try staged(name) {
-                let note = MetadataWriter.RefusalNote()
-                let ok = MetadataWriter.updateImageMetadata(sourceURL: f, destinationURL: f, date: date, removeDate: false,
-                                                            latitude: nil, longitude: nil, removeLocation: false, refusalNote: note)
-                FileHandle.standardError.write(Data("M18 probe: \(name) set outcome = \(ok ? "pass" : "refuse: \(note.reason ?? "unknown")")\n".utf8))
-            }
+        // CI10 (run 41754985589) codified outcomes: basn0g16 (16bpc gray)
+        // passes at native precision; cdun2c08 refuses because the re-encode
+        // drops the sBIT chunk and the aux guard names it - both are the
+        // designed behavior, now asserted so any silent change goes red.
+        if let gray16 = try staged("basn0g16.png") {
+            let note = MetadataWriter.RefusalNote()
+            let ok = MetadataWriter.updateImageMetadata(sourceURL: gray16, destinationURL: gray16, date: date, removeDate: false,
+                                                        latitude: nil, longitude: nil, removeLocation: false, refusalNote: note)
+            FileHandle.standardError.write(Data("M18 probe: basn0g16.png set outcome = \(ok ? "pass" : "refuse: \(note.reason ?? "unknown")")\n".utf8))
+            try require(ok, "basn0g16 (16bpc gray) set must pass at native precision (CI10): \(note.reason ?? "no note")")
+        }
+        if let sbit = try staged("cdun2c08.png") {
+            let note = MetadataWriter.RefusalNote()
+            let ok = MetadataWriter.updateImageMetadata(sourceURL: sbit, destinationURL: sbit, date: date, removeDate: false,
+                                                        latitude: nil, longitude: nil, removeLocation: false, refusalNote: note)
+            FileHandle.standardError.write(Data("M18 probe: cdun2c08.png set outcome = \(ok ? "pass" : "refuse: \(note.reason ?? "unknown")")\n".utf8))
+            try require(!ok && (note.reason ?? "").contains("sBIT"),
+                        "cdun2c08 set must refuse naming the dropped sBIT chunk (CI10), got: \(ok) \(note.reason ?? "none")")
         }
     }
 
@@ -1453,9 +1506,15 @@ struct MetadataWriterTests {
     /// reconciliation: bounded to P3, no HDR claim).
     static func runP3HEICProbe(root: URL) throws {
         let p3heic = root.appendingPathComponent("m18-p3.heic")
+        // CI10 (run 41754985589): premultipliedLast made ImageIO emit an
+        // auxiliary alpha hvc1 item (auxl 2->[1]), and the writer's verified
+        // plain-still shape gate refuses multi-hvc1 sources by design. The
+        // probe's subject is the P3 color signal on the supported
+        // single-item shape, so the fixture is opaque (T1 fixture-alignment
+        // precedent: the fixture reflects the supported structure).
         guard let p3 = CGColorSpace(name: CGColorSpace.displayP3),
               let context = CGContext(data: nil, width: 8, height: 6, bitsPerComponent: 8, bytesPerRow: 32,
-                                      space: p3, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+                                      space: p3, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
               let image = context.makeImage(),
               let dest = CGImageDestinationCreateWithURL(p3heic as CFURL, "public.heic" as CFString, 1, nil) else {
             throw NSError(domain: "Fixtures", code: 5, userInfo: [NSLocalizedDescriptionKey: "P3 HEIC fixture creation failed"])
@@ -1562,6 +1621,13 @@ struct MetadataWriterTests {
         let after = try Data(contentsOf: big)
         let inventory = MetadataWriter.heicDiagnosticInventory(source: before, staged: after)
         FileHandle.standardError.write(Data("M18 large-HEIC probe: succeeded = \(ok), reason = \(note.reason ?? "none")\n\(inventory)\n".utf8))
+        // CI10 (run 41754985589): a 98-item grid HEIC whose meta box carries
+        // an idat child refuses with "unknown meta child idat" - the
+        // designed fail-closed boundary (ImageIO restructures idat-carried
+        // items into mdat, so meta byte-exactness is unprovable). Asserted
+        // so any silent support change forces re-review.
+        try require(!ok && (note.reason ?? "").contains("idat"),
+                    "large grid HEIC with idat items must refuse naming the unsupported meta child (CI10), got: \(ok) \(note.reason ?? "none")")
     }
 
     static func main() throws {
