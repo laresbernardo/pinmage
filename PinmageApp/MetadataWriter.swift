@@ -42,8 +42,14 @@ struct MetadataWriter {
     private static let iptcLocationKeys: [String] = ["City", "SubLocation", "ProvinceState", "Country", "CountryPrimaryLocationCode", "CountryPrimaryLocationName", "Location"]
 
     /// XMP leaf names (any namespace) a date/location removal deletes (S7):
-    /// the CI-proven alias set plus dcterms:created ("created") and
-    /// exif:GPSDateStamp ("GPSDateStamp", a capture-date alias).
+    /// the CI-proven alias set plus dcterms:created ("created") and the
+    /// capture-date/time GPS aliases exif:GPSDateStamp ("GPSDateStamp") and
+    /// exif:GPSTimeStamp ("GPSTimeStamp"): the fixture's GPS fix date+time
+    /// would reveal the capture moment the removal was asked to erase, and
+    /// GPSTimeStamp is the only graph-visible carrier a native writer could
+    /// derive a regenerated GPSDateStamp from (CI run 41746083711: a
+    /// copy-write removal left GPSDateStamp in the staged JPEG's Exif even
+    /// though the graph never surfaces it).
     /// xmp:MetadataDate is intentionally NOT a target while the serializer
     /// regenerates it as the edit timestamp on every write; if evidence shows
     /// it is not regenerated it must join this set. Location leaves are
@@ -51,6 +57,7 @@ struct MetadataWriter {
     private static let removalDateLeaves: Set<String> = [
         "DateTimeOriginal", "DateTimeDigitized", "DateTime",
         "DateCreated", "CreateDate", "ModifyDate", "created", "GPSDateStamp",
+        "GPSTimeStamp",
     ]
     private static let removalLocationLeaves: Set<String> = [
         "Location", "City", "SubLocation", "ProvinceState", "State",
@@ -129,13 +136,15 @@ struct MetadataWriter {
         let gpsDict = props[kCGImagePropertyGPSDictionary] as? [CFString: Any]
         let iptcDict = props[kCGImagePropertyIPTCDictionary] as? [CFString: Any]
         if plan.removeDate {
-            let iptcDateSurvivors = iptcDateKeys.filter { iptcDict?[$0 as CFString] != nil }
-            if exif?[kCGImagePropertyExifDateTimeOriginal] != nil
-                || exif?[kCGImagePropertyExifDateTimeDigitized] != nil
-                || tiff?[kCGImagePropertyTIFFDateTime] != nil
-                || gpsDict?[kCGImagePropertyGPSDateStamp] != nil
-                || !iptcDateSurvivors.isEmpty {
-                recordRefusal(refusalNote, "Readback: date still present after removal")
+            var survivors: [String] = []
+            if exif?[kCGImagePropertyExifDateTimeOriginal] != nil { survivors.append("exif:DateTimeOriginal") }
+            if exif?[kCGImagePropertyExifDateTimeDigitized] != nil { survivors.append("exif:DateTimeDigitized") }
+            if tiff?[kCGImagePropertyTIFFDateTime] != nil { survivors.append("tiff:DateTime") }
+            if gpsDict?[kCGImagePropertyGPSDateStamp] != nil { survivors.append("GPSDateStamp") }
+            if gpsDict?[kCGImagePropertyGPSTimeStamp] != nil { survivors.append("GPSTimeStamp") }
+            survivors.append(contentsOf: iptcDateKeys.filter { iptcDict?[$0 as CFString] != nil }.map { "iptc:\($0)" })
+            guard survivors.isEmpty else {
+                recordRefusal(refusalNote, "Readback: date still present after removal [\(survivors.joined(separator: ", "))]")
                 return false
             }
         }
@@ -367,9 +376,10 @@ struct MetadataWriter {
                 var tiffDict = removalDict[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
                 tiffDict.removeValue(forKey: kCGImagePropertyTIFFDateTime)
                 removalDict[kCGImagePropertyTIFFDictionary] = tiffDict
-                // GPSDateStamp is a capture-date alias (S7).
+                // GPSDateStamp/GPSTimeStamp are capture-date aliases (S7).
                 var gpsDict = removalDict[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
                 gpsDict.removeValue(forKey: kCGImagePropertyGPSDateStamp)
+                gpsDict.removeValue(forKey: kCGImagePropertyGPSTimeStamp)
                 removalDict[kCGImagePropertyGPSDictionary] = gpsDict
                 // IPTC date aliases strip from the same shared key set the
                 // readback verifies absent (B3).
@@ -3303,7 +3313,7 @@ static func applyMetadataPlan(_ mutableMetadata: CGMutableImageMetadata, date: D
         if !removeLocation, let sourceGps = source[kCGImagePropertyGPSDictionary] as? [CFString: Any] {
             let outputGps = output[kCGImagePropertyGPSDictionary] as? [CFString: Any] ?? [:]
             for key in sourceGps.keys where outputGps[key] == nil {
-                if removeDate && key == kCGImagePropertyGPSDateStamp { continue }
+                if removeDate && (key == kCGImagePropertyGPSDateStamp || key == kCGImagePropertyGPSTimeStamp) { continue }
                 dropped.append("GPS.\(key)")
             }
         }
