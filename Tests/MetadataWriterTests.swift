@@ -1637,11 +1637,11 @@ struct MetadataWriterTests {
         // TIFF tag-700 surgery: replace and drop, header repointed, bytes sane.
         var tiff700 = Data([0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00])
         tiff700.append(contentsOf: [0x01, 0x00])                 // one entry
-        tiff700.append(contentsOf: [0xBC, 0x01, 0x07, 0x00])     // tag 700, type UNDEFINED
-        tiff700.append(contentsOf: [0x04, 0x00, 0x00, 0x00])     // count 4
+        tiff700.append(contentsOf: [0xBC, 0x02, 0x07, 0x00])     // tag 700 (0x02BC little-endian), type UNDEFINED
+        tiff700.append(contentsOf: [0x05, 0x00, 0x00, 0x00])     // count 5 (>4, so offset-referenced)
         tiff700.append(contentsOf: [0x1A, 0x00, 0x00, 0x00])     // value offset 26
         tiff700.append(contentsOf: [0x00, 0x00, 0x00, 0x00])     // next IFD = 0
-        tiff700.append(contentsOf: [0xAA, 0xBB, 0xCC, 0xDD])     // packet bytes
+        tiff700.append(contentsOf: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE]) // packet bytes
         let packet = Data("<x/>".utf8)
         guard let replaced700 = MetadataWriter.tiffReplacingTag700(tiff700, correctedPacket: packet) else {
             throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "tag700 replace returned nil"])
@@ -1653,14 +1653,24 @@ struct MetadataWriterTests {
             throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "tag700 drop returned nil"])
         }
         try require(dropped700.range(of: Data([0xAA, 0xBB, 0xCC, 0xDD])) == nil, "tag700 drop removes the packet")
-        // JPEG APP13 surgery: insert, replace, malformed refusal.
+        // JPEG APP13 surgery: insert, replace, malformed refusal. The
+        // insert policy fires on the first length-bearing segment past the
+        // APP0/APP1 block; SOS is intercepted before that branch, so the
+        // fixture needs the real-world shape of a DQT between APP0 and SOS
+        // (the writer's documented supported structure, not an assumption
+        // that every JPEG carries one - files that don't are replace-only
+        // or refuse, which the malformed case below covers).
         var jpegBase = Data([0xFF, 0xD8])
         jpegBase.append(contentsOf: [0xFF, 0xE0, 0x00, 0x10])
         jpegBase.append(contentsOf: Data("JFIF\0".utf8) + Data(repeating: 0, count: 9))
+        jpegBase.append(contentsOf: [0xFF, 0xDB, 0x00, 0x43])
+        jpegBase.append(Data(repeating: 0, count: 65))  // Pq/Tq byte + 64 table entries
         jpegBase.append(contentsOf: [0xFF, 0xDA, 0x00, 0x02])
         jpegBase.append(contentsOf: [0x11, 0x22, 0x33])
         jpegBase.append(contentsOf: [0xFF, 0xD9])
-        let irb = Data("Photoshop 3.0\0".utf8) + Data([0x38, 0x42, 0x49, 0x4D, 0x04, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00])
+        // 8BIM + id 0x0406 + empty Pascal name (length byte + pad) + 4-byte
+        // zero size = 12 bytes, a well-formed empty resource.
+        let irb = Data("Photoshop 3.0\0".utf8) + Data([0x38, 0x42, 0x49, 0x4D, 0x04, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
         guard let insertedIRB = MetadataWriter.jpegReplacingAPP13(jpegBase, payload: irb) else {
             throw NSError(domain: "MetadataWriterTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "APP13 insert returned nil"])
         }

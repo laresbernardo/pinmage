@@ -1264,11 +1264,34 @@ struct MetadataWriter {
         guard base + 12 * n + 4 <= b.count else { return nil }
         var entries: [(Int, Data)] = []
         var had700 = false
+        var staleRegions: [(off: Int, len: Int)] = []
         for i in 0..<n {
             let ent = base + 12 * i
             let tag = u16(ent)
             if tag == 700 {
                 had700 = true
+                // The old packet must not survive as readable dead bytes
+                // (S2: corrected or dropped, never carried stale). Record
+                // its region per the TIFF value rules - inline in the
+                // entry's 4-byte field when it fits, else the referenced
+                // payload - for zeroing below.
+                let typeSize: Int
+                switch u16(ent + 2) {
+                case 1, 2, 6, 7: typeSize = 1
+                case 3, 8: typeSize = 2
+                case 4, 9, 11: typeSize = 4
+                case 5, 10, 12: typeSize = 8
+                default: typeSize = 1
+                }
+                let cnt = u32(ent + 4)
+                if cnt * typeSize <= 4 {
+                    staleRegions.append((ent + 8, 4))
+                } else {
+                    let off = u32(ent + 8)
+                    if off < b.count {
+                        staleRegions.append((off, min(cnt * typeSize, b.count - off)))
+                    }
+                }
                 continue
             }
             entries.append((tag, Data(b[ent..<(ent + 12)])))
@@ -1277,6 +1300,9 @@ struct MetadataWriter {
         let newCount = entries.count + (willHave700 ? 1 : 0)
         guard had700 || willHave700 else { return data }
         var out = Data(b)
+        for (off, len) in staleRegions {
+            for j in off..<(off + len) { out[j] = 0 }
+        }
         let newIFD = out.count
         let valueOff = newIFD + 2 + 12 * newCount + 4
         var ifd = Data()
