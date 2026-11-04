@@ -119,11 +119,23 @@ struct RefusalUISnapshot {
         for (label, width) in [("refusal-ui-queue-row", 600.0), ("refusal-ui-queue-row-narrow", 400.0)] {
             let row = QueueRowView(item: item, manager: manager, settings: settings,
                                    selectedIds: .constant([]), onRemove: {}, onEditLocation: {})
-            let hosting = NSHostingView(rootView: row)
+            // Real context: the queue row lives in an inset List over the
+            // content area's .underWindowBackground material (MainView).
+            // A visual-effect material cannot sample a real window in an
+            // offscreen render, so the closest faithful substitute is the
+            // dark under-page color behind the row with the list's row
+            // padding - reported as an approximation, not window chrome.
+            let framed = ZStack {
+                Color(nsColor: .underPageBackgroundColor)
+                row
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 16)
+            }
+            let hosting = NSHostingView(rootView: framed)
             hosting.appearance = NSAppearance(named: .darkAqua)
             hosting.frame = NSRect(x: 0, y: 0, width: width, height: 10)
             let fitting = hosting.fittingSize
-            let size = NSSize(width: width, height: max(fitting.height, 40))
+            let size = NSSize(width: width, height: max(fitting.height, 48))
             hosting.frame = NSRect(origin: .zero, size: size)
             hosting.layoutSubtreeIfNeeded()
             guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
